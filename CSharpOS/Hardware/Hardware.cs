@@ -6,11 +6,11 @@ public class Hardware
     private byte[] registers;
     private Dictionary<RegisterName, int> registerIndex;
     private IOperatingSystem os;
-    public int MemorySize { get; private set; }
+    public int GetMemorySize() { return memory.Length; }
 
-    public int instructionCount;
+    private int instructionCount;
     private int instructionPointer;
-  
+
     private int currentProcessMemoryStart;
     private int currentProcessMemorySize;
     private int currentProcessStackStart;
@@ -18,10 +18,16 @@ public class Hardware
     private int currentProcessInstructionStart;
     private int currentProcessInstructionSize;
 
+    public event EventHandler<InstructionExecutedArgs>? InstructionExecuted;
+    public event EventHandler<MemoryWrittenArgs>? MemoryWritten;
+    public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
+    public event EventHandler<ProgramOutputArgs>? ProgramOutput;
+
+    public Func<int>? InputProvider;
+
     public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os)
     {
         memory = new byte[memorySize];
-        MemorySize = memorySize;
         registers = new byte[registerNames.Length * 4];
         registerIndex = new Dictionary<RegisterName, int>();
         for (int i = 0; i < registerNames.Length; i++)
@@ -34,8 +40,25 @@ public class Hardware
     }
 
     public int GetInstructionPointer() { return instructionPointer; }
-
     public void SetInstructionPointer(int address) { instructionPointer = address; }
+    public int GetProgramBase() { return currentProcessInstructionStart; }
+
+    public void Output(int value)
+    {
+        ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = value });
+    }
+
+    public int ReadInput()
+    {
+        return InputProvider != null ? InputProvider() : 0;
+    }
+
+    public void Halt()
+    {
+        instructionCount = 0;
+        os.HandleHalt(this);
+    }
+
     public byte[] ReadBytes(int address)
     {
         return new byte[] { memory[address], memory[address + 1], memory[address + 2], memory[address + 3] };
@@ -44,6 +67,18 @@ public class Hardware
     public byte[] ReadRegisters()
     {
         return registers;
+    }
+
+    // Reads a full register-file-sized block from memory, used to restore a
+    // saved register state. ReadBytes only returns a 4-byte instruction word.
+    public byte[] ReadRegisterState(int address)
+    {
+        byte[] state = new byte[registers.Length];
+        for (int i = 0; i < state.Length; i++)
+        {
+            state[i] = memory[address + i];
+        }
+        return state;
     }
 
     public void WriteRegisters(byte[] data)
@@ -60,6 +95,7 @@ public class Hardware
         {
             memory[address + i] = data[i];
         }
+        MemoryWritten?.Invoke(this, new MemoryWrittenArgs { Address = address, Data = (byte[])data.Clone() });
     }
 
     public List<MemoryRange> GetCurrentProcessRanges()
@@ -101,12 +137,26 @@ public class Hardware
     public void LoadProcess(Process process, byte[] program)
     {
         WriteBytes(process.ProgramAddress, program);
-        currentProcessInstructionStart = process.ProgramAddress;
-        currentProcessInstructionSize = program.Length;
-        currentProcessMemoryStart = process.ProgramAddress + program.Length;
-        currentProcessMemorySize = process.RequiredMemory;
-        currentProcessStackStart = currentProcessMemoryStart + process.RequiredMemory;
-        currentProcessStackSize = process.RequiredStackSize;
+        SetProcessLayout(process.ProgramAddress, program.Length, process.RequiredMemory, process.RequiredStackSize);
+    }
+
+    // Restores the running process's memory layout so that program-relative
+    // addressing and range freeing operate on the correct process. Program size
+    // is derived from the gap between the program start and its saved register state.
+    public void LoadProcessLayout(Process process)
+    {
+        int programSize = process.RegisterStateAddress - process.ProgramAddress;
+        SetProcessLayout(process.ProgramAddress, programSize, process.RequiredMemory, process.RequiredStackSize);
+    }
+
+    private void SetProcessLayout(int programAddress, int programSize, int requiredMemory, int requiredStackSize)
+    {
+        currentProcessInstructionStart = programAddress;
+        currentProcessInstructionSize = programSize;
+        currentProcessMemoryStart = programAddress + programSize;
+        currentProcessMemorySize = requiredMemory;
+        currentProcessStackStart = currentProcessMemoryStart + requiredMemory;
+        currentProcessStackSize = requiredStackSize;
     }
 
     public int ReadRegisterAt(byte index)
@@ -141,6 +191,8 @@ public class Hardware
 
     public void TrapInvalidInstruction(byte opcode, byte b1, byte b2, byte b3)
     {
+        InvalidInstruction?.Invoke(this, new InvalidInstructionArgs { Opcode = opcode, B1 = b1, B2 = b2, B3 = b3 });
+        instructionCount = 0;
         os.HandleInvalidInstruction(this, opcode, b1, b2, b3);
     }
 
@@ -148,10 +200,13 @@ public class Hardware
     {
         int ip = instructionPointer;
         instructionPointer += 4;
+        byte[] bytes = ReadBytes(ip);
         Instruction.Execute(ip, this);
+        InstructionExecuted?.Invoke(this, new InstructionExecutedArgs { Address = ip, Opcode = bytes[0], B1 = bytes[1], B2 = bytes[2], B3 = bytes[3] });
         instructionCount++;
         if (instructionCount >= 5)
         {
+            instructionCount = 0;
             os.ContextSwitch(this);
         }
     }

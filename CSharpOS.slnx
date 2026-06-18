@@ -1,3 +1,5 @@
 <Solution>
   <Project Path="CSharpOS\CSharpOS.csproj" />
+  <Project Path="CSharpOSConsole\CSharpOSConsole.csproj" />
+  <Project Path="OSTests/OSTests.csproj" Id="953842c1-2d7c-46a5-8108-3ca36ffe15dd" />
 </Solution>

@@ -13,6 +13,9 @@ public abstract class OperatingSystem : IOperatingSystem
     private TextWriter log;
     public bool HasProcesses { get { return activeProcesses.Count > 0 || !pendingProcesses.IsEmpty; } }
 
+    public event EventHandler<ContextSwitchArgs>? ContextSwitched;
+    public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
+
     protected OperatingSystem(List<Trap> traps, TextWriter log)
     {
         this.traps = traps;
@@ -25,7 +28,7 @@ public abstract class OperatingSystem : IOperatingSystem
 
     public void AttachHardware(Hardware hw)
     {
-        availableMemoryRanges = new List<MemoryRange> { new MemoryRange { Start = 0, Size = hw.MemorySize } };
+        availableMemoryRanges = new List<MemoryRange> { new MemoryRange { Start = 0, Size = hw.GetMemorySize() } };
     }
 
     public void LoadProcess(Process process)
@@ -58,6 +61,7 @@ public abstract class OperatingSystem : IOperatingSystem
 
             process.ProgramAddress = allocated.Start;
             process.RegisterStateAddress = allocated.Start + program.Length;
+            process.InstructionPointer = allocated.Start;
             SplitRange(allocated, totalSize);
             hw.LoadProcess(process, program);
             activeProcesses.Add(process);
@@ -86,6 +90,20 @@ public abstract class OperatingSystem : IOperatingSystem
         }
 
         log.WriteLine($"[INVALID INSTRUCTION] Process: {currentProcess?.ProgramFilePath ?? "unknown"} | Reason: {reason} | Instruction: {opcode:X2} {b1:X2} {b2:X2} {b3:X2}");
+        InvalidInstruction?.Invoke(this, new InvalidInstructionArgs { Opcode = opcode, B1 = b1, B2 = b2, B3 = b3, ProcessName = currentProcess?.ProgramFilePath, Reason = reason });
+
+        TerminateCurrentProcess(hw);
+    }
+
+    public void HandleHalt(Hardware hw)
+    {
+        log.WriteLine($"[HALT] Process: {currentProcess?.ProgramFilePath ?? "unknown"}");
+        TerminateCurrentProcess(hw);
+    }
+
+    private void TerminateCurrentProcess(Hardware hw)
+    {
+        string? terminated = currentProcess?.ProgramFilePath;
 
         FreeCurrentProcessMemory(hw);
         activeProcesses.Remove(currentProcess!);
@@ -97,10 +115,12 @@ public abstract class OperatingSystem : IOperatingSystem
         {
             currentProcessIndex = currentProcessIndex % activeProcesses.Count;
             currentProcess = activeProcesses[currentProcessIndex];
-            byte[] savedRegisters = hw.ReadBytes(currentProcess.RegisterStateAddress);
+            hw.LoadProcessLayout(currentProcess);
+            byte[] savedRegisters = hw.ReadRegisterState(currentProcess.RegisterStateAddress);
             hw.WriteRegisters(savedRegisters);
             hw.SetInstructionPointer(currentProcess.InstructionPointer);
-            hw.instructionCount = 0;
+
+            ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = terminated, ToProcess = currentProcess.ProgramFilePath });
         }
     }
 
@@ -147,6 +167,13 @@ public abstract class OperatingSystem : IOperatingSystem
     {
         DrainPendingProcesses(hw);
 
+        if (activeProcesses.Count == 0)
+        {
+            return;
+        }
+
+        string? fromProcess = currentProcess?.ProgramFilePath;
+
         if (currentProcess != null)
         {
             hw.WriteBytes(currentProcess.RegisterStateAddress, hw.ReadRegisters());
@@ -155,10 +182,12 @@ public abstract class OperatingSystem : IOperatingSystem
 
         currentProcessIndex = (currentProcessIndex + 1) % activeProcesses.Count;
         currentProcess = activeProcesses[currentProcessIndex];
+        hw.LoadProcessLayout(currentProcess);
 
-        byte[] savedRegisters = hw.ReadBytes(currentProcess.RegisterStateAddress);
+        byte[] savedRegisters = hw.ReadRegisterState(currentProcess.RegisterStateAddress);
         hw.WriteRegisters(savedRegisters);
         hw.SetInstructionPointer(currentProcess.InstructionPointer);
-        hw.instructionCount = 0;
+
+        ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = fromProcess, ToProcess = currentProcess.ProgramFilePath });
     }
 }
