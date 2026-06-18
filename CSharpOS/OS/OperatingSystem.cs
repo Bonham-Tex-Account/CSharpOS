@@ -1,52 +1,67 @@
+using System.Collections.Concurrent;
+
 namespace CSharpOS;
 
-public class OperatingSystem
+public abstract class OperatingSystem : IOperatingSystem
 {
-    private List<Process> processes;
+    private List<Process> activeProcesses;
+    private ConcurrentQueue<Process> pendingProcesses;
     private Process? currentProcess;
     private int currentProcessIndex;
     private List<Trap> traps;
     private List<MemoryRange> availableMemoryRanges;
     private TextWriter log;
-    public Hardware? Hardware { get; set; }
+    public bool HasProcesses { get { return activeProcesses.Count > 0 || !pendingProcesses.IsEmpty; } }
 
-    public OperatingSystem(List<Trap> traps, TextWriter log)
+    protected OperatingSystem(List<Trap> traps, TextWriter log)
     {
         this.traps = traps;
         this.log = log;
-        processes = new List<Process>();
+        activeProcesses = new List<Process>();
+        pendingProcesses = new ConcurrentQueue<Process>();
         availableMemoryRanges = new List<MemoryRange>();
         currentProcess = null;
     }
 
-    public bool LoadProcess(Process process)
+    public void AttachHardware(Hardware hw)
     {
-        byte[] program = File.ReadAllBytes(process.ProgramFilePath);
-        int totalSize = process.RequiredMemory + process.RequiredStackSize + program.Length;
+        availableMemoryRanges = new List<MemoryRange> { new MemoryRange { Start = 0, Size = hw.MemorySize } };
+    }
 
-        MemoryRange allocated = new MemoryRange { Start = -1, Size = 0 };
-        foreach (MemoryRange range in availableMemoryRanges)
+    public void LoadProcess(Process process)
+    {
+        pendingProcesses.Enqueue(process);
+    }
+
+    private void DrainPendingProcesses(Hardware hw)
+    {
+        while (pendingProcesses.TryDequeue(out Process? process))
         {
-            if (range.Size >= totalSize)
+            byte[] program = File.ReadAllBytes(process.ProgramFilePath);
+            int totalSize = process.RequiredMemory + process.RequiredStackSize + program.Length;
+
+            MemoryRange allocated = new MemoryRange { Start = -1, Size = 0 };
+            foreach (MemoryRange range in availableMemoryRanges)
             {
-                allocated = range;
-                break;
+                if (range.Size >= totalSize)
+                {
+                    allocated = range;
+                    break;
+                }
             }
+
+            if (allocated.Start == -1)
+            {
+                log.WriteLine($"[LOAD FAILED] Not enough memory for process: {process.ProgramFilePath}");
+                continue;
+            }
+
+            process.ProgramAddress = allocated.Start;
+            process.RegisterStateAddress = allocated.Start + program.Length;
+            SplitRange(allocated, totalSize);
+            hw.LoadProcess(process, program);
+            activeProcesses.Add(process);
         }
-
-        if (allocated.Start == -1)
-        {
-            log.WriteLine($"[LOAD FAILED] Not enough memory for process: {process.ProgramFilePath}");
-            return false;
-        }
-
-        process.ProgramAddress = allocated.Start;
-        process.RegisterStateAddress = allocated.Start + program.Length;
-
-        SplitRange(allocated, totalSize);
-        Hardware!.LoadProcess(process, program);
-        processes.Add(process);
-        return true;
     }
 
     private void SplitRange(MemoryRange range, int used)
@@ -73,16 +88,18 @@ public class OperatingSystem
         log.WriteLine($"[INVALID INSTRUCTION] Process: {currentProcess?.ProgramFilePath ?? "unknown"} | Reason: {reason} | Instruction: {opcode:X2} {b1:X2} {b2:X2} {b3:X2}");
 
         FreeCurrentProcessMemory(hw);
-        processes.Remove(currentProcess!);
+        activeProcesses.Remove(currentProcess!);
         currentProcess = null;
 
-        if (processes.Count > 0)
+        DrainPendingProcesses(hw);
+
+        if (activeProcesses.Count > 0)
         {
-            currentProcessIndex = currentProcessIndex % processes.Count;
-            currentProcess = processes[currentProcessIndex];
+            currentProcessIndex = currentProcessIndex % activeProcesses.Count;
+            currentProcess = activeProcesses[currentProcessIndex];
             byte[] savedRegisters = hw.ReadBytes(currentProcess.RegisterStateAddress);
             hw.WriteRegisters(savedRegisters);
-            hw.instructionPointer = currentProcess.InstructionPointer;
+            hw.SetInstructionPointer(currentProcess.InstructionPointer);
             hw.instructionCount = 0;
         }
     }
@@ -126,24 +143,22 @@ public class OperatingSystem
         availableMemoryRanges = merged;
     }
 
-    public void ContextSwitch()
+    public void ContextSwitch(Hardware hw)
     {
+        DrainPendingProcesses(hw);
+
         if (currentProcess != null)
         {
-            // save current process register state and instruction pointer into its reserved memory
-            Hardware!.WriteBytes(currentProcess.RegisterStateAddress, Hardware.ReadRegisters());
-            currentProcess.InstructionPointer = Hardware.instructionPointer;
+            hw.WriteBytes(currentProcess.RegisterStateAddress, hw.ReadRegisters());
+            currentProcess.InstructionPointer = hw.GetInstructionPointer();
         }
 
-        // advance to next process round-robin
-        currentProcessIndex = (currentProcessIndex + 1) % processes.Count;
-        currentProcess = processes[currentProcessIndex];
+        currentProcessIndex = (currentProcessIndex + 1) % activeProcesses.Count;
+        currentProcess = activeProcesses[currentProcessIndex];
 
-        // load next process registers and point hardware to its instructions
-        byte[] savedRegisters = Hardware!.ReadBytes(currentProcess.RegisterStateAddress);
-        Hardware.WriteRegisters(savedRegisters);
-        Hardware.instructionPointer = currentProcess.InstructionPointer;
-
-        Hardware.instructionCount = 0;
+        byte[] savedRegisters = hw.ReadBytes(currentProcess.RegisterStateAddress);
+        hw.WriteRegisters(savedRegisters);
+        hw.SetInstructionPointer(currentProcess.InstructionPointer);
+        hw.instructionCount = 0;
     }
 }

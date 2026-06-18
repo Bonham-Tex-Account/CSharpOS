@@ -36,3 +36,10 @@ Running timeline:
 -while running the processess , they will be context switched based on OS rules and ran until completion
 -will output data about what computer is doing for visualization of what is happening and happened
 -will finish when all processes are run and will "turn off"
+
+
+
+Future fixes:
+
+-make OS use custom instructions stored in the same place as other instructions (priv ISA, defined by Hardware)
+

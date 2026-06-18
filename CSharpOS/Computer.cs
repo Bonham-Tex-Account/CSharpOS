@@ -15,4 +15,22 @@ public class Computer
             os.LoadProcess(process);
         }
     }
+
+    public void LoadProcess(Process process)
+    {
+        os.LoadProcess(process);
+    }
+
+    public void Run()
+    {
+        Thread runThread = new Thread(() =>
+        {
+            while (os.HasProcesses)
+            {
+                hardware.Run();
+            }
+        });
+        runThread.IsBackground = true;
+        runThread.Start();
+    }
 }

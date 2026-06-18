@@ -5,11 +5,12 @@ public class Hardware
     private byte[] memory;
     private byte[] registers;
     private Dictionary<RegisterName, int> registerIndex;
-    private OperatingSystem os;
+    private IOperatingSystem os;
+    public int MemorySize { get; private set; }
 
     public int instructionCount;
-    public int instructionPointer;
-
+    private int instructionPointer;
+  
     private int currentProcessMemoryStart;
     private int currentProcessMemorySize;
     private int currentProcessStackStart;
@@ -17,9 +18,10 @@ public class Hardware
     private int currentProcessInstructionStart;
     private int currentProcessInstructionSize;
 
-    public Hardware(int memorySize, RegisterName[] registerNames, OperatingSystem os)
+    public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os)
     {
         memory = new byte[memorySize];
+        MemorySize = memorySize;
         registers = new byte[registerNames.Length * 4];
         registerIndex = new Dictionary<RegisterName, int>();
         for (int i = 0; i < registerNames.Length; i++)
@@ -28,9 +30,12 @@ public class Hardware
         }
         this.os = os;
         instructionCount = 0;
-        os.Hardware = this;
+        os.AttachHardware(this);
     }
 
+    public int GetInstructionPointer() { return instructionPointer; }
+
+    public void SetInstructionPointer(int address) { instructionPointer = address; }
     public byte[] ReadBytes(int address)
     {
         return new byte[] { memory[address], memory[address + 1], memory[address + 2], memory[address + 3] };
@@ -104,6 +109,36 @@ public class Hardware
         currentProcessStackSize = process.RequiredStackSize;
     }
 
+    public int ReadRegisterAt(byte index)
+    {
+        int offset = index * 4;
+        return registers[offset] | (registers[offset + 1] << 8) | (registers[offset + 2] << 16) | (registers[offset + 3] << 24);
+    }
+
+    public void WriteRegisterAt(byte index, int value)
+    {
+        int offset = index * 4;
+        registers[offset] = (byte)(value & 0xFF);
+        registers[offset + 1] = (byte)((value >> 8) & 0xFF);
+        registers[offset + 2] = (byte)((value >> 16) & 0xFF);
+        registers[offset + 3] = (byte)((value >> 24) & 0xFF);
+    }
+
+    public int ReadRegister(RegisterName name)
+    {
+        int offset = registerIndex[name];
+        return registers[offset] | (registers[offset + 1] << 8) | (registers[offset + 2] << 16) | (registers[offset + 3] << 24);
+    }
+
+    public void WriteRegister(RegisterName name, int value)
+    {
+        int offset = registerIndex[name];
+        registers[offset] = (byte)(value & 0xFF);
+        registers[offset + 1] = (byte)((value >> 8) & 0xFF);
+        registers[offset + 2] = (byte)((value >> 16) & 0xFF);
+        registers[offset + 3] = (byte)((value >> 24) & 0xFF);
+    }
+
     public void TrapInvalidInstruction(byte opcode, byte b1, byte b2, byte b3)
     {
         os.HandleInvalidInstruction(this, opcode, b1, b2, b3);
@@ -111,6 +146,13 @@ public class Hardware
 
     public void Run()
     {
-        // TBD
+        int ip = instructionPointer;
+        instructionPointer += 4;
+        Instruction.Execute(ip, this);
+        instructionCount++;
+        if (instructionCount >= 5)
+        {
+            os.ContextSwitch(this);
+        }
     }
 }
