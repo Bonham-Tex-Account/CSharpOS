@@ -28,6 +28,12 @@ public class Computer
             while (os.HasProcesses)
             {
                 hardware.Run();
+                if (!os.HasRunningProcess)
+                {
+                    // Every process is blocked on I/O; wait briefly for an interrupt
+                    // instead of busy-spinning.
+                    Thread.Sleep(1);
+                }
             }
         });
         runThread.IsBackground = true;

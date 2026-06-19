@@ -69,19 +69,20 @@ public class SyscallTests : IDisposable
     }
 
     [Fact]
-    public void In_InUserMode_TrapsWithoutReadingInput()
+    public void In_InUserMode_Traps()
     {
         FakeOS os = new FakeOS();
         Hardware hw = HardwareWithLayout(os, 0, 4);
-        bool read = false;
-        hw.InputProvider = () => { read = true; return 5; };
+        hw.RaiseInputInterrupt(5); // buffered, but a user-mode IN must trap, not read it
         hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
 
         hw.Run();
 
-        Assert.False(read);
+        // Trapped into the kernel (the kernel handler does the real read); the
+        // user-mode IN did not consume input or block.
         Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.Equal(0, os.BlockCount);
     }
 
     [Fact]
@@ -215,7 +216,8 @@ public class SyscallTests : IDisposable
     private static List<int> RunToCompletion(BasicOS os, Hardware hw, int stepCap)
     {
         List<int> outputs = new List<int>();
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); };
+        // Model an instant output device: signal completion as soon as it delivers.
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
         os.ContextSwitch(hw); // boot: make the first process current
         int steps = 0;
         while (os.HasProcesses && steps < stepCap)
@@ -224,6 +226,16 @@ public class SyscallTests : IDisposable
             steps++;
         }
         return outputs;
+    }
+
+    // Runs a fixed number of ticks (each Run drains interrupts, schedules if idle,
+    // and may execute one instruction), stopping early once all processes finish.
+    private static void RunSteps(BasicOS os, Hardware hw, int steps)
+    {
+        for (int i = 0; i < steps && os.HasProcesses; i++)
+        {
+            hw.Run();
+        }
     }
 
     [Fact]
@@ -250,7 +262,7 @@ public class SyscallTests : IDisposable
 
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
-        hw.InputProvider = () => 55;
+        hw.RaiseInputInterrupt(55); // input available before the read, so it doesn't block
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
         List<int> outputs = RunToCompletion(os, hw, 2000);
@@ -326,6 +338,100 @@ public class SyscallTests : IDisposable
 
         Assert.Contains(100, outputs);
         Assert.Contains(200, outputs);
+        Assert.False(os.HasProcesses);
+    }
+
+    // ---- Blocking I/O (Phase B) -----------------------------------------
+
+    [Fact]
+    public void Input_BlocksUntilInterrupt_ThenDelivers()
+    {
+        // IN EAX; OUT EAX; HLT — with no input, the process blocks; an input
+        // interrupt wakes it and the IN re-runs and delivers the value.
+        Assembler asm = new Assembler();
+        asm.In(RegisterName.EAX);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        List<int> outputs = new List<int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
+
+        os.ContextSwitch(hw);
+        RunSteps(os, hw, 200);
+
+        Assert.False(os.HasRunningProcess); // blocked on input → CPU idle
+        Assert.Empty(outputs);
+        Assert.True(os.HasProcesses);
+
+        hw.RaiseInputInterrupt(42);
+        RunSteps(os, hw, 200);
+
+        Assert.Equal(new List<int> { 42 }, outputs);
+        Assert.False(os.HasProcesses);
+    }
+
+    [Fact]
+    public void BlockedProcess_LetsAnotherRun_ThenWakes()
+    {
+        // P1 reads input (blocks); P2 prints and halts while P1 waits; then an input
+        // interrupt wakes P1, which reads the value, prints it, and finishes.
+        Assembler reader = new Assembler();
+        reader.In(RegisterName.EAX);
+        reader.Out(RegisterName.EAX);
+        reader.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        List<int> outputs = new List<int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64));   // P1
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(7)), 128, 64)); // P2
+
+        os.ContextSwitch(hw);
+        RunSteps(os, hw, 300);
+
+        Assert.Contains(7, outputs);        // P2 ran to completion while P1 blocked
+        Assert.True(os.HasProcesses);       // P1 still around (blocked)
+        Assert.False(os.HasRunningProcess); // idle: P1 blocked, P2 gone
+
+        hw.RaiseInputInterrupt(99);
+        RunSteps(os, hw, 300);
+
+        Assert.Contains(99, outputs);       // P1 woke, read 99, printed it
+        Assert.False(os.HasProcesses);
+    }
+
+    [Fact]
+    public void Output_BlocksWhenDeviceBusy_UntilOutputComplete()
+    {
+        // Two outputs with no completion between them: the first delivers and marks
+        // the device busy; the second blocks until an output-complete interrupt.
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Out(RegisterName.EAX);
+        asm.MovImm(RegisterName.EAX, 2);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        List<int> outputs = new List<int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); }; // no auto-complete
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
+
+        os.ContextSwitch(hw);
+        RunSteps(os, hw, 200);
+
+        Assert.Equal(new List<int> { 1 }, outputs); // first delivered, second blocked
+        Assert.False(os.HasRunningProcess);
+
+        hw.RaiseOutputComplete();
+        RunSteps(os, hw, 200);
+
+        Assert.Equal(new List<int> { 1, 2 }, outputs);
         Assert.False(os.HasProcesses);
     }
 }

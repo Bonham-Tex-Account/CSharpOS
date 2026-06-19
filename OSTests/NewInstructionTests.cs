@@ -185,25 +185,30 @@ public class NewInstructionTests
     }
 
     [Fact]
-    public void In_InKernelMode_ReadsFromInputProviderIntoRegister()
+    public void In_InKernelMode_ReadsBufferedInputIntoRegister()
     {
-        Hardware hw = Build();
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(1024, os);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        hw.InputProvider = () => 77;
+        hw.RaiseInputInterrupt(77);   // delivered to the buffer when Run drains it
+        hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
-        Instruction.Execute(0, hw);
+        hw.Run();
         Assert.Equal(77, hw.ReadRegisterAt(0));
     }
 
     [Fact]
-    public void In_InKernelMode_WithNoProvider_ReadsZero()
+    public void In_InKernelMode_WithNoInput_BlocksTheProcess()
     {
-        Hardware hw = Build();
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(1024, os);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        hw.WriteRegisterAt(0, 5);
+        hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
-        Instruction.Execute(0, hw);
-        Assert.Equal(0, hw.ReadRegisterAt(0));
+        hw.Run();
+        Assert.Equal(1, os.BlockCount);
+        Assert.Equal(WaitReason.Input, os.LastBlockReason);
+        Assert.Equal(0, hw.GetInstructionPointer()); // IP rewound to the IN to re-run on resume
     }
 
     [Fact]

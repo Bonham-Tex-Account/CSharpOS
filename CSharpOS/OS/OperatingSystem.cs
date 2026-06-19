@@ -121,15 +121,9 @@ public abstract class OperatingSystem : IOperatingSystem
 
         if (activeProcesses.Count > 0)
         {
-            currentProcessIndex = currentProcessIndex % activeProcesses.Count;
-            currentProcess = activeProcesses[currentProcessIndex];
-            hw.LoadProcessLayout(currentProcess);
-            byte[] savedRegisters = hw.ReadRegisterState(currentProcess.RegisterStateAddress);
-            hw.WriteRegisters(savedRegisters);
-            hw.SetInstructionPointer(currentProcess.InstructionPointer);
-            RestoreMode(hw, currentProcess);
-
-            ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = terminated, ToProcess = currentProcess.ProgramFilePath });
+            // The removed process's slot now holds the next process, so start the
+            // scan there.
+            SwitchToNextReady(hw, terminated, currentProcessIndex % activeProcesses.Count);
         }
     }
 
@@ -172,34 +166,107 @@ public abstract class OperatingSystem : IOperatingSystem
         availableMemoryRanges = merged;
     }
 
+    public bool HasRunningProcess { get { return currentProcess != null; } }
+
     public void ContextSwitch(Hardware hw)
     {
         DrainPendingProcesses(hw);
 
         if (activeProcesses.Count == 0)
         {
+            currentProcess = null;
             return;
         }
 
         string? fromProcess = currentProcess?.ProgramFilePath;
-
         if (currentProcess != null)
         {
-            hw.WriteBytes(currentProcess.RegisterStateAddress, hw.ReadRegisters());
-            SaveMode(hw, currentProcess);
-            currentProcess.InstructionPointer = hw.GetInstructionPointer();
+            SaveCurrent(hw); // the preempted process stays Ready
         }
 
-        currentProcessIndex = (currentProcessIndex + 1) % activeProcesses.Count;
-        currentProcess = activeProcesses[currentProcessIndex];
-        hw.LoadProcessLayout(currentProcess);
+        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
+    }
 
-        byte[] savedRegisters = hw.ReadRegisterState(currentProcess.RegisterStateAddress);
+    // Marks the running process Blocked on a device and immediately yields the CPU
+    // to the next Ready process (prioritized), or idles if none are Ready.
+    public void BlockCurrentProcess(Hardware hw, WaitReason reason)
+    {
+        if (currentProcess == null)
+        {
+            return;
+        }
+        string? fromProcess = currentProcess.ProgramFilePath;
+        currentProcess.State = ProcessState.Blocked;
+        currentProcess.WaitReason = reason;
+        SaveCurrent(hw); // saves the rewound IP so the I/O instruction re-runs on resume
+        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
+    }
+
+    // A device interrupt fired: make one process waiting on that device Ready again.
+    // Does not preempt the running process.
+    public void Wake(WaitReason reason)
+    {
+        foreach (Process process in activeProcesses)
+        {
+            if (process.State == ProcessState.Blocked && process.WaitReason == reason)
+            {
+                process.State = ProcessState.Ready;
+                process.WaitReason = WaitReason.None;
+                return;
+            }
+        }
+    }
+
+    // Called by the hardware when the CPU is idle (no running process): pick a Ready
+    // process to run, if any has become runnable.
+    public void Schedule(Hardware hw)
+    {
+        if (currentProcess != null)
+        {
+            return;
+        }
+        DrainPendingProcesses(hw);
+        if (activeProcesses.Count == 0)
+        {
+            return;
+        }
+        SwitchToNextReady(hw, null, (currentProcessIndex + 1) % activeProcesses.Count);
+    }
+
+    // Scans up to all processes from startIndex for a Ready one, loads it as current,
+    // and fires ContextSwitched. Sets currentProcess = null when none are Ready (idle).
+    private void SwitchToNextReady(Hardware hw, string? fromProcess, int startIndex)
+    {
+        int count = activeProcesses.Count;
+        for (int i = 0; i < count; i++)
+        {
+            int index = (startIndex + i) % count;
+            if (activeProcesses[index].State == ProcessState.Ready)
+            {
+                currentProcessIndex = index;
+                currentProcess = activeProcesses[index];
+                LoadCurrent(hw);
+                ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = fromProcess, ToProcess = currentProcess.ProgramFilePath });
+                return;
+            }
+        }
+        currentProcess = null;
+    }
+
+    private void SaveCurrent(Hardware hw)
+    {
+        hw.WriteBytes(currentProcess!.RegisterStateAddress, hw.ReadRegisters());
+        SaveMode(hw, currentProcess);
+        currentProcess.InstructionPointer = hw.GetInstructionPointer();
+    }
+
+    private void LoadCurrent(Hardware hw)
+    {
+        hw.LoadProcessLayout(currentProcess!);
+        byte[] savedRegisters = hw.ReadRegisterState(currentProcess!.RegisterStateAddress);
         hw.WriteRegisters(savedRegisters);
         hw.SetInstructionPointer(currentProcess.InstructionPointer);
         RestoreMode(hw, currentProcess);
-
-        ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = fromProcess, ToProcess = currentProcess.ProgramFilePath });
     }
 
     // The privilege level is part of each process's saved state, stored in a

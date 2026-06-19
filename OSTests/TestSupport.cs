@@ -46,6 +46,31 @@ internal sealed class FakeOS : IOperatingSystem
     {
         HaltCount++;
     }
+
+    public int BlockCount;
+    public WaitReason LastBlockReason;
+    public int WakeCount;
+    public WaitReason LastWakeReason;
+
+    // Always "running" so plain hardware tests execute the instruction at the
+    // current IP without needing a scheduler.
+    public bool HasRunningProcess => true;
+
+    public void BlockCurrentProcess(Hardware hw, WaitReason reason)
+    {
+        BlockCount++;
+        LastBlockReason = reason;
+    }
+
+    public void Wake(WaitReason reason)
+    {
+        WakeCount++;
+        LastWakeReason = reason;
+    }
+
+    public void Schedule(Hardware hw)
+    {
+    }
 }
 
 /// <summary>

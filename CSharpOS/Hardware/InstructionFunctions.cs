@@ -158,7 +158,7 @@ internal static class InstructionFunctions
             hw.EnterKernel(Instruction.OUT, b1 * 4);
             return;
         }
-        hw.Output(hw.ReadRegisterAt(b1));
+        hw.KernelOutput(hw.ReadRegisterAt(b1));
     }
 
     // IN is privileged: user mode traps; the kernel performs the real read and
@@ -170,7 +170,7 @@ internal static class InstructionFunctions
             hw.EnterKernel(Instruction.IN, b1 * 4);
             return;
         }
-        hw.WriteRegisterAt(b1, hw.ReadInput());
+        hw.KernelInput(b1);
     }
 
     internal static void Hlt(Hardware hw, byte b1, byte b2, byte b3)

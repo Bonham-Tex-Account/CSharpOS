@@ -73,20 +73,22 @@ public class EdgeCaseTests : IDisposable
     }
 
     [Fact]
-    public void FirstRun_BeforeAnyLoad_LoadsThenContinues()
+    public void FirstRun_BeforeBoot_SchedulesPendingProcess()
     {
-        // Processes are only drained on the first context switch / trap, so the
-        // first Run executes zeroed memory (invalid opcode) before the program
-        // is loaded. Intended: the OS recovers and the pending process loads.
+        // When idle, Run schedules a pending process (drains it and makes it current)
+        // before executing — no explicit boot ContextSwitch is required.
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Hlt();
+
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = Test.NewHardware(1024, os);
-        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16));
-        hw.SetInstructionPointer(0);
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 16, 16));
 
-        hw.Run();
+        hw.Run(); // idle -> Schedule loads the process, then executes its MOV
 
-        // After the first (trapping) Run the pending process should have loaded.
         Assert.True(os.HasProcesses);
+        Assert.True(os.HasRunningProcess);
     }
 
     [Fact]

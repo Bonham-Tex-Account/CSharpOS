@@ -29,7 +29,11 @@ while (true)
     Console.Write("Select: ");
 
     string? choice = Console.ReadLine();
-    switch (choice?.Trim())
+    if (choice == null)
+    {
+        return; // end of input (e.g. piped stdin) — quit instead of looping
+    }
+    switch (choice.Trim())
     {
         case "1":
             Run(new List<string> { counterPath });
@@ -68,14 +72,8 @@ void Run(List<string> programPaths)
     BasicOS os = new BasicOS(Console.Out);
     Hardware hw = new Hardware(MemorySize, registers, os);
 
-    hw.InputProvider = () =>
-    {
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.Write("      ◆ enter a guess: ");
-        Console.ResetColor();
-        string? line = Console.ReadLine();
-        return int.TryParse(line, out int value) ? value : 0;
-    };
+    // Output device: the console transfers instantly, so signal completion right away.
+    hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(); };
 
     ConsoleVisualizer visualizer = new ConsoleVisualizer(hw, os, StepDelayMs);
 
@@ -91,6 +89,26 @@ void Run(List<string> programPaths)
     while (os.HasProcesses)
     {
         hw.Run();
+
+        // The CPU only idles when every (remaining) process is blocked on I/O.
+        // Other Ready processes have already run; now read a value and raise an input
+        // interrupt to wake a waiter. Reading synchronously here is fine — nothing
+        // else can run. (Skip if all processes have finished.)
+        if (os.HasProcesses && !os.HasRunningProcess)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write("      ◆ enter a guess: ");
+            Console.ResetColor();
+            string? line = Console.ReadLine();
+            if (line == null)
+            {
+                break;
+            }
+            if (int.TryParse(line, out int value))
+            {
+                hw.RaiseInputInterrupt(value);
+            }
+        }
     }
 
     Console.WriteLine();

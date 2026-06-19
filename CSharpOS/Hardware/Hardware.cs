@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace CSharpOS;
 
 public class Hardware
@@ -52,7 +54,31 @@ public class Hardware
     public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
     public event EventHandler<ProgramOutputArgs>? ProgramOutput;
 
-    public Func<int>? InputProvider;
+    // I/O devices. Input is buffered values delivered by input interrupts; output
+    // is a single-transfer device that is busy until an output-complete interrupt.
+    // Interrupts are raised out-of-band by the host (thread-safe) and drained by Run.
+    private enum InterruptKind { InputReady, OutputComplete }
+
+    private readonly struct Interrupt
+    {
+        public readonly InterruptKind Kind;
+        public readonly int Value;
+        public Interrupt(InterruptKind kind, int value) { Kind = kind; Value = value; }
+    }
+
+    private readonly Queue<int> inputBuffer = new Queue<int>();
+    private bool outputBusy;
+    private readonly ConcurrentQueue<Interrupt> pendingInterrupts = new ConcurrentQueue<Interrupt>();
+
+    public void RaiseInputInterrupt(int value)
+    {
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.InputReady, value));
+    }
+
+    public void RaiseOutputComplete()
+    {
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.OutputComplete, 0));
+    }
 
     public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os)
     {
@@ -86,9 +112,54 @@ public class Hardware
         ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = value });
     }
 
-    public int ReadInput()
+    // Kernel-mode input: deliver a buffered value, or block the process until an
+    // input interrupt wakes it (then the IN instruction re-runs and succeeds).
+    public void KernelInput(byte register)
     {
-        return InputProvider != null ? InputProvider() : 0;
+        if (inputBuffer.Count == 0)
+        {
+            BlockCurrent(WaitReason.Input);
+            return;
+        }
+        WriteRegisterAt(register, inputBuffer.Dequeue());
+    }
+
+    // Kernel-mode output: deliver if the device is free (marking it busy until an
+    // output-complete interrupt), otherwise block until it frees.
+    public void KernelOutput(int value)
+    {
+        if (outputBusy)
+        {
+            BlockCurrent(WaitReason.Output);
+            return;
+        }
+        Output(value);
+        outputBusy = true;
+    }
+
+    // Rewinds IP to the I/O instruction so it re-runs on resume, then yields.
+    private void BlockCurrent(WaitReason reason)
+    {
+        instructionPointer -= 4;
+        trapTaken = true;
+        os.BlockCurrentProcess(this, reason);
+    }
+
+    private void DrainInterrupts()
+    {
+        while (pendingInterrupts.TryDequeue(out Interrupt interrupt))
+        {
+            if (interrupt.Kind == InterruptKind.InputReady)
+            {
+                inputBuffer.Enqueue(interrupt.Value);
+                os.Wake(WaitReason.Input);
+            }
+            else
+            {
+                outputBusy = false;
+                os.Wake(WaitReason.Output);
+            }
+        }
     }
 
     // HLT is a request to terminate: an atomic OS-level (Privileged) operation.
@@ -324,6 +395,16 @@ public class Hardware
 
     public void Run()
     {
+        DrainInterrupts();
+        if (!os.HasRunningProcess)
+        {
+            os.Schedule(this);
+        }
+        if (!os.HasRunningProcess)
+        {
+            return; // idle: every process is blocked, waiting for an interrupt
+        }
+
         int ip = instructionPointer;
         instructionPointer += 4;
         byte[] bytes = ReadBytes(ip);

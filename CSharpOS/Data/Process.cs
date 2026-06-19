@@ -10,6 +10,8 @@ public class Process
     public int ProgramSize;
     public int RequiredMemory;
     public int RequiredStackSize;
+    public ProcessState State = ProcessState.Ready;
+    public WaitReason WaitReason = WaitReason.None;
 
     public Process(string programFilePath, int requiredMemory, int requiredStackSize)
     {
