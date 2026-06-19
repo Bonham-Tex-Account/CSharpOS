@@ -3,9 +3,11 @@ namespace CSharpOS;
 public class Process
 {
     public int RegisterStateAddress;
+    public int ModeStateAddress;
     public int InstructionPointer;
     public string ProgramFilePath;
     public int ProgramAddress;
+    public int ProgramSize;
     public int RequiredMemory;
     public int RequiredStackSize;
 

@@ -3,6 +3,12 @@ namespace CSharpOS;
 public class Hardware
 {
     const int SchedulerInstructionCount = 10;
+
+    // Fixed per-process kernel stack (scratch space, like a real kernel's
+    // per-thread stack). The kernel section is sized separately to the OS's
+    // kernel image (os.KernelImage), so it scales with the syscall library.
+    public const int KernelStackSize = 64;
+
     private byte[] memory;
     private byte[] registers;
     private Dictionary<RegisterName, int> registerIndex;
@@ -12,12 +18,21 @@ public class Hardware
     private int instructionCount;
     private int instructionPointer;
 
+    // User vs kernel privilege. Boots in user mode; only a trap/SYSCALL flips it
+    // to kernel and IRET flips it back (those instructions arrive in a later pass).
+    // Persisted per process by the OS across context switches.
+    private bool kernelMode;
+
     private int currentProcessMemoryStart;
     private int currentProcessMemorySize;
     private int currentProcessStackStart;
     private int currentProcessStackSize;
+    private int currentProcessKernelStackStart;
+    private int currentProcessKernelStackSize;
     private int currentProcessInstructionStart;
     private int currentProcessInstructionSize;
+    private int currentProcessKernelSectionStart;
+    private int currentProcessKernelSectionSize;
 
     public event EventHandler<InstructionExecutedArgs>? InstructionExecuted;
     public event EventHandler<MemoryWrittenArgs>? MemoryWritten;
@@ -43,6 +58,10 @@ public class Hardware
     public int GetInstructionPointer() { return instructionPointer; }
     public void SetInstructionPointer(int address) { instructionPointer = address; }
     public int GetProgramBase() { return currentProcessInstructionStart; }
+
+    public bool IsKernelMode() { return kernelMode; }
+    public void EnterKernelMode() { kernelMode = true; }
+    public void EnterUserMode() { kernelMode = false; }
 
     public void Output(int value)
     {
@@ -105,7 +124,9 @@ public class Hardware
         {
             new MemoryRange { Start = currentProcessMemoryStart, Size = currentProcessMemorySize },
             new MemoryRange { Start = currentProcessStackStart, Size = currentProcessStackSize },
-            new MemoryRange { Start = currentProcessInstructionStart, Size = currentProcessInstructionSize }
+            new MemoryRange { Start = currentProcessKernelStackStart, Size = currentProcessKernelStackSize },
+            new MemoryRange { Start = currentProcessInstructionStart, Size = currentProcessInstructionSize },
+            new MemoryRange { Start = currentProcessKernelSectionStart, Size = currentProcessKernelSectionSize }
         };
 
         ranges.Sort((MemoryRange a, MemoryRange b) => a.Start.CompareTo(b.Start));
@@ -138,26 +159,58 @@ public class Hardware
     public void LoadProcess(Process process, byte[] program)
     {
         WriteBytes(process.ProgramAddress, program);
+        process.ProgramSize = program.Length;
+        process.ModeStateAddress = process.RegisterStateAddress + registers.Length;
         SetProcessLayout(process.ProgramAddress, program.Length, process.RequiredMemory, process.RequiredStackSize);
+        if (os.KernelImage.Length > 0)
+        {
+            WriteBytes(currentProcessKernelSectionStart, os.KernelImage);
+        }
+        InitializeStackPointer(process);
     }
 
     // Restores the running process's memory layout so that program-relative
-    // addressing and range freeing operate on the correct process. Program size
-    // is derived from the gap between the program start and its saved register state.
+    // addressing and range freeing operate on the correct process.
     public void LoadProcessLayout(Process process)
     {
-        int programSize = process.RegisterStateAddress - process.ProgramAddress;
-        SetProcessLayout(process.ProgramAddress, programSize, process.RequiredMemory, process.RequiredStackSize);
+        SetProcessLayout(process.ProgramAddress, process.ProgramSize, process.RequiredMemory, process.RequiredStackSize);
     }
 
+    // Layout: [program][kernel section][memory][user stack][kernel stack].
+    // The register-state block and the per-process mode slot live at the front
+    // of the memory region (RegisterStateAddress == currentProcessMemoryStart).
     private void SetProcessLayout(int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
         currentProcessInstructionStart = programAddress;
         currentProcessInstructionSize = programSize;
-        currentProcessMemoryStart = programAddress + programSize;
+        currentProcessKernelSectionStart = programAddress + programSize;
+        currentProcessKernelSectionSize = os.KernelImage.Length;
+        currentProcessMemoryStart = currentProcessKernelSectionStart + currentProcessKernelSectionSize;
         currentProcessMemorySize = requiredMemory;
         currentProcessStackStart = currentProcessMemoryStart + requiredMemory;
         currentProcessStackSize = requiredStackSize;
+        currentProcessKernelStackStart = currentProcessStackStart + requiredStackSize;
+        currentProcessKernelStackSize = KernelStackSize;
+    }
+
+    // Seeds ESP to the top of the user stack (it grows down, so CALL's ESP-4
+    // writes the first word inside the region) by writing it into the process's
+    // saved register state, which the first context switch loads into ESP.
+    private void InitializeStackPointer(Process process)
+    {
+        if (!registerIndex.ContainsKey(RegisterName.ESP))
+        {
+            return;
+        }
+        int userStackTop = currentProcessStackStart + currentProcessStackSize;
+        int offset = registerIndex[RegisterName.ESP];
+        WriteBytes(process.RegisterStateAddress + offset, new byte[]
+        {
+            (byte)(userStackTop & 0xFF),
+            (byte)((userStackTop >> 8) & 0xFF),
+            (byte)((userStackTop >> 16) & 0xFF),
+            (byte)((userStackTop >> 24) & 0xFF)
+        });
     }
 
     public int ReadRegisterAt(byte index)
@@ -202,7 +255,13 @@ public class Hardware
         int ip = instructionPointer;
         instructionPointer += 4;
         byte[] bytes = ReadBytes(ip);
-        Instruction.Execute(ip, this);
+        bool executed = Instruction.Execute(ip, this);
+        if (!executed)
+        {
+            // The instruction trapped as invalid; it did not execute, so it is
+            // not reported as executed and does not advance the quantum counter.
+            return;
+        }
         InstructionExecuted?.Invoke(this, new InstructionExecutedArgs { Address = ip, Opcode = bytes[0], B1 = bytes[1], B2 = bytes[2], B3 = bytes[3] });
         instructionCount++;
         if (instructionCount >= SchedulerInstructionCount)

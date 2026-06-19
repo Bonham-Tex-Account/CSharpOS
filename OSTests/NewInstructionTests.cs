@@ -217,7 +217,7 @@ public class NewInstructionTests
         Hardware hw = Build();
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 100;
-        process.RegisterStateAddress = 104; // program size = 4
+        process.ProgramSize = 4;
         hw.LoadProcessLayout(process);
 
         hw.SetInstructionPointer(100);
@@ -226,6 +226,106 @@ public class NewInstructionTests
 
         // target offset 8 is relative to the program base (100).
         Assert.Equal(108, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void Load_IsRelativeToProgramBase()
+    {
+        // LOAD address = programBase + reg[ptr]. With a nonzero base the pointer
+        // register holds a program-relative offset, not an absolute address.
+        Hardware hw = Build();
+        Process process = new Process("ignored", 64, 64);
+        process.ProgramAddress = 100;
+        process.ProgramSize = 4;
+        hw.LoadProcessLayout(process);
+
+        hw.WriteBytes(140, new byte[] { 0x39, 0x05, 0, 0 }); // 1337 at base+40
+        hw.WriteRegisterAt(1, 40);                           // offset
+        hw.WriteBytes(100, Test.Word(Instruction.LOAD, 0, 1, 0));
+        Instruction.Execute(100, hw);
+
+        Assert.Equal(1337, hw.ReadRegisterAt(0));
+    }
+
+    [Fact]
+    public void Store_IsRelativeToProgramBase()
+    {
+        Hardware hw = Build();
+        Process process = new Process("ignored", 64, 64);
+        process.ProgramAddress = 100;
+        process.ProgramSize = 4;
+        hw.LoadProcessLayout(process);
+
+        hw.WriteRegisterAt(1, 40);   // offset -> absolute 140
+        hw.WriteRegisterAt(0, 1337); // value
+        hw.WriteBytes(100, Test.Word(Instruction.STORE, 1, 0, 0));
+        Instruction.Execute(100, hw);
+
+        byte[] stored = hw.ReadBytes(140);
+        int value = stored[0] | (stored[1] << 8) | (stored[2] << 16) | (stored[3] << 24);
+        Assert.Equal(1337, value);
+    }
+
+    [Fact]
+    public void Call_TargetIsRelativeToProgramBase()
+    {
+        Hardware hw = Build();
+        Process process = new Process("ignored", 64, 64);
+        process.ProgramAddress = 100;
+        process.ProgramSize = 4;
+        hw.LoadProcessLayout(process);
+
+        hw.WriteRegister(RegisterName.ESP, 400);
+        hw.SetInstructionPointer(108);
+        hw.WriteBytes(100, Test.Word(Instruction.CALL, 0x00, 0x10, 0)); // offset 16
+        Instruction.Execute(100, hw);
+
+        // target 16 is relative to the program base (100).
+        Assert.Equal(116, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void Jz_TargetIsRelativeToProgramBase()
+    {
+        Hardware hw = Build();
+        Process process = new Process("ignored", 64, 64);
+        process.ProgramAddress = 100;
+        process.ProgramSize = 4;
+        hw.LoadProcessLayout(process);
+
+        hw.WriteRegister(RegisterName.EFLAGS, 1); // zero flag set
+        hw.SetInstructionPointer(100);
+        hw.WriteBytes(100, Test.Word(Instruction.JZ, 0x00, 0x20, 0)); // offset 32
+        Instruction.Execute(100, hw);
+
+        Assert.Equal(132, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void Jnz_TargetIsRelativeToProgramBase()
+    {
+        Hardware hw = Build();
+        Process process = new Process("ignored", 64, 64);
+        process.ProgramAddress = 100;
+        process.ProgramSize = 4;
+        hw.LoadProcessLayout(process);
+
+        hw.WriteRegister(RegisterName.EFLAGS, 0); // zero flag clear
+        hw.SetInstructionPointer(100);
+        hw.WriteBytes(100, Test.Word(Instruction.JNZ, 0x00, 0x20, 0)); // offset 32
+        Instruction.Execute(100, hw);
+
+        Assert.Equal(132, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void MovRegImm_TreatsImmediateAsUnsignedByte()
+    {
+        // The immediate is a single byte (b2). 0xFF should load 255, not -1.
+        Hardware hw = Build();
+        hw.WriteBytes(0, Test.Word(Instruction.MOV_REG_IMM, 0, 0xFF, 0));
+        Instruction.Execute(0, hw);
+        Assert.Equal(255, hw.ReadRegisterAt(0));
     }
 
     [Fact]

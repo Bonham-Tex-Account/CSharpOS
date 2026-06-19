@@ -51,7 +51,8 @@ public static class Instruction
         opcodeTable[HLT]         = InstructionFunctions.Hlt;
     }
 
-    public static void Execute(int address, Hardware hw)
+    // Returns true if a handler ran, false if the opcode was invalid and trapped.
+    public static bool Execute(int address, Hardware hw)
     {
         byte[] bytes = hw.ReadBytes(address);
         byte opcode = bytes[0];
@@ -62,10 +63,12 @@ public static class Instruction
         if (opcodeTable.TryGetValue(opcode, out Action<Hardware, byte, byte, byte>? handler))
         {
             handler(hw, b1, b2, b3);
+            return true;
         }
         else
         {
             hw.TrapInvalidInstruction(opcode, b1, b2, b3);
+            return false;
         }
     }
 }

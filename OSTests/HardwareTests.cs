@@ -161,10 +161,11 @@ public class HardwareTests
 
         List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
 
-        // instruction (4) + memory (16) + stack (16) are contiguous from 0.
+        // program (4) + kernel section (128) + memory (16) + user stack (16) +
+        // kernel stack (64) are contiguous from 0.
         Assert.Single(ranges);
         Assert.Equal(0, ranges[0].Start);
-        Assert.Equal(36, ranges[0].Size);
+        Assert.Equal(4 + os.KernelImage.Length + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
     }
 
     [Fact]
@@ -244,5 +245,138 @@ public class HardwareTests
         hw.Run();
         Assert.True(os.InvalidInstructionCalled);
         Assert.Equal(0xFF, os.LastOpcode);
+    }
+
+    [Fact]
+    public void Run_ContextSwitchesEveryQuantum_ResettingTheCounter()
+    {
+        // After a context switch the instruction counter must reset, so a second
+        // full quantum (10 more instructions) triggers a second switch at 20.
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(512, os);
+        for (int address = 0; address < 80; address += 4)
+        {
+            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
+        }
+        hw.SetInstructionPointer(0);
+
+        for (int i = 0; i < 20; i++)
+        {
+            hw.Run();
+        }
+
+        Assert.Equal(2, os.ContextSwitchCount);
+    }
+
+    [Fact]
+    public void Run_InvalidInstruction_ResetsQuantumCounter()
+    {
+        // A trap resets the instruction counter (instructionCount = 0). With an
+        // invalid opcode as the 5th instruction, the counter restarts mid-quantum,
+        // so the context switch is pushed past the usual 10th instruction.
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(512, os);
+        for (int address = 0; address < 80; address += 4)
+        {
+            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
+        }
+        hw.WriteBytes(16, Test.Word(0xFF, 0, 0, 0)); // 5th instruction is invalid
+        hw.SetInstructionPointer(0);
+
+        for (int i = 0; i < 10; i++)
+        {
+            hw.Run();
+        }
+        // Without the reset the 10th instruction would have switched; the trap at
+        // instruction 5 reset the counter, so no switch has happened yet.
+        Assert.Equal(0, os.ContextSwitchCount);
+
+        for (int i = 0; i < 5; i++)
+        {
+            hw.Run();
+        }
+        // The trap (run 5) reset the counter and did not itself count, so the ten
+        // counted instructions complete on run 15.
+        Assert.Equal(1, os.ContextSwitchCount);
+    }
+
+    [Fact]
+    public void Constructor_BootsInUserMode()
+    {
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(512, os);
+        Assert.False(hw.IsKernelMode());
+    }
+
+    [Fact]
+    public void EnterKernelMode_ThenEnterUserMode_TogglesPrivilege()
+    {
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(512, os);
+        hw.EnterKernelMode();
+        Assert.True(hw.IsKernelMode());
+        hw.EnterUserMode();
+        Assert.False(hw.IsKernelMode());
+    }
+
+    [Fact]
+    public void LoadProcess_SeedsStackPointerToTopOfUserStack()
+    {
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(1024, os);
+        Process process = new Process("ignored", 16, 16);
+        process.ProgramAddress = 0;
+        // Mimic the OS: register state begins after the program + kernel section.
+        process.RegisterStateAddress = 4 + os.KernelImage.Length;
+        byte[] program = new byte[] { 0, 0, 0, 0 };
+        hw.LoadProcess(process, program);
+
+        // ESP is seeded into the saved register state; load it into the registers
+        // as a context switch would, then read it back.
+        byte[] savedState = hw.ReadRegisterState(process.RegisterStateAddress);
+        hw.WriteRegisters(savedState);
+
+        int expectedTop = 4 + os.KernelImage.Length + process.RequiredMemory + process.RequiredStackSize;
+        Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
+    }
+
+    [Fact]
+    public void GetCurrentProcessRanges_IncludesKernelStackInTotal()
+    {
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(1024, os);
+        Process process = new Process("ignored", 16, 16);
+        process.ProgramAddress = 0;
+        process.RegisterStateAddress = 4 + os.KernelImage.Length;
+        hw.LoadProcess(process, new byte[] { 0, 0, 0, 0 });
+
+        List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
+
+        // The reserved kernel stack (64) is part of the process's footprint.
+        Assert.Single(ranges);
+        Assert.Equal(4 + os.KernelImage.Length + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
+    }
+
+    [Fact]
+    public void Halt_ResetsQuantumCounter()
+    {
+        // Halt sets instructionCount back to 0; subsequent runs start a fresh
+        // quantum rather than carrying the pre-halt count toward a switch.
+        FakeOS os = new FakeOS();
+        Hardware hw = Test.NewHardware(512, os);
+        for (int address = 0; address < 80; address += 4)
+        {
+            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
+        }
+        hw.WriteBytes(16, Test.Word(Instruction.HLT, 0, 0, 0)); // 5th instruction halts
+        hw.SetInstructionPointer(0);
+
+        for (int i = 0; i < 10; i++)
+        {
+            hw.Run();
+        }
+
+        Assert.Equal(0, os.ContextSwitchCount);
+        Assert.Equal(1, os.HaltCount);
     }
 }

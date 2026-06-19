@@ -53,7 +53,8 @@ public class OperatingSystemTests : IDisposable
         os.ContextSwitch(hw);
 
         Assert.Equal(0, process.ProgramAddress);
-        Assert.Equal(program.Length, process.RegisterStateAddress);
+        // Register state sits after the program and the reserved kernel section.
+        Assert.Equal(program.Length + os.KernelImage.Length, process.RegisterStateAddress);
     }
 
     [Fact]
@@ -69,9 +70,11 @@ public class OperatingSystemTests : IDisposable
 
         os.ContextSwitch(hw);
 
-        // total per process = program(4) + memory(16) + stack(16) = 36
+        // total per process = program(4) + kernel section(128) + memory(16) +
+        // user stack(16) + kernel stack(64)
+        int perProcess = 4 + os.KernelImage.Length + 16 + 16 + Hardware.KernelStackSize;
         Assert.Equal(0, first.ProgramAddress);
-        Assert.Equal(36, second.ProgramAddress);
+        Assert.Equal(perProcess, second.ProgramAddress);
     }
 
     [Fact]
@@ -89,6 +92,79 @@ public class OperatingSystemTests : IDisposable
         os.ContextSwitch(hw);
 
         Assert.Contains("[LOAD FAILED]", log.ToString());
+    }
+
+    [Fact]
+    public void LoadedProcess_HasStackPointerInitializedToUserStackTop()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = Test.NewHardware(1024, os);
+        byte[] program = new byte[] { 0, 0, 0, 0 };
+        Process process = new Process(CreateProgramFile(program), 16, 16);
+        os.LoadProcess(process);
+
+        // The first context switch drains the pending process and loads its saved
+        // register state (including the seeded ESP) into the registers.
+        os.ContextSwitch(hw);
+
+        int expectedTop = program.Length + os.KernelImage.Length + process.RequiredMemory + process.RequiredStackSize;
+        Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
+    }
+
+    [Fact]
+    public void KernelImage_SizesAndFillsTheKernelSection()
+    {
+        // The kernel section scales with the OS's kernel image, and the image is
+        // copied into each process's kernel section (right after the program).
+        byte[] image = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44 };
+        KernelImageOS os = new KernelImageOS(new StringWriter(), image);
+        Hardware hw = Test.NewHardware(1024, os);
+        byte[] program = new byte[] { 0, 0, 0, 0 };
+        Process process = new Process(CreateProgramFile(program), 16, 16);
+        os.LoadProcess(process);
+
+        os.ContextSwitch(hw);
+
+        // Register state sits after the program + the kernel section (= image length).
+        Assert.Equal(program.Length + image.Length, process.RegisterStateAddress);
+        // The image bytes occupy the kernel section, just past the program.
+        int sectionStart = process.ProgramAddress + program.Length;
+        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD }, hw.ReadBytes(sectionStart));
+        Assert.Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 }, hw.ReadBytes(sectionStart + 4));
+    }
+
+    [Fact]
+    public void NewlyLoadedProcess_StartsInUserMode()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = Test.NewHardware(1024, os);
+        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16));
+
+        os.ContextSwitch(hw);
+
+        Assert.False(hw.IsKernelMode());
+    }
+
+    [Fact]
+    public void ContextSwitch_SavesAndRestoresPerProcessMode()
+    {
+        // Mode is per-process state saved in process memory. If one process is in
+        // kernel mode when switched out, that mode must be restored when it next runs.
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = Test.NewHardware(1024, os);
+        Process first = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
+        Process second = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
+        os.LoadProcess(first);
+        os.LoadProcess(second);
+
+        os.ContextSwitch(hw);   // second becomes current (user mode)
+        hw.EnterKernelMode();   // simulate the current process entering the kernel
+
+        os.ContextSwitch(hw);   // first becomes current; its saved mode is user
+        Assert.False(hw.IsKernelMode());
+
+        os.ContextSwitch(hw);   // second again; its kernel mode must be restored
+        Assert.True(hw.IsKernelMode());
     }
 
     [Fact]

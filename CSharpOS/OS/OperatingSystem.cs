@@ -16,6 +16,10 @@ public abstract class OperatingSystem : IOperatingSystem
     public event EventHandler<ContextSwitchArgs>? ContextSwitched;
     public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
 
+    // Syscall functions shipped by this OS, copied into each process's kernel
+    // section. Empty until the SYSCALL pass; subclasses override to add syscalls.
+    public virtual byte[] KernelImage => Array.Empty<byte>();
+
     protected OperatingSystem(List<Trap> traps, TextWriter log)
     {
         this.traps = traps;
@@ -41,7 +45,8 @@ public abstract class OperatingSystem : IOperatingSystem
         while (pendingProcesses.TryDequeue(out Process? process))
         {
             byte[] program = File.ReadAllBytes(process.ProgramFilePath);
-            int totalSize = process.RequiredMemory + process.RequiredStackSize + program.Length;
+            int kernelSectionSize = KernelImage.Length;
+            int totalSize = program.Length + kernelSectionSize + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
             MemoryRange allocated = new MemoryRange { Start = -1, Size = 0 };
             foreach (MemoryRange range in availableMemoryRanges)
@@ -60,7 +65,9 @@ public abstract class OperatingSystem : IOperatingSystem
             }
 
             process.ProgramAddress = allocated.Start;
-            process.RegisterStateAddress = allocated.Start + program.Length;
+            // The register state lives at the start of the memory region, which sits
+            // after the program and the reserved kernel section.
+            process.RegisterStateAddress = allocated.Start + program.Length + kernelSectionSize;
             process.InstructionPointer = allocated.Start;
             SplitRange(allocated, totalSize);
             hw.LoadProcess(process, program);
@@ -119,6 +126,7 @@ public abstract class OperatingSystem : IOperatingSystem
             byte[] savedRegisters = hw.ReadRegisterState(currentProcess.RegisterStateAddress);
             hw.WriteRegisters(savedRegisters);
             hw.SetInstructionPointer(currentProcess.InstructionPointer);
+            RestoreMode(hw, currentProcess);
 
             ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = terminated, ToProcess = currentProcess.ProgramFilePath });
         }
@@ -177,6 +185,7 @@ public abstract class OperatingSystem : IOperatingSystem
         if (currentProcess != null)
         {
             hw.WriteBytes(currentProcess.RegisterStateAddress, hw.ReadRegisters());
+            SaveMode(hw, currentProcess);
             currentProcess.InstructionPointer = hw.GetInstructionPointer();
         }
 
@@ -187,7 +196,28 @@ public abstract class OperatingSystem : IOperatingSystem
         byte[] savedRegisters = hw.ReadRegisterState(currentProcess.RegisterStateAddress);
         hw.WriteRegisters(savedRegisters);
         hw.SetInstructionPointer(currentProcess.InstructionPointer);
+        RestoreMode(hw, currentProcess);
 
         ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = fromProcess, ToProcess = currentProcess.ProgramFilePath });
+    }
+
+    // The user/kernel mode bit is part of each process's saved state, stored in a
+    // reserved slot in its protected area so it survives context switches.
+    private void SaveMode(Hardware hw, Process process)
+    {
+        hw.WriteBytes(process.ModeStateAddress, new byte[] { (byte)(hw.IsKernelMode() ? 1 : 0), 0, 0, 0 });
+    }
+
+    private void RestoreMode(Hardware hw, Process process)
+    {
+        byte[] mode = hw.ReadBytes(process.ModeStateAddress);
+        if (mode[0] != 0)
+        {
+            hw.EnterKernelMode();
+        }
+        else
+        {
+            hw.EnterUserMode();
+        }
     }
 }
