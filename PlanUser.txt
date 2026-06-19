@@ -42,4 +42,4 @@ Running timeline:
 Future fixes:
 
 -make OS use custom instructions stored in the same place as other instructions (priv ISA, defined by Hardware)
-
+-make I/O and other systemcall instructions to use a proper kernel and user stack  

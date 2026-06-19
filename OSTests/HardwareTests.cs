@@ -214,17 +214,17 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Run_TriggersContextSwitchOnFifthInstruction()
+    public void Run_TriggersContextSwitchOnTenthInstruction()
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
-        for (int address = 0; address <= 16; address += 4)
+        for (int address = 0; address <= 36; address += 4)
         {
             hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
         }
         hw.SetInstructionPointer(0);
 
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 9; i++)
         {
             hw.Run();
         }

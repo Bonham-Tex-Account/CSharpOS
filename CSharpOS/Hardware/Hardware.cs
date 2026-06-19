@@ -2,6 +2,7 @@ namespace CSharpOS;
 
 public class Hardware
 {
+    const int SchedulerInstructionCount = 10;
     private byte[] memory;
     private byte[] registers;
     private Dictionary<RegisterName, int> registerIndex;
@@ -204,7 +205,7 @@ public class Hardware
         Instruction.Execute(ip, this);
         InstructionExecuted?.Invoke(this, new InstructionExecutedArgs { Address = ip, Opcode = bytes[0], B1 = bytes[1], B2 = bytes[2], B3 = bytes[3] });
         instructionCount++;
-        if (instructionCount >= 5)
+        if (instructionCount >= SchedulerInstructionCount)
         {
             instructionCount = 0;
             os.ContextSwitch(this);
