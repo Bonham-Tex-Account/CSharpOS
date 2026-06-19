@@ -165,7 +165,7 @@ public class HardwareTests
         // kernel stack (64) are contiguous from 0.
         Assert.Single(ranges);
         Assert.Equal(0, ranges[0].Start);
-        Assert.Equal(4 + os.KernelImage.Length + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
+        Assert.Equal(4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
     }
 
     [Fact]
@@ -269,11 +269,12 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Run_InvalidInstruction_ResetsQuantumCounter()
+    public void Run_InvalidInstruction_RaisesPrivilegeAndSuppressesPreemption()
     {
-        // A trap resets the instruction counter (instructionCount = 0). With an
-        // invalid opcode as the 5th instruction, the counter restarts mid-quantum,
-        // so the context switch is pushed past the usual 10th instruction.
+        // An invalid opcode is an atomic OS-level termination: it raises to
+        // Privileged (so the quantum stops preempting) and is reported to the OS.
+        // FakeOS does not tear the process down, so the machine simply stops
+        // switching — a real OS would terminate and switch.
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
         for (int address = 0; address < 80; address += 4)
@@ -283,21 +284,14 @@ public class HardwareTests
         hw.WriteBytes(16, Test.Word(0xFF, 0, 0, 0)); // 5th instruction is invalid
         hw.SetInstructionPointer(0);
 
-        for (int i = 0; i < 10; i++)
+        for (int i = 0; i < 15; i++)
         {
             hw.Run();
         }
-        // Without the reset the 10th instruction would have switched; the trap at
-        // instruction 5 reset the counter, so no switch has happened yet.
-        Assert.Equal(0, os.ContextSwitchCount);
 
-        for (int i = 0; i < 5; i++)
-        {
-            hw.Run();
-        }
-        // The trap (run 5) reset the counter and did not itself count, so the ten
-        // counted instructions complete on run 15.
-        Assert.Equal(1, os.ContextSwitchCount);
+        Assert.True(os.InvalidInstructionCalled);
+        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(0, os.ContextSwitchCount);
     }
 
     [Fact]
@@ -305,18 +299,20 @@ public class HardwareTests
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
-        Assert.False(hw.IsKernelMode());
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
 
     [Fact]
-    public void EnterKernelMode_ThenEnterUserMode_TogglesPrivilege()
+    public void SetPrivilegeLevel_RoundTrips()
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
-        hw.EnterKernelMode();
-        Assert.True(hw.IsKernelMode());
-        hw.EnterUserMode();
-        Assert.False(hw.IsKernelMode());
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        hw.SetPrivilegeLevel(PrivilegeLevel.User);
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
 
     [Fact]
@@ -327,7 +323,7 @@ public class HardwareTests
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
         // Mimic the OS: register state begins after the program + kernel section.
-        process.RegisterStateAddress = 4 + os.KernelImage.Length;
+        process.RegisterStateAddress = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length);
         byte[] program = new byte[] { 0, 0, 0, 0 };
         hw.LoadProcess(process, program);
 
@@ -336,7 +332,7 @@ public class HardwareTests
         byte[] savedState = hw.ReadRegisterState(process.RegisterStateAddress);
         hw.WriteRegisters(savedState);
 
-        int expectedTop = 4 + os.KernelImage.Length + process.RequiredMemory + process.RequiredStackSize;
+        int expectedTop = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + process.RequiredMemory + process.RequiredStackSize;
         Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
     }
 
@@ -347,14 +343,14 @@ public class HardwareTests
         Hardware hw = Test.NewHardware(1024, os);
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
-        process.RegisterStateAddress = 4 + os.KernelImage.Length;
+        process.RegisterStateAddress = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length);
         hw.LoadProcess(process, new byte[] { 0, 0, 0, 0 });
 
         List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
 
         // The reserved kernel stack (64) is part of the process's footprint.
         Assert.Single(ranges);
-        Assert.Equal(4 + os.KernelImage.Length + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
+        Assert.Equal(4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
     }
 
     [Fact]

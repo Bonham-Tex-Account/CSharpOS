@@ -117,6 +117,7 @@ public sealed class ConsoleVisualizer
             case Instruction.OUT:         return $"OUT {R(e.B1)}";
             case Instruction.IN:          return $"IN {R(e.B1)}";
             case Instruction.HLT:         return "HLT";
+            case Instruction.IRET:        return "IRET";
             default:                      return $"??? {e.Opcode:X2}";
         }
     }

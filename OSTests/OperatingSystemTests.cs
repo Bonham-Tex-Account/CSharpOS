@@ -54,7 +54,7 @@ public class OperatingSystemTests : IDisposable
 
         Assert.Equal(0, process.ProgramAddress);
         // Register state sits after the program and the reserved kernel section.
-        Assert.Equal(program.Length + os.KernelImage.Length, process.RegisterStateAddress);
+        Assert.Equal(program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length), process.RegisterStateAddress);
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public class OperatingSystemTests : IDisposable
 
         // total per process = program(4) + kernel section(128) + memory(16) +
         // user stack(16) + kernel stack(64)
-        int perProcess = 4 + os.KernelImage.Length + 16 + 16 + Hardware.KernelStackSize;
+        int perProcess = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + 16 + 16 + Hardware.KernelStackSize;
         Assert.Equal(0, first.ProgramAddress);
         Assert.Equal(perProcess, second.ProgramAddress);
     }
@@ -107,7 +107,7 @@ public class OperatingSystemTests : IDisposable
         // register state (including the seeded ESP) into the registers.
         os.ContextSwitch(hw);
 
-        int expectedTop = program.Length + os.KernelImage.Length + process.RequiredMemory + process.RequiredStackSize;
+        int expectedTop = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length) + process.RequiredMemory + process.RequiredStackSize;
         Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
     }
 
@@ -125,12 +125,12 @@ public class OperatingSystemTests : IDisposable
 
         os.ContextSwitch(hw);
 
-        // Register state sits after the program + the kernel section (= image length).
-        Assert.Equal(program.Length + image.Length, process.RegisterStateAddress);
-        // The image bytes occupy the kernel section, just past the program.
-        int sectionStart = process.ProgramAddress + program.Length;
-        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD }, hw.ReadBytes(sectionStart));
-        Assert.Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 }, hw.ReadBytes(sectionStart + 4));
+        // Register state sits after the program + the kernel section (header + image).
+        Assert.Equal(program.Length + Hardware.KernelHeaderSize + image.Length, process.RegisterStateAddress);
+        // The image bytes occupy the kernel section, past the program and the header.
+        int imageStart = process.ProgramAddress + program.Length + Hardware.KernelHeaderSize;
+        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD }, hw.ReadBytes(imageStart));
+        Assert.Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 }, hw.ReadBytes(imageStart + 4));
     }
 
     [Fact]
@@ -142,14 +142,14 @@ public class OperatingSystemTests : IDisposable
 
         os.ContextSwitch(hw);
 
-        Assert.False(hw.IsKernelMode());
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
 
     [Fact]
-    public void ContextSwitch_SavesAndRestoresPerProcessMode()
+    public void ContextSwitch_SavesAndRestoresPerProcessPrivilegeLevel()
     {
-        // Mode is per-process state saved in process memory. If one process is in
-        // kernel mode when switched out, that mode must be restored when it next runs.
+        // The level is per-process state saved in process memory. If one process is
+        // in kernel mode when switched out, that level must be restored when it runs.
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = Test.NewHardware(1024, os);
         Process first = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
@@ -158,13 +158,13 @@ public class OperatingSystemTests : IDisposable
         os.LoadProcess(second);
 
         os.ContextSwitch(hw);   // second becomes current (user mode)
-        hw.EnterKernelMode();   // simulate the current process entering the kernel
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);   // simulate entering the kernel
 
-        os.ContextSwitch(hw);   // first becomes current; its saved mode is user
-        Assert.False(hw.IsKernelMode());
+        os.ContextSwitch(hw);   // first becomes current; its saved level is user
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
 
-        os.ContextSwitch(hw);   // second again; its kernel mode must be restored
-        Assert.True(hw.IsKernelMode());
+        os.ContextSwitch(hw);   // second again; its kernel level must be restored
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
     }
 
     [Fact]

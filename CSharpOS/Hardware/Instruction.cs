@@ -23,6 +23,7 @@ public static class Instruction
     public const byte OUT         = 0x30;
     public const byte IN          = 0x31;
     public const byte HLT         = 0x32;
+    public const byte IRET        = 0x33;
 
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
@@ -49,6 +50,7 @@ public static class Instruction
         opcodeTable[OUT]         = InstructionFunctions.Out;
         opcodeTable[IN]          = InstructionFunctions.In;
         opcodeTable[HLT]         = InstructionFunctions.Hlt;
+        opcodeTable[IRET]        = InstructionFunctions.Iret;
     }
 
     // Returns true if a handler ran, false if the opcode was invalid and trapped.

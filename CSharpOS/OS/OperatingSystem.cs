@@ -45,7 +45,8 @@ public abstract class OperatingSystem : IOperatingSystem
         while (pendingProcesses.TryDequeue(out Process? process))
         {
             byte[] program = File.ReadAllBytes(process.ProgramFilePath);
-            int kernelSectionSize = KernelImage.Length;
+            // The kernel section is the hardware-reserved header plus the kernel image.
+            int kernelSectionSize = Hardware.KernelHeaderSize + KernelImage.Length;
             int totalSize = program.Length + kernelSectionSize + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
             MemoryRange allocated = new MemoryRange { Start = -1, Size = 0 };
@@ -201,23 +202,17 @@ public abstract class OperatingSystem : IOperatingSystem
         ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = fromProcess, ToProcess = currentProcess.ProgramFilePath });
     }
 
-    // The user/kernel mode bit is part of each process's saved state, stored in a
-    // reserved slot in its protected area so it survives context switches.
+    // The privilege level is part of each process's saved state, stored in a
+    // reserved slot in its protected area so it survives context switches (a
+    // process preempted mid-syscall resumes at the same level).
     private void SaveMode(Hardware hw, Process process)
     {
-        hw.WriteBytes(process.ModeStateAddress, new byte[] { (byte)(hw.IsKernelMode() ? 1 : 0), 0, 0, 0 });
+        hw.WriteBytes(process.ModeStateAddress, new byte[] { (byte)hw.GetPrivilegeLevel(), 0, 0, 0 });
     }
 
     private void RestoreMode(Hardware hw, Process process)
     {
         byte[] mode = hw.ReadBytes(process.ModeStateAddress);
-        if (mode[0] != 0)
-        {
-            hw.EnterKernelMode();
-        }
-        else
-        {
-            hw.EnterUserMode();
-        }
+        hw.SetPrivilegeLevel((PrivilegeLevel)mode[0]);
     }
 }

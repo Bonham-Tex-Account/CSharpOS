@@ -9,6 +9,15 @@ public class Hardware
     // kernel image (os.KernelImage), so it scales with the syscall library.
     public const int KernelStackSize = 64;
 
+    // Kernel section header reserved by hardware, ahead of the kernel code:
+    //   [0..63]  saved user register file (on a syscall trap)
+    //   [64..]   trap-info: faulting opcode, operand byte-offset, return IP
+    // The kernel image (code) is loaded at KernelHeaderSize and assembled with
+    // that origin so its labels are section-relative. Assumes ≤16 registers.
+    public const int KernelSaveAreaOffset = 0;
+    public const int KernelTrapInfoOffset = 64;
+    public const int KernelHeaderSize = 80;
+
     private byte[] memory;
     private byte[] registers;
     private Dictionary<RegisterName, int> registerIndex;
@@ -18,10 +27,14 @@ public class Hardware
     private int instructionCount;
     private int instructionPointer;
 
-    // User vs kernel privilege. Boots in user mode; only a trap/SYSCALL flips it
-    // to kernel and IRET flips it back (those instructions arrive in a later pass).
-    // Persisted per process by the OS across context switches.
-    private bool kernelMode;
+    // Current privilege level. Boots in User. An I/O trap raises it to Kernel
+    // (IRET lowers it); termination raises it to Privileged. Persisted per process
+    // by the OS across context switches.
+    private PrivilegeLevel level;
+
+    // Set by a trap (EnterKernel / Halt / TrapInvalidInstruction) so Run does not
+    // also report the faulting instruction as executed or tick the quantum.
+    private bool trapTaken;
 
     private int currentProcessMemoryStart;
     private int currentProcessMemorySize;
@@ -57,11 +70,16 @@ public class Hardware
 
     public int GetInstructionPointer() { return instructionPointer; }
     public void SetInstructionPointer(int address) { instructionPointer = address; }
-    public int GetProgramBase() { return currentProcessInstructionStart; }
 
-    public bool IsKernelMode() { return kernelMode; }
-    public void EnterKernelMode() { kernelMode = true; }
-    public void EnterUserMode() { kernelMode = false; }
+    // Program-relative addressing follows the privilege level: kernel code runs
+    // relative to the kernel section, user code relative to its program image.
+    public int GetProgramBase()
+    {
+        return level == PrivilegeLevel.User ? currentProcessInstructionStart : currentProcessKernelSectionStart;
+    }
+
+    public PrivilegeLevel GetPrivilegeLevel() { return level; }
+    public void SetPrivilegeLevel(PrivilegeLevel value) { level = value; }
 
     public void Output(int value)
     {
@@ -73,10 +91,57 @@ public class Hardware
         return InputProvider != null ? InputProvider() : 0;
     }
 
+    // HLT is a request to terminate: an atomic OS-level (Privileged) operation.
     public void Halt()
     {
+        level = PrivilegeLevel.Privileged;
         instructionCount = 0;
+        trapTaken = true;
         os.HandleHalt(this);
+    }
+
+    // An I/O instruction executed in user mode traps into the kernel: the user
+    // register file is saved into the kernel section, trap-info is recorded, and
+    // control jumps to the kernel entry running on the process's kernel stack.
+    public void EnterKernel(byte opcode, int operandByteOffset)
+    {
+        int kernelBase = currentProcessKernelSectionStart;
+        WriteBytes(kernelBase + KernelSaveAreaOffset, (byte[])registers.Clone());
+        WriteWord(kernelBase + KernelTrapInfoOffset, opcode);
+        WriteWord(kernelBase + KernelTrapInfoOffset + 4, operandByteOffset);
+        WriteWord(kernelBase + KernelTrapInfoOffset + 8, instructionPointer);
+        level = PrivilegeLevel.Kernel;
+        WriteRegister(RegisterName.ESP, currentProcessKernelStackStart + currentProcessKernelStackSize);
+        instructionPointer = kernelBase + KernelHeaderSize;
+        trapTaken = true;
+    }
+
+    // Returns from a kernel-mode syscall handler to the interrupted user code,
+    // restoring the saved register file (incl. any IN result written to it).
+    public void Iret()
+    {
+        int kernelBase = currentProcessKernelSectionStart;
+        int returnIp = ReadWord(kernelBase + KernelTrapInfoOffset + 8);
+        WriteRegisters(ReadRegisterState(kernelBase + KernelSaveAreaOffset));
+        level = PrivilegeLevel.User;
+        instructionPointer = returnIp;
+    }
+
+    private void WriteWord(int address, int value)
+    {
+        WriteBytes(address, new byte[]
+        {
+            (byte)(value & 0xFF),
+            (byte)((value >> 8) & 0xFF),
+            (byte)((value >> 16) & 0xFF),
+            (byte)((value >> 24) & 0xFF)
+        });
+    }
+
+    private int ReadWord(int address)
+    {
+        byte[] bytes = ReadBytes(address);
+        return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
     }
 
     public byte[] ReadBytes(int address)
@@ -164,7 +229,7 @@ public class Hardware
         SetProcessLayout(process.ProgramAddress, program.Length, process.RequiredMemory, process.RequiredStackSize);
         if (os.KernelImage.Length > 0)
         {
-            WriteBytes(currentProcessKernelSectionStart, os.KernelImage);
+            WriteBytes(currentProcessKernelSectionStart + KernelHeaderSize, os.KernelImage);
         }
         InitializeStackPointer(process);
     }
@@ -177,14 +242,16 @@ public class Hardware
     }
 
     // Layout: [program][kernel section][memory][user stack][kernel stack].
-    // The register-state block and the per-process mode slot live at the front
-    // of the memory region (RegisterStateAddress == currentProcessMemoryStart).
+    // The kernel section is a hardware-reserved header (save area + trap-info)
+    // followed by the OS kernel image. The register-state block and per-process
+    // mode slot live at the front of the memory region (RegisterStateAddress ==
+    // currentProcessMemoryStart).
     private void SetProcessLayout(int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
         currentProcessInstructionStart = programAddress;
         currentProcessInstructionSize = programSize;
         currentProcessKernelSectionStart = programAddress + programSize;
-        currentProcessKernelSectionSize = os.KernelImage.Length;
+        currentProcessKernelSectionSize = KernelHeaderSize + os.KernelImage.Length;
         currentProcessMemoryStart = currentProcessKernelSectionStart + currentProcessKernelSectionSize;
         currentProcessMemorySize = requiredMemory;
         currentProcessStackStart = currentProcessMemoryStart + requiredMemory;
@@ -243,10 +310,15 @@ public class Hardware
         registers[offset + 3] = (byte)((value >> 24) & 0xFF);
     }
 
+    // An invalid opcode is a fault that terminates the process: an atomic OS-level
+    // (Privileged) operation, like HLT. (No re-trap into the kernel — this is the
+    // teardown path, not a syscall.)
     public void TrapInvalidInstruction(byte opcode, byte b1, byte b2, byte b3)
     {
+        level = PrivilegeLevel.Privileged;
         InvalidInstruction?.Invoke(this, new InvalidInstructionArgs { Opcode = opcode, B1 = b1, B2 = b2, B3 = b3 });
         instructionCount = 0;
+        trapTaken = true;
         os.HandleInvalidInstruction(this, opcode, b1, b2, b3);
     }
 
@@ -256,15 +328,17 @@ public class Hardware
         instructionPointer += 4;
         byte[] bytes = ReadBytes(ip);
         bool executed = Instruction.Execute(ip, this);
-        if (!executed)
+        if (!executed || trapTaken)
         {
-            // The instruction trapped as invalid; it did not execute, so it is
-            // not reported as executed and does not advance the quantum counter.
+            // The instruction trapped (invalid opcode, syscall, or termination): it
+            // is not reported as executed and does not advance the quantum counter.
+            trapTaken = false;
             return;
         }
         InstructionExecuted?.Invoke(this, new InstructionExecutedArgs { Address = ip, Opcode = bytes[0], B1 = bytes[1], B2 = bytes[2], B3 = bytes[3] });
         instructionCount++;
-        if (instructionCount >= SchedulerInstructionCount)
+        // User and kernel code are preemptible; privileged OS primitives are atomic.
+        if (level != PrivilegeLevel.Privileged && instructionCount >= SchedulerInstructionCount)
         {
             instructionCount = 0;
             os.ContextSwitch(this);

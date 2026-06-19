@@ -169,10 +169,13 @@ public class NewInstructionTests
         Assert.Equal(12, hw.GetInstructionPointer());
     }
 
+    // IN/OUT are privileged: they perform the real device op only in kernel mode
+    // (in user mode they trap — covered in SyscallTests).
     [Fact]
-    public void Out_FiresProgramOutputWithRegisterValue()
+    public void Out_InKernelMode_FiresProgramOutputWithRegisterValue()
     {
         Hardware hw = Build();
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         int captured = -1;
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { captured = e.Value; };
         hw.WriteRegisterAt(0, 99);
@@ -182,9 +185,10 @@ public class NewInstructionTests
     }
 
     [Fact]
-    public void In_ReadsFromInputProviderIntoRegister()
+    public void In_InKernelMode_ReadsFromInputProviderIntoRegister()
     {
         Hardware hw = Build();
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         hw.InputProvider = () => 77;
         hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
         Instruction.Execute(0, hw);
@@ -192,9 +196,10 @@ public class NewInstructionTests
     }
 
     [Fact]
-    public void In_WithNoProvider_ReadsZero()
+    public void In_InKernelMode_WithNoProvider_ReadsZero()
     {
         Hardware hw = Build();
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         hw.WriteRegisterAt(0, 5);
         hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
         Instruction.Execute(0, hw);

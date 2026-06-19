@@ -148,19 +148,39 @@ internal static class InstructionFunctions
         hw.SetInstructionPointer(returnAddress);
     }
 
+    // OUT is privileged: in user mode it traps into the kernel (which performs the
+    // real device write in kernel mode); the operand byte-offset locates the user's
+    // value in the saved register file.
     internal static void Out(Hardware hw, byte b1, byte b2, byte b3)
     {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.EnterKernel(Instruction.OUT, b1 * 4);
+            return;
+        }
         hw.Output(hw.ReadRegisterAt(b1));
     }
 
+    // IN is privileged: user mode traps; the kernel performs the real read and
+    // writes the result into the operand's saved-register slot for IRET to deliver.
     internal static void In(Hardware hw, byte b1, byte b2, byte b3)
     {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.EnterKernel(Instruction.IN, b1 * 4);
+            return;
+        }
         hw.WriteRegisterAt(b1, hw.ReadInput());
     }
 
     internal static void Hlt(Hardware hw, byte b1, byte b2, byte b3)
     {
         hw.Halt();
+    }
+
+    internal static void Iret(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.Iret();
     }
 
     private static void UpdateFlags(Hardware hw, int result)

@@ -1,11 +1,11 @@
-using CSharpOS;
-
-namespace CSharpOSConsole;
+namespace CSharpOS;
 
 /// <summary>
 /// Tiny assembler for the CSharpOS instruction set. Supports labels for jumps
 /// and a data section appended after the code. All addresses are program-relative
-/// (the CPU adds the program base at execution time).
+/// (the CPU adds the program base at execution time); pass an origin to Build to
+/// shift label offsets when the code is loaded at a fixed offset (e.g. the kernel
+/// section, whose code begins after a reserved header).
 /// </summary>
 public sealed class Assembler
 {
@@ -147,6 +147,11 @@ public sealed class Assembler
         Emit(Instruction.HLT, 0, 0, 0);
     }
 
+    public void Iret()
+    {
+        Emit(Instruction.IRET, 0, 0, 0);
+    }
+
     // Reserves a 4-byte zero-initialized slot in the data section.
     public void DataInt(string name)
     {
@@ -160,7 +165,9 @@ public sealed class Assembler
         fixups.Add(new Fixup { Position = position, Label = label, Imm8 = false });
     }
 
-    public byte[] Build()
+    // origin is added to every resolved label offset, so code assembled here can be
+    // loaded at a non-zero offset within its program/section and still self-reference.
+    public byte[] Build(int origin = 0)
     {
         foreach (string name in dataLabels)
         {
@@ -173,10 +180,12 @@ public sealed class Assembler
 
         foreach (Fixup fixup in fixups)
         {
-            if (!labels.TryGetValue(fixup.Label, out int target))
+            if (!labels.TryGetValue(fixup.Label, out int position))
             {
                 throw new InvalidOperationException($"Undefined label: {fixup.Label}");
             }
+
+            int target = origin + position;
 
             if (fixup.Imm8)
             {
