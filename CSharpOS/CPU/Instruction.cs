@@ -5,6 +5,10 @@ public static class Instruction
     // ---- public constants (opcodes) --------------------------------------
     public const byte MOV_REG_REG = 0x01;
     public const byte MOV_REG_IMM = 0x02;
+    // 16-bit immediate (b2 = high byte, b3 = low byte) for addresses/offsets that
+    // exceed the 8-bit range of MOV_REG_IMM. Used heavily by OS ISA code, whose
+    // memory offsets (process table, data section) run well past 255.
+    public const byte MOV_REG_IMM16 = 0x03;
     public const byte LOAD        = 0x05;
     public const byte STORE       = 0x06;
     public const byte ADD         = 0x10;
@@ -26,6 +30,15 @@ public static class Instruction
     public const byte HLT         = 0x32;
     public const byte IRET        = 0x33;
 
+    // ---- privileged OS-support opcodes ------------------------------------
+    // Used by OS ISA code running in Privileged mode to save/restore a process's
+    // full register file, refresh the hardware memory layout from a process-table
+    // entry, and return to a process at a chosen privilege level.
+    public const byte SAVEREGS    = 0x40;
+    public const byte LOADREGS    = 0x41;
+    public const byte SETLAYOUT   = 0x42;
+    public const byte OSRET       = 0x43;
+
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
@@ -34,6 +47,7 @@ public static class Instruction
     {
         opcodeTable[MOV_REG_REG] = InstructionFunctions.MovRegReg;
         opcodeTable[MOV_REG_IMM] = InstructionFunctions.MovRegImm;
+        opcodeTable[MOV_REG_IMM16] = InstructionFunctions.MovRegImm16;
         opcodeTable[LOAD]        = InstructionFunctions.Load;
         opcodeTable[STORE]       = InstructionFunctions.Store;
         opcodeTable[ADD]         = InstructionFunctions.Add;
@@ -54,6 +68,10 @@ public static class Instruction
         opcodeTable[IN]          = InstructionFunctions.In;
         opcodeTable[HLT]         = InstructionFunctions.Hlt;
         opcodeTable[IRET]        = InstructionFunctions.Iret;
+        opcodeTable[SAVEREGS]    = InstructionFunctions.SaveRegs;
+        opcodeTable[LOADREGS]    = InstructionFunctions.LoadRegs;
+        opcodeTable[SETLAYOUT]   = InstructionFunctions.SetLayout;
+        opcodeTable[OSRET]       = InstructionFunctions.OsRet;
     }
 
     // ---- integral functions ----------------------------------------------

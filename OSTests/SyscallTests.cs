@@ -96,7 +96,7 @@ public class SyscallTests : IDisposable
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Assert.Equal(108, hw.GetProgramBase());                 // kernel section (after program)
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        Assert.Equal(108, hw.GetProgramBase());                 // non-user => kernel section
+        Assert.Equal(0, hw.GetProgramBase());                   // privileged OS code => absolute
     }
 
     // ---- Trap entry / IRET mechanism -------------------------------------
@@ -162,45 +162,9 @@ public class SyscallTests : IDisposable
 
     // ---- Preemption ------------------------------------------------------
 
-    [Fact]
-    public void Run_KernelLevel_IsPreemptible()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        for (int address = 0; address < 40; address += 4)
-        {
-            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
-        }
-        hw.SetInstructionPointer(0);
-
-        for (int i = 0; i < 10; i++)
-        {
-            hw.Run();
-        }
-
-        Assert.Equal(1, os.ContextSwitchCount);
-    }
-
-    [Fact]
-    public void Run_PrivilegedLevel_IsNotPreempted()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        for (int address = 0; address < 40; address += 4)
-        {
-            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
-        }
-        hw.SetInstructionPointer(0);
-
-        for (int i = 0; i < 10; i++)
-        {
-            hw.Run();
-        }
-
-        Assert.Equal(0, os.ContextSwitchCount);
-    }
+    // Quantum preemption of kernel-mode code is exercised end-to-end by
+    // TwoProcesses_EachUseIoSyscalls_AcrossKernelPreemption (the kernel I/O handler
+    // is longer than one quantum, so it is preempted and resumed).
 
     // ---- End-to-end through BasicOS's kernel image -----------------------
 
@@ -218,7 +182,6 @@ public class SyscallTests : IDisposable
         List<int> outputs = new List<int>();
         // Model an instant output device: signal completion as soon as it delivers.
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
-        os.ContextSwitch(hw); // boot: make the first process current
         int steps = 0;
         while (os.HasProcesses && steps < stepCap)
         {
@@ -303,7 +266,6 @@ public class SyscallTests : IDisposable
         RunToCompletion(os, hw, 2000);
 
         Assert.False(os.HasProcesses);
-        Assert.Contains("[HALT]", log.ToString());
     }
 
     [Fact]
@@ -313,7 +275,7 @@ public class SyscallTests : IDisposable
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
         InvalidInstructionArgs? captured = null;
-        os.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
+        hw.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
         os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0xFF, 0, 0, 0 }), 128, 64));
 
         RunToCompletion(os, hw, 2000);
@@ -359,15 +321,14 @@ public class SyscallTests : IDisposable
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
-        os.ContextSwitch(hw);
-        RunSteps(os, hw, 200);
+        RunSteps(os, hw, 8000);
 
         Assert.False(os.HasRunningProcess); // blocked on input → CPU idle
         Assert.Empty(outputs);
         Assert.True(os.HasProcesses);
 
         hw.RaiseInputInterrupt(42);
-        RunSteps(os, hw, 200);
+        RunSteps(os, hw, 8000);
 
         Assert.Equal(new List<int> { 42 }, outputs);
         Assert.False(os.HasProcesses);
@@ -390,15 +351,14 @@ public class SyscallTests : IDisposable
         os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64));   // P1
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(7)), 128, 64)); // P2
 
-        os.ContextSwitch(hw);
-        RunSteps(os, hw, 300);
+        RunSteps(os, hw, 8000);
 
         Assert.Contains(7, outputs);        // P2 ran to completion while P1 blocked
         Assert.True(os.HasProcesses);       // P1 still around (blocked)
         Assert.False(os.HasRunningProcess); // idle: P1 blocked, P2 gone
 
         hw.RaiseInputInterrupt(99);
-        RunSteps(os, hw, 300);
+        RunSteps(os, hw, 8000);
 
         Assert.Contains(99, outputs);       // P1 woke, read 99, printed it
         Assert.False(os.HasProcesses);
@@ -422,14 +382,13 @@ public class SyscallTests : IDisposable
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); }; // no auto-complete
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
-        os.ContextSwitch(hw);
-        RunSteps(os, hw, 200);
+        RunSteps(os, hw, 8000);
 
         Assert.Equal(new List<int> { 1 }, outputs); // first delivered, second blocked
         Assert.False(os.HasRunningProcess);
 
         hw.RaiseOutputComplete();
-        RunSteps(os, hw, 200);
+        RunSteps(os, hw, 8000);
 
         Assert.Equal(new List<int> { 1, 2 }, outputs);
         Assert.False(os.HasProcesses);

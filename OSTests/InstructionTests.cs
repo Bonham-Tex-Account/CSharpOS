@@ -206,9 +206,11 @@ public class InstructionTests
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
+        InvalidInstructionArgs? captured = null;
+        hw.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
         hw.WriteBytes(0, Test.Word(0x7F, 1, 2, 3));
         Instruction.Execute(0, hw);
-        Assert.True(os.InvalidInstructionCalled);
-        Assert.Equal(0x7F, os.LastOpcode);
+        Assert.NotNull(captured);
+        Assert.Equal(0x7F, captured!.Opcode);
     }
 }

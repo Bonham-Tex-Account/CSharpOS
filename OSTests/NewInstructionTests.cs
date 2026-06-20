@@ -185,40 +185,30 @@ public class NewInstructionTests
     }
 
     [Fact]
-    public void In_InKernelMode_ReadsBufferedInputIntoRegister()
+    public void In_InKernelMode_WithNoInput_RewindsToReRunOnResume()
     {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(1024, os);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        hw.RaiseInputInterrupt(77);   // delivered to the buffer when Run drains it
-        hw.SetInstructionPointer(0);
-        hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
-        hw.Run();
-        Assert.Equal(77, hw.ReadRegisterAt(0));
-    }
-
-    [Fact]
-    public void In_InKernelMode_WithNoInput_BlocksTheProcess()
-    {
+        // With no input available, the kernel IN yields and rewinds the IP so the
+        // instruction re-runs once an input interrupt wakes the process. (End-to-end
+        // delivery is covered by SyscallTests.)
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0));
         hw.Run();
-        Assert.Equal(1, os.BlockCount);
-        Assert.Equal(WaitReason.Input, os.LastBlockReason);
-        Assert.Equal(0, hw.GetInstructionPointer()); // IP rewound to the IN to re-run on resume
+        Assert.Equal(0, hw.GetInstructionPointer()); // IP rewound to the IN
     }
 
     [Fact]
-    public void Hlt_DelegatesToOperatingSystem()
+    public void Hlt_RaisesToPrivilegedForTeardown()
     {
+        // HLT requests OS-level teardown: it raises to Privileged. With an OS image
+        // the Halt routine then frees the process (covered by SyscallTests).
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
         hw.WriteBytes(0, Test.Word(Instruction.HLT, 0, 0, 0));
         Instruction.Execute(0, hw);
-        Assert.Equal(1, os.HaltCount);
+        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
     }
 
     [Fact]

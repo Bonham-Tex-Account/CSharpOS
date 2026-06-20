@@ -29,65 +29,64 @@ public class EdgeCaseTests : IDisposable
         }
     }
 
-    [Fact]
-    public void ContextSwitch_NoProcesses_DoesNotThrow()
+    private static byte[] Print(int value)
     {
-        // Intended: a context switch with nothing to schedule should be a no-op,
-        // not a crash. Current code computes (index + 1) % activeProcesses.Count.
-        BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-
-        os.ContextSwitch(hw);
-
-        Assert.False(os.HasProcesses);
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, value);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+        return asm.Build();
     }
 
     [Fact]
-    public void ContextSwitch_AllProcessesFailToLoad_DoesNotThrow()
+    public void Run_NoProcesses_IdlesWithoutThrowing()
     {
-        // Every pending process is too large, so draining leaves activeProcesses
-        // empty. The subsequent round-robin advance should still not crash.
+        // With nothing to schedule, the idle Run path asks the scheduler and stays
+        // idle rather than crashing.
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = Test.NewHardware(8192, os);
+
+        for (int i = 0; i < 50; i++)
+        {
+            hw.Run();
+        }
+
+        Assert.False(os.HasProcesses);
+        Assert.False(os.HasRunningProcess);
+    }
+
+    [Fact]
+    public void LoadProcess_TooBigToFit_LogsFailure()
+    {
+        // A process larger than any free range fails allocation and is logged,
+        // without being scheduled.
         StringWriter log = new StringWriter();
         BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(64, os);
-        byte[] program = new byte[] { 0, 0, 0, 0 };
-        os.LoadProcess(new Process(CreateProgramFile(program), 5000, 5000));
-
-        os.ContextSwitch(hw);
+        Hardware hw = Test.NewHardware(8192, os);
+        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 50000, 50000));
 
         Assert.Contains("[LOAD FAILED]", log.ToString());
         Assert.False(os.HasProcesses);
     }
 
     [Fact]
-    public void HandleInvalidInstruction_NoCurrentProcess_DoesNotThrow()
+    public void FirstRun_BeforeBoot_SchedulesLoadedProcess()
     {
-        // Trapping before any process is current: removing a null process and
-        // freeing zeroed ranges should be harmless.
-        BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-
-        os.HandleInvalidInstruction(hw, 0x00, 0, 0, 0);
-
-        Assert.False(os.HasProcesses);
-    }
-
-    [Fact]
-    public void FirstRun_BeforeBoot_SchedulesPendingProcess()
-    {
-        // When idle, Run schedules a pending process (drains it and makes it current)
-        // before executing — no explicit boot ContextSwitch is required.
+        // When idle, Run asks the scheduler to make a loaded process current; no
+        // explicit boot is required.
         Assembler asm = new Assembler();
         asm.MovImm(RegisterName.EAX, 1);
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
+        Hardware hw = Test.NewHardware(8192, os);
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 16, 16));
 
-        hw.Run(); // idle -> Schedule loads the process, then executes its MOV
+        for (int i = 0; i < 100 && !os.HasRunningProcess; i++)
+        {
+            hw.Run(); // idle -> Schedule routine makes the process current
+        }
 
-        Assert.True(os.HasProcesses);
         Assert.True(os.HasRunningProcess);
     }
 
@@ -155,30 +154,25 @@ public class EdgeCaseTests : IDisposable
     }
 
     [Fact]
-    public void ContextSwitch_RoundRobin_CyclesBetweenTwoProcesses()
+    public void Scheduler_RoundRobin_RunsBothProcessesToCompletion()
     {
-        // Two processes with distinct register-state contents; after each switch
-        // the loaded register file should match the newly-current process.
+        // Two independent processes both run under the round-robin scheduler and
+        // each produce their output.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        byte[] program = new byte[] { 0, 0, 0, 0 };
-        Process first = new Process(CreateProgramFile(program), 16, 16);
-        Process second = new Process(CreateProgramFile(program), 16, 16);
-        os.LoadProcess(first);
-        os.LoadProcess(second);
+        Hardware hw = Test.NewHardware(16384, os);
+        List<int> outputs = new List<int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(Print(1)), 128, 64));
+        os.LoadProcess(new Process(CreateProgramFile(Print(2)), 128, 64));
 
-        // First switch drains both and makes second current.
-        os.ContextSwitch(hw);
-        // Tag each process's saved register slot with a recognizable marker.
-        hw.WriteBytes(first.RegisterStateAddress, new byte[] { 0xAA, 0, 0, 0 });
-        hw.WriteBytes(second.RegisterStateAddress, new byte[] { 0xBB, 0, 0, 0 });
+        for (int i = 0; i < 4000 && os.HasProcesses; i++)
+        {
+            hw.Run();
+        }
 
-        os.ContextSwitch(hw);
-        int afterFirstSwitch = hw.ReadRegisters()[0];
-        os.ContextSwitch(hw);
-        int afterSecondSwitch = hw.ReadRegisters()[0];
-
-        Assert.NotEqual(afterFirstSwitch, afterSecondSwitch);
+        Assert.Contains(1, outputs);
+        Assert.Contains(2, outputs);
+        Assert.False(os.HasProcesses);
     }
 
     [Fact]

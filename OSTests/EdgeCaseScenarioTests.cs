@@ -52,12 +52,12 @@ public class EdgeCaseScenarioTests : IDisposable
         return asm.Build();
     }
 
-    // Subscribes an output collector (modeling an instant output device) and boots.
+    // Subscribes an output collector (modeling an instant output device). The OS
+    // schedules the first process automatically on the first idle Run tick.
     private static List<int> BootCollecting(BasicOS os, Hardware hw)
     {
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
-        os.ContextSwitch(hw);
         return outputs;
     }
 
@@ -93,7 +93,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // IRET in user mode must trap — the privilege check lives in BasicOS's trap
         // table and is evaluated by Hardware.EvaluateTraps before dispatch.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
+        Hardware hw = Test.NewHardware(8192, os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 0;
         process.ProgramSize = 4;
@@ -102,7 +102,7 @@ public class EdgeCaseScenarioTests : IDisposable
         hw.WriteBytes(0, Test.Word(Instruction.IRET, 0, 0, 0));
 
         bool faulted = false;
-        os.InvalidInstruction += (_, _) => { faulted = true; };
+        hw.InvalidInstruction += (_, _) => { faulted = true; };
 
         Instruction.Execute(0, hw);
 
@@ -115,7 +115,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // Out-of-bounds STORE in user mode must trap — the memory protection condition
         // lives in BasicOS's trap table and is evaluated by Hardware.EvaluateTraps.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
+        Hardware hw = Test.NewHardware(8192, os);
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
         process.ProgramSize = 4;
@@ -126,7 +126,7 @@ public class EdgeCaseScenarioTests : IDisposable
         hw.WriteBytes(0, Test.Word(Instruction.STORE, 1, 0, 0));
 
         bool faulted = false;
-        os.InvalidInstruction += (_, _) => { faulted = true; };
+        hw.InvalidInstruction += (_, _) => { faulted = true; };
 
         Instruction.Execute(0, hw);
 
@@ -161,34 +161,20 @@ public class EdgeCaseScenarioTests : IDisposable
     // ---- interrupts & buffering ------------------------------------------
 
     [Fact]
-    public void BufferedInputs_AreDeliveredFifo()
+    public void RaiseOutputComplete_WithNothingRunning_IsHarmless()
     {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(1024, os);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        hw.RaiseInputInterrupt(10);
-        hw.RaiseInputInterrupt(20);
-        hw.SetInstructionPointer(0);
-        hw.WriteBytes(0, Test.Word(Instruction.IN, 0, 0, 0)); // IN EAX
-        hw.WriteBytes(4, Test.Word(Instruction.IN, 1, 0, 0)); // IN EBX
-
-        hw.Run(); // drains both interrupts, then IN EAX
-        hw.Run(); // IN EBX
-
-        Assert.Equal(10, hw.ReadRegisterAt(0));
-        Assert.Equal(20, hw.ReadRegisterAt(1));
-    }
-
-    [Fact]
-    public void RaiseOutputComplete_WithNothingBlocked_IsHarmless()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(1024, os);
+        // A spurious output-complete interrupt with no process loaded must drain
+        // through the wake routine without faulting and leave the CPU idle.
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
         hw.RaiseOutputComplete();
         hw.RaiseOutputComplete();
-        hw.Run(); // drains the spurious completions without error
-        Assert.Equal(2, os.WakeCount);
-        Assert.Equal(WaitReason.Output, os.LastWakeReason);
+        for (int i = 0; i < 200; i++)
+        {
+            hw.Run();
+        }
+        Assert.False(os.HasProcesses);
+        Assert.False(os.HasRunningProcess);
     }
 
     [Fact]
@@ -212,18 +198,18 @@ public class EdgeCaseScenarioTests : IDisposable
         Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
-        Step(os, hw, 200); // blocks on input
+        Step(os, hw, 8000); // blocks on input
 
         Assert.False(os.HasRunningProcess);
 
         hw.RaiseOutputComplete(); // wrong device — must not wake the input waiter
-        Step(os, hw, 200);
+        Step(os, hw, 8000);
 
         Assert.Empty(outputs);
         Assert.True(os.HasProcesses);
 
         hw.RaiseInputInterrupt(5);
-        Step(os, hw, 200);
+        Step(os, hw, 8000);
 
         Assert.Equal(new List<int> { 5 }, outputs);
         Assert.False(os.HasProcesses);
@@ -237,18 +223,18 @@ public class EdgeCaseScenarioTests : IDisposable
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
-        Step(os, hw, 400); // both block on input
+        Step(os, hw, 8000); // both block on input
 
         Assert.False(os.HasRunningProcess);
 
         hw.RaiseInputInterrupt(7);
-        Step(os, hw, 400);
+        Step(os, hw, 8000);
 
         Assert.Single(outputs);             // exactly one waiter woke and finished
         Assert.True(os.HasProcesses);       // the other is still blocked
 
         hw.RaiseInputInterrupt(8);
-        Step(os, hw, 400);
+        Step(os, hw, 8000);
 
         Assert.Equal(2, outputs.Count);
         Assert.False(os.HasProcesses);
@@ -264,8 +250,7 @@ public class EdgeCaseScenarioTests : IDisposable
         int executed = 0;
         hw.InstructionExecuted += (object? sender, InstructionExecutedArgs e) => { executed++; };
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
-        os.ContextSwitch(hw);
-        Step(os, hw, 200); // runs until it blocks on input
+        Step(os, hw, 8000); // runs until it blocks on input
 
         Assert.False(os.HasRunningProcess);
         int afterBlock = executed;
@@ -284,7 +269,7 @@ public class EdgeCaseScenarioTests : IDisposable
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64)); // P2 reader (blocks)
         os.LoadProcess(new Process(CreateProgramFile(Print(3)), 128, 64));               // P3 printer
         List<int> outputs = BootCollecting(os, hw);
-        Step(os, hw, 600);
+        Step(os, hw, 8000);
 
         // The two printers complete while the reader is blocked (round-robin skips it).
         Assert.Contains(1, outputs);
@@ -292,7 +277,7 @@ public class EdgeCaseScenarioTests : IDisposable
         Assert.True(os.HasProcesses);
 
         hw.RaiseInputInterrupt(2);
-        Step(os, hw, 400);
+        Step(os, hw, 8000);
 
         Assert.Contains(2, outputs);
         Assert.False(os.HasProcesses);
@@ -305,10 +290,10 @@ public class EdgeCaseScenarioTests : IDisposable
         Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EDX)), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
-        Step(os, hw, 200);
+        Step(os, hw, 8000);
 
         hw.RaiseInputInterrupt(88);
-        Step(os, hw, 200);
+        Step(os, hw, 8000);
 
         Assert.Equal(new List<int> { 88 }, outputs);
     }
@@ -337,18 +322,21 @@ public class EdgeCaseScenarioTests : IDisposable
     // ---- kernel-mode faults ----------------------------------------------
 
     [Fact]
-    public void InvalidOpcodeInKernelMode_TerminatesWithoutReEnteringKernel()
+    public void InvalidOpcodeInKernelMode_FaultsToPrivileged()
     {
+        // An invalid opcode is a fault: Hardware fires the InvalidInstruction event
+        // and raises to Privileged for teardown (no re-entry into the kernel).
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(0xFE, 0, 0, 0)); // not a real opcode
 
+        bool faulted = false;
+        hw.InvalidInstruction += (_, _) => { faulted = true; };
         hw.Run();
 
-        Assert.True(os.InvalidInstructionCalled);
-        Assert.Equal(0, os.BlockCount);                     // did not block / re-trap
+        Assert.True(faulted);
         Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
     }
 
@@ -364,7 +352,6 @@ public class EdgeCaseScenarioTests : IDisposable
         Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
         Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
         os.LoadProcess(process);
-        os.ContextSwitch(hw);
 
         int registerFileSize = Test.AllRegisters().Length * 4;
         Assert.True(process.RequiredMemory >= registerFileSize,

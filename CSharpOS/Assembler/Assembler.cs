@@ -16,6 +16,12 @@ public sealed partial class Assembler
     private readonly List<string> dataLabels = new List<string>();
 
     // ---- accessor methods ------------------------------------------------
+
+    // Current length of the emitted code in bytes. Lets a caller record where the
+    // next routine will start (before applying Build's origin) when packing several
+    // routines into one image.
+    public int CodeLength { get { return code.Count; } }
+
     public void Label(string name)
     {
         labels[name] = code.Count;
@@ -46,6 +52,12 @@ public sealed partial class Assembler
     public void MovImm(RegisterName dest, int immediate)
     {
         Emit(Instruction.MOV_REG_IMM, (byte)dest, (byte)immediate, 0);
+    }
+
+    // 16-bit immediate (high byte, low byte) for values that exceed 8 bits.
+    public void MovImm16(RegisterName dest, int immediate)
+    {
+        Emit(Instruction.MOV_REG_IMM16, (byte)dest, (byte)((immediate >> 8) & 0xFF), (byte)(immediate & 0xFF));
     }
 
     // Loads the resolved program-relative offset of a label as an 8-bit immediate.
@@ -131,6 +143,28 @@ public sealed partial class Assembler
     public void Iret()
     {
         Emit(Instruction.IRET, 0, 0, 0);
+    }
+
+    // Privileged OS-support instructions: save/restore a process's full register
+    // file, refresh the hardware layout from an entry, and return to a process.
+    public void SaveRegs(RegisterName pointer)
+    {
+        Emit(Instruction.SAVEREGS, (byte)pointer, 0, 0);
+    }
+
+    public void LoadRegs(RegisterName pointer)
+    {
+        Emit(Instruction.LOADREGS, (byte)pointer, 0, 0);
+    }
+
+    public void SetLayout(RegisterName pointer)
+    {
+        Emit(Instruction.SETLAYOUT, (byte)pointer, 0, 0);
+    }
+
+    public void OsRet(RegisterName levelRegister)
+    {
+        Emit(Instruction.OSRET, (byte)levelRegister, 0, 0);
     }
 
     // Reserves a 4-byte zero-initialized slot in the data section.

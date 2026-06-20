@@ -169,16 +169,20 @@ public class HardwareTests
     }
 
     [Fact]
-    public void TrapInvalidInstruction_DelegatesToOs()
+    public void TrapInvalidInstruction_FiresHardwareEvent()
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
+        InvalidInstructionArgs? captured = null;
+        hw.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
+
         hw.TrapInvalidInstruction(0xAB, 1, 2, 3);
-        Assert.True(os.InvalidInstructionCalled);
-        Assert.Equal(0xAB, os.LastOpcode);
-        Assert.Equal(1, os.LastB1);
-        Assert.Equal(2, os.LastB2);
-        Assert.Equal(3, os.LastB3);
+
+        Assert.NotNull(captured);
+        Assert.Equal(0xAB, captured!.Opcode);
+        Assert.Equal(1, captured.B1);
+        Assert.Equal(2, captured.B2);
+        Assert.Equal(3, captured.B3);
     }
 
     [Fact]
@@ -193,17 +197,6 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Run_IncrementsInstructionCount()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        hw.WriteBytes(0, Test.Word(Instruction.MOV_REG_IMM, 0, 5, 0));
-        hw.SetInstructionPointer(0);
-        hw.Run();
-        Assert.Equal(0, os.ContextSwitchCount);
-    }
-
-    [Fact]
     public void Run_ExecutesInstructionAtCurrentPointer()
     {
         FakeOS os = new FakeOS();
@@ -215,83 +208,22 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Run_TriggersContextSwitchOnTenthInstruction()
+    public void Run_InvalidOpcode_FiresFaultEventAndRaisesToPrivileged()
     {
+        // Without an OS image, an invalid opcode fires the fault event and raises to
+        // Privileged (the teardown level); with an OS image the routine would run.
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
-        for (int address = 0; address <= 36; address += 4)
-        {
-            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
-        }
-        hw.SetInstructionPointer(0);
-
-        for (int i = 0; i < 9; i++)
-        {
-            hw.Run();
-        }
-        Assert.Equal(0, os.ContextSwitchCount);
-
-        hw.Run();
-        Assert.Equal(1, os.ContextSwitchCount);
-    }
-
-    [Fact]
-    public void Run_InvalidOpcode_TrapsThroughOs()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
+        InvalidInstructionArgs? captured = null;
+        hw.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
         hw.WriteBytes(0, Test.Word(0xFF, 0, 0, 0));
         hw.SetInstructionPointer(0);
+
         hw.Run();
-        Assert.True(os.InvalidInstructionCalled);
-        Assert.Equal(0xFF, os.LastOpcode);
-    }
 
-    [Fact]
-    public void Run_ContextSwitchesEveryQuantum_ResettingTheCounter()
-    {
-        // After a context switch the instruction counter must reset, so a second
-        // full quantum (10 more instructions) triggers a second switch at 20.
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        for (int address = 0; address < 80; address += 4)
-        {
-            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
-        }
-        hw.SetInstructionPointer(0);
-
-        for (int i = 0; i < 20; i++)
-        {
-            hw.Run();
-        }
-
-        Assert.Equal(2, os.ContextSwitchCount);
-    }
-
-    [Fact]
-    public void Run_InvalidInstruction_RaisesPrivilegeAndSuppressesPreemption()
-    {
-        // An invalid opcode is an atomic OS-level termination: it raises to
-        // Privileged (so the quantum stops preempting) and is reported to the OS.
-        // FakeOS does not tear the process down, so the machine simply stops
-        // switching — a real OS would terminate and switch.
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        for (int address = 0; address < 80; address += 4)
-        {
-            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
-        }
-        hw.WriteBytes(16, Test.Word(0xFF, 0, 0, 0)); // 5th instruction is invalid
-        hw.SetInstructionPointer(0);
-
-        for (int i = 0; i < 15; i++)
-        {
-            hw.Run();
-        }
-
-        Assert.True(os.InvalidInstructionCalled);
+        Assert.NotNull(captured);
+        Assert.Equal(0xFF, captured!.Opcode);
         Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
-        Assert.Equal(0, os.ContextSwitchCount);
     }
 
     [Fact]
@@ -354,25 +286,17 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Halt_ResetsQuantumCounter()
+    public void Halt_WithoutOsImage_RaisesToPrivileged()
     {
-        // Halt sets instructionCount back to 0; subsequent runs start a fresh
-        // quantum rather than carrying the pre-halt count toward a switch.
+        // HLT is an OS-level teardown request. Without an OS image the machine just
+        // raises to Privileged (with an image, the Halt routine frees the process).
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
-        for (int address = 0; address < 80; address += 4)
-        {
-            hw.WriteBytes(address, Test.Word(Instruction.MOV_REG_IMM, 0, 1, 0));
-        }
-        hw.WriteBytes(16, Test.Word(Instruction.HLT, 0, 0, 0)); // 5th instruction halts
+        hw.WriteBytes(0, Test.Word(Instruction.HLT, 0, 0, 0));
         hw.SetInstructionPointer(0);
 
-        for (int i = 0; i < 10; i++)
-        {
-            hw.Run();
-        }
+        hw.Run();
 
-        Assert.Equal(0, os.ContextSwitchCount);
-        Assert.Equal(1, os.HaltCount);
+        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
     }
 }

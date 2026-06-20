@@ -2,8 +2,15 @@ using CSharpOS;
 
 namespace OSTests;
 
+/// <summary>
+/// Covers BasicOS loading programs into the OS memory region via the ISA allocator
+/// and seeding process-table entries, plus the liveness queries the run loop uses.
+/// The scheduling/allocation algorithms themselves are covered by the OS-routine
+/// isolation tests; these check the C# loader integration and end-to-end behavior.
+/// </summary>
 public class OperatingSystemTests : IDisposable
 {
+    private const int Memory = 8192;
     private readonly List<string> tempFiles = new List<string>();
 
     private string CreateProgramFile(byte[] bytes)
@@ -25,189 +32,133 @@ public class OperatingSystemTests : IDisposable
         }
     }
 
+    private static int ReadWord(Hardware hw, int address)
+    {
+        byte[] b = hw.ReadBytes(address);
+        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+    }
+
     [Fact]
-    public void HasProcesses_FalseWhenEmpty()
+    public void HasProcesses_FalseBeforeAnyLoad()
     {
         BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
         Assert.False(os.HasProcesses);
     }
 
     [Fact]
-    public void LoadProcess_EnqueuesProcess_MakesHasProcessesTrue()
+    public void LoadProcess_MakesHasProcessesTrue()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
-        os.LoadProcess(process);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16));
         Assert.True(os.HasProcesses);
     }
 
     [Fact]
-    public void ContextSwitch_DrainsPending_AssignsProcessAddresses()
+    public void LoadProcess_AllocatesAboveTheOsRegion()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        byte[] program = new byte[] { 1, 2, 3, 4 };
-        Process process = new Process(CreateProgramFile(program), 16, 16);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        Process process = new Process(CreateProgramFile(new byte[] { 1, 2, 3, 4 }), 16, 16);
         os.LoadProcess(process);
 
-        os.ContextSwitch(hw);
-
-        Assert.Equal(0, process.ProgramAddress);
-        // Register state sits after the program and the reserved kernel section.
-        Assert.Equal(program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length), process.RegisterStateAddress);
+        // The first free range starts just past the reserved OS region.
+        Assert.Equal(os.OsMemorySize, process.ProgramAddress);
     }
 
     [Fact]
-    public void ContextSwitch_TwoProcesses_AllocatesNonOverlappingRegions()
+    public void LoadProcess_TwoProcesses_GetNonOverlappingRegions()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
         byte[] program = new byte[] { 0, 0, 0, 0 };
         Process first = new Process(CreateProgramFile(program), 16, 16);
         Process second = new Process(CreateProgramFile(program), 16, 16);
         os.LoadProcess(first);
         os.LoadProcess(second);
 
-        os.ContextSwitch(hw);
-
-        // total per process = program(4) + kernel section + memory (auto-sized to fit
-        // the register file) + user stack(16) + kernel stack(64)
-        int perProcess = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length) + first.RequiredMemory + first.RequiredStackSize + Hardware.KernelStackSize;
-        Assert.Equal(0, first.ProgramAddress);
-        Assert.Equal(perProcess, second.ProgramAddress);
+        int perProcess = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length)
+            + first.RequiredMemory + first.RequiredStackSize + Hardware.KernelStackSize;
+        Assert.Equal(os.OsMemorySize, first.ProgramAddress);
+        Assert.Equal(os.OsMemorySize + perProcess, second.ProgramAddress);
     }
 
     [Fact]
-    public void DrainPending_NotEnoughMemory_LogsFailureWithoutCrashing()
+    public void LoadProcess_NotEnoughMemory_LogsFailure()
     {
         StringWriter log = new StringWriter();
         BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(1024, os);
-        byte[] program = new byte[] { 0, 0, 0, 0 };
-        Process fits = new Process(CreateProgramFile(program), 16, 16);
-        Process tooBig = new Process(CreateProgramFile(program), 5000, 5000);
-        os.LoadProcess(fits);
-        os.LoadProcess(tooBig);
-
-        os.ContextSwitch(hw);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 50000, 50000));
 
         Assert.Contains("[LOAD FAILED]", log.ToString());
+        Assert.False(os.HasProcesses);
     }
 
     [Fact]
-    public void LoadedProcess_HasStackPointerInitializedToUserStackTop()
+    public void LoadProcess_SeedsStackPointerAtTopOfUserStack()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
         byte[] program = new byte[] { 0, 0, 0, 0 };
         Process process = new Process(CreateProgramFile(program), 16, 16);
         os.LoadProcess(process);
 
-        // The first context switch drains the pending process and loads its saved
-        // register state (including the seeded ESP) into the registers.
-        os.ContextSwitch(hw);
-
-        int expectedTop = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length) + process.RequiredMemory + process.RequiredStackSize;
-        Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
+        int kernelSection = Hardware.KernelHeaderSize + os.KernelImage.Length;
+        int expectedTop = process.ProgramAddress + program.Length + kernelSection
+            + process.RequiredMemory + process.RequiredStackSize;
+        int entry = OsLayout.ProcessEntryAddress(0);
+        Assert.Equal(expectedTop, ReadWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP)));
     }
 
     [Fact]
-    public void KernelImage_SizesAndFillsTheKernelSection()
+    public void LoadProcess_CopiesKernelImageIntoTheKernelSection()
     {
-        // The kernel section scales with the OS's kernel image, and the image is
-        // copied into each process's kernel section (right after the program).
         byte[] image = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44 };
         KernelImageOS os = new KernelImageOS(new StringWriter(), image);
-        Hardware hw = Test.NewHardware(1024, os);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
         byte[] program = new byte[] { 0, 0, 0, 0 };
         Process process = new Process(CreateProgramFile(program), 16, 16);
         os.LoadProcess(process);
 
-        os.ContextSwitch(hw);
-
-        // Register state sits after the program + the kernel section (header + image).
-        Assert.Equal(program.Length + Hardware.KernelHeaderSize + image.Length, process.RegisterStateAddress);
-        // The image bytes occupy the kernel section, past the program and the header.
         int imageStart = process.ProgramAddress + program.Length + Hardware.KernelHeaderSize;
         Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD }, hw.ReadBytes(imageStart));
         Assert.Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 }, hw.ReadBytes(imageStart + 4));
     }
 
     [Fact]
-    public void NewlyLoadedProcess_StartsInUserMode()
+    public void ScheduledProcess_StartsInUserMode()
     {
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Hlt();
+
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16));
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 16, 16));
 
-        os.ContextSwitch(hw);
+        for (int i = 0; i < 100 && !os.HasRunningProcess; i++)
+        {
+            hw.Run();
+        }
 
+        Assert.True(os.HasRunningProcess);
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
 
     [Fact]
-    public void ContextSwitch_SavesAndRestoresPerProcessPrivilegeLevel()
+    public void InvalidInstruction_TerminatesTheProcess()
     {
-        // The level is per-process state saved in process memory. If one process is
-        // in kernel mode when switched out, that level must be restored when it runs.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        Process first = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
-        Process second = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
-        os.LoadProcess(first);
-        os.LoadProcess(second);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0xFF, 0, 0, 0 }), 16, 16));
 
-        os.ContextSwitch(hw);   // second becomes current (user mode)
-        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);   // simulate entering the kernel
-
-        os.ContextSwitch(hw);   // first becomes current; its saved level is user
-        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
-
-        os.ContextSwitch(hw);   // second again; its kernel level must be restored
-        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
-    }
-
-    [Fact]
-    public void HandleInvalidInstruction_RemovesCurrentProcess()
-    {
-        StringWriter log = new StringWriter();
-        BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(1024, os);
-        Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
-        os.LoadProcess(process);
-        os.ContextSwitch(hw);
-
-        os.HandleInvalidInstruction(hw, 0xFF, 0, 0, 0);
+        for (int i = 0; i < 500 && os.HasProcesses; i++)
+        {
+            hw.Run();
+        }
 
         Assert.False(os.HasProcesses);
-        Assert.Contains("[INVALID INSTRUCTION]", log.ToString());
-    }
-
-    [Fact]
-    public void HandleInvalidInstruction_UsesMatchingTrapReason()
-    {
-        StringWriter log = new StringWriter();
-        List<Trap> traps = new List<Trap>
-        {
-            new Trap { Opcode = 0xFF, Reason = "custom trap reason", Condition = (Hardware h, byte a, byte b, byte c) => true }
-        };
-        TrappingOS os = new TrappingOS(traps, log);
-        Hardware hw = Test.NewHardware(1024, os);
-
-        os.HandleInvalidInstruction(hw, 0xFF, 0, 0, 0);
-
-        Assert.Contains("custom trap reason", log.ToString());
-    }
-
-    [Fact]
-    public void HandleInvalidInstruction_UnknownOpcode_UsesDefaultReason()
-    {
-        StringWriter log = new StringWriter();
-        BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(1024, os);
-
-        os.HandleInvalidInstruction(hw, 0x99, 0, 0, 0);
-
-        Assert.Contains("Unknown invalid instruction", log.ToString());
     }
 }

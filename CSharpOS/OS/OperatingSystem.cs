@@ -1,298 +1,216 @@
-using System.Collections.Concurrent;
-
 namespace CSharpOS;
 
+/// <summary>
+/// Base operating system. The scheduling and allocation logic now lives in ISA
+/// code in the OS memory region (see <see cref="OsRoutines"/>); this class only
+/// boots that image, loads programs (driving the ISA allocator), and answers
+/// liveness queries by reading the OS data structures from memory.
+/// </summary>
 public abstract class OperatingSystem : IOperatingSystem
 {
-    // ---- public events and properties ------------------------------------
-    public event EventHandler<ContextSwitchArgs>? ContextSwitched;
-    public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
-
-    public bool HasProcesses { get { return activeProcesses.Count > 0 || !pendingProcesses.IsEmpty; } }
-    public bool HasRunningProcess { get { return currentProcess != null; } }
+    // ---- public properties -----------------------------------------------
 
     // Syscall functions shipped by this OS, copied into each process's kernel
     // section. Empty until overridden; subclasses supply the syscall library.
     public virtual byte[] KernelImage => Array.Empty<byte>();
 
+    // The OS in-memory image. Defaults to none (size 0); subclasses that run their
+    // routines as ISA code override these to reserve and populate the OS region.
+    public virtual int OsMemorySize => 0;
+    public virtual byte[] BuildOsImage(int osMemoryBase) => Array.Empty<byte>();
+
+    public bool HasProcesses => CountLiveProcesses() > 0;
+    public bool HasRunningProcess => hardware != null && hardware.IsProcessRunning();
+
     // ---- private fields --------------------------------------------------
-    private List<Process> activeProcesses;
-    private ConcurrentQueue<Process> pendingProcesses;
-    private Process? currentProcess;
-    private int currentProcessIndex;
-    private List<Trap> traps;
-    private List<MemoryRange> availableMemoryRanges;
-    private TextWriter log;
+    private readonly List<Trap> traps;
+    private readonly TextWriter log;
+    private Hardware? hardware;
+
+    // Maps a loaded process's program base address to its file path, so consumers
+    // (e.g. the visualizer) can name the process behind a Hardware context switch.
+    private readonly Dictionary<int, string> namesByBase = new Dictionary<int, string>();
 
     // ---- constructor -----------------------------------------------------
     protected OperatingSystem(List<Trap> traps, TextWriter log)
     {
         this.traps = traps;
         this.log = log;
-        activeProcesses = new List<Process>();
-        pendingProcesses = new ConcurrentQueue<Process>();
-        availableMemoryRanges = new List<MemoryRange>();
-        currentProcess = null;
     }
 
-    // ---- accessor methods ------------------------------------------------
+    // ---- setup -----------------------------------------------------------
     public void AttachHardware(Hardware hw)
     {
-        availableMemoryRanges = new List<MemoryRange> { new MemoryRange { Start = 0, Size = hw.GetMemorySize() } };
+        hardware = hw;
         hw.LoadTraps(traps);
+        hw.ReserveOsMemory(OsMemorySize);
+        if (OsMemorySize > 0)
+        {
+            hw.WriteBytes(0, BuildOsImage(0));
+            SeedOsData(hw);
+        }
     }
 
+    // Initialises the OS data structures: no current process, an empty process
+    // table, and a single free range covering all memory above the OS region.
+    private void SeedOsData(Hardware hw)
+    {
+        WriteWord(hw, OsLayout.ProcessCountOffset, 0);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, -1);
+        WriteWord(hw, OsLayout.PendingCountOffset, 0);
+        WriteWord(hw, OsLayout.FreeRangeCountOffset, 1);
+        WriteWord(hw, OsLayout.FreeRangeTableOffset, OsMemorySize);
+        WriteWord(hw, OsLayout.FreeRangeTableOffset + 4, hw.GetMemorySize() - OsMemorySize);
+    }
+
+    // ---- process loading -------------------------------------------------
+    // Reads the program, runs the ISA allocator to reserve memory, then seeds a
+    // process-table entry (image bytes, kernel section, initial registers) and marks
+    // it Ready for the scheduler.
     public void LoadProcess(Process process)
     {
-        pendingProcesses.Enqueue(process);
-    }
-
-    // ---- helper functions ------------------------------------------------
-    private void DrainPendingProcesses(Hardware hw)
-    {
-        while (pendingProcesses.TryDequeue(out Process? process))
+        if (hardware == null)
         {
-            byte[] program = File.ReadAllBytes(process.ProgramFilePath);
-            // The memory region must hold the full register-file save block plus the
-            // mode-state slot; bump RequiredMemory up if the caller undersized it.
-            int minMemory = hw.GetRegisterFileSize() + 4;
-            if (process.RequiredMemory < minMemory)
-            {
-                process.RequiredMemory = minMemory;
-            }
-            int kernelSectionSize = Hardware.KernelHeaderSize + KernelImage.Length;
-            int totalSize = program.Length + kernelSectionSize + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
-
-            MemoryRange allocated = new MemoryRange { Start = -1, Size = 0 };
-            foreach (MemoryRange range in availableMemoryRanges)
-            {
-                if (range.Size >= totalSize)
-                {
-                    allocated = range;
-                    break;
-                }
-            }
-
-            if (allocated.Start == -1)
-            {
-                log.WriteLine($"[LOAD FAILED] Not enough memory for process: {process.ProgramFilePath}");
-                continue;
-            }
-
-            process.ProgramAddress = allocated.Start;
-            // The register state lives at the start of the memory region, which sits
-            // after the program and the reserved kernel section.
-            process.RegisterStateAddress = allocated.Start + program.Length + kernelSectionSize;
-            process.InstructionPointer = allocated.Start;
-            SplitRange(allocated, totalSize);
-            hw.LoadProcess(process, program);
-            activeProcesses.Add(process);
+            throw new InvalidOperationException("LoadProcess requires an attached hardware.");
         }
-    }
+        Hardware hw = hardware;
 
-    private void SplitRange(MemoryRange range, int used)
-    {
-        availableMemoryRanges.Remove(range);
-        if (range.Size > used)
+        byte[] program = File.ReadAllBytes(process.ProgramFilePath);
+
+        // The memory region must hold the register-file save block plus the mode slot.
+        int minMemory = hw.GetRegisterFileSize() + 4;
+        if (process.RequiredMemory < minMemory)
         {
-            availableMemoryRanges.Add(new MemoryRange { Start = range.Start + used, Size = range.Size - used });
-        }
-    }
-
-    private void FreeCurrentProcessMemory(Hardware hw)
-    {
-        List<MemoryRange> freed = hw.GetCurrentProcessRanges();
-        foreach (MemoryRange range in freed)
-        {
-            AddAndMergeRange(range);
-        }
-    }
-
-    private void AddAndMergeRange(MemoryRange newRange)
-    {
-        availableMemoryRanges.Add(newRange);
-        availableMemoryRanges.Sort((MemoryRange a, MemoryRange b) => a.Start.CompareTo(b.Start));
-
-        List<MemoryRange> merged = new List<MemoryRange>();
-        MemoryRange current = availableMemoryRanges[0];
-
-        for (int i = 1; i < availableMemoryRanges.Count; i++)
-        {
-            MemoryRange next = availableMemoryRanges[i];
-            if (current.Start + current.Size >= next.Start)
-            {
-                current = new MemoryRange
-                {
-                    Start = current.Start,
-                    Size = Math.Max(current.Start + current.Size, next.Start + next.Size) - current.Start
-                };
-            }
-            else
-            {
-                merged.Add(current);
-                current = next;
-            }
+            process.RequiredMemory = minMemory;
         }
 
-        merged.Add(current);
-        availableMemoryRanges = merged;
-    }
+        int kernelSection = Hardware.KernelHeaderSize + KernelImage.Length;
+        int total = program.Length + kernelSection + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
-    private void TerminateCurrentProcess(Hardware hw)
-    {
-        string? terminated = currentProcess?.ProgramFilePath;
-
-        FreeCurrentProcessMemory(hw);
-        activeProcesses.Remove(currentProcess!);
-        currentProcess = null;
-
-        DrainPendingProcesses(hw);
-
-        if (activeProcesses.Count > 0)
+        int slot = FindFreeSlot(hw);
+        if (slot < 0)
         {
-            // The removed process's slot now holds the next process, so start the
-            // scan there.
-            SwitchToNextReady(hw, terminated, currentProcessIndex % activeProcesses.Count);
+            log.WriteLine($"[LOAD FAILED] Process table full: {process.ProgramFilePath}");
+            return;
         }
+
+        int entry = OsLayout.ProcessEntryAddress(slot);
+        ClearEntry(hw, entry);
+        WriteWord(hw, entry + Hardware.ProcessEntryProgramSize, program.Length);
+        WriteWord(hw, entry + Hardware.ProcessEntryRequiredMemory, process.RequiredMemory);
+        WriteWord(hw, entry + Hardware.ProcessEntryRequiredStackSize, process.RequiredStackSize);
+        WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, total);
+        WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Terminated); // placeholder until allocated
+
+        // First-fit allocation runs as ISA code; it sets ProgramAddress or -1 on failure.
+        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        int programAddress = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
+        if (programAddress < 0)
+        {
+            log.WriteLine($"[LOAD FAILED] Not enough memory for process: {process.ProgramFilePath}");
+            return;
+        }
+
+        // Place the program image and the per-process kernel section.
+        hw.WriteBytes(programAddress, program);
+        if (KernelImage.Length > 0)
+        {
+            hw.WriteBytes(programAddress + program.Length + Hardware.KernelHeaderSize, KernelImage);
+        }
+
+        // Seed the saved register file: start at the program, with ESP at the top of
+        // the user stack, in User mode and Ready to run.
+        int userStackTop = programAddress + program.Length + kernelSection + process.RequiredMemory + process.RequiredStackSize;
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), programAddress);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP), userStackTop);
+        WriteWord(hw, entry + Hardware.ProcessEntryLevel, (int)PrivilegeLevel.User);
+        WriteWord(hw, entry + Hardware.ProcessEntryWaitReason, (int)WaitReason.None);
+        WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Ready);
+
+        // Grow the table high-water mark when this is a fresh slot.
+        int count = ReadWord(hw, OsLayout.ProcessCountOffset);
+        if (slot == count)
+        {
+            WriteWord(hw, OsLayout.ProcessCountOffset, count + 1);
+        }
+
+        // Keep the C# descriptor and the name map in sync for callers/observers.
+        process.ProgramAddress = programAddress;
+        process.ProgramSize = program.Length;
+        process.RegisterStateAddress = programAddress + program.Length + kernelSection;
+        process.InstructionPointer = programAddress;
+        namesByBase[programAddress] = process.ProgramFilePath;
     }
 
-    // Scans up to all processes from startIndex for a Ready one, loads it as
-    // current, and fires ContextSwitched. Sets currentProcess = null (idle) when
-    // no Ready process exists.
-    private void SwitchToNextReady(Hardware hw, string? fromProcess, int startIndex)
+    // Resolves the program name for a context-switch event's program base.
+    public string? NameForBase(int programBase)
     {
-        int count = activeProcesses.Count;
+        if (namesByBase.TryGetValue(programBase, out string? name))
+        {
+            return name;
+        }
+        return null;
+    }
+
+    // ---- helpers ---------------------------------------------------------
+
+    // Finds a reusable (Terminated) slot, else the next fresh slot, else -1 if full.
+    private int FindFreeSlot(Hardware hw)
+    {
+        int count = ReadWord(hw, OsLayout.ProcessCountOffset);
         for (int i = 0; i < count; i++)
         {
-            int index = (startIndex + i) % count;
-            if (activeProcesses[index].State == ProcessState.Ready)
+            int state = ReadWord(hw, OsLayout.ProcessEntryAddress(i) + Hardware.ProcessEntryState);
+            if (state == (int)ProcessState.Terminated)
             {
-                currentProcessIndex = index;
-                currentProcess = activeProcesses[index];
-                LoadCurrent(hw);
-                ContextSwitched?.Invoke(this, new ContextSwitchArgs { FromProcess = fromProcess, ToProcess = currentProcess.ProgramFilePath });
-                return;
+                return i;
             }
         }
-        currentProcess = null;
-    }
-
-    private void SaveCurrent(Hardware hw)
-    {
-        hw.WriteBytes(currentProcess!.RegisterStateAddress, hw.ReadRegisters());
-        SaveMode(hw, currentProcess);
-        currentProcess.InstructionPointer = hw.GetInstructionPointer();
-    }
-
-    private void LoadCurrent(Hardware hw)
-    {
-        hw.LoadProcessLayout(currentProcess!);
-        byte[] savedRegisters = hw.ReadRegisterState(currentProcess!.RegisterStateAddress);
-        hw.WriteRegisters(savedRegisters);
-        hw.SetInstructionPointer(currentProcess.InstructionPointer);
-        RestoreMode(hw, currentProcess);
-    }
-
-    // The privilege level is part of each process's saved state, stored in a
-    // reserved slot so it survives context switches (a process preempted
-    // mid-syscall resumes at the same level).
-    private void SaveMode(Hardware hw, Process process)
-    {
-        hw.WriteBytes(process.ModeStateAddress, new byte[] { (byte)hw.GetPrivilegeLevel(), 0, 0, 0 });
-    }
-
-    private void RestoreMode(Hardware hw, Process process)
-    {
-        byte[] mode = hw.ReadBytes(process.ModeStateAddress);
-        hw.SetPrivilegeLevel((PrivilegeLevel)mode[0]);
-    }
-
-    // ---- integral functions ----------------------------------------------
-    public void ContextSwitch(Hardware hw)
-    {
-        DrainPendingProcesses(hw);
-
-        if (activeProcesses.Count == 0)
+        if (count < OsLayout.MaxProcesses)
         {
-            currentProcess = null;
-            return;
+            return count;
         }
-
-        string? fromProcess = currentProcess?.ProgramFilePath;
-        if (currentProcess != null)
-        {
-            SaveCurrent(hw); // the preempted process stays Ready
-        }
-
-        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
+        return -1;
     }
 
-    // Marks the running process Blocked on a device and immediately yields the
-    // CPU to the next Ready process, or idles if none are Ready.
-    public void BlockCurrentProcess(Hardware hw, WaitReason reason)
+    private int CountLiveProcesses()
     {
-        if (currentProcess == null)
+        if (hardware == null)
         {
-            return;
+            return 0;
         }
-        string? fromProcess = currentProcess.ProgramFilePath;
-        currentProcess.State = ProcessState.Blocked;
-        currentProcess.WaitReason = reason;
-        SaveCurrent(hw); // saves the rewound IP so the I/O instruction re-runs on resume
-        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
-    }
-
-    // A device interrupt fired: make one process waiting on that device Ready.
-    // Does not preempt the running process.
-    public void Wake(WaitReason reason)
-    {
-        foreach (Process process in activeProcesses)
+        int count = ReadWord(hardware, OsLayout.ProcessCountOffset);
+        int live = 0;
+        for (int i = 0; i < count; i++)
         {
-            if (process.State == ProcessState.Blocked && process.WaitReason == reason)
+            int state = ReadWord(hardware, OsLayout.ProcessEntryAddress(i) + Hardware.ProcessEntryState);
+            if (state != (int)ProcessState.Terminated)
             {
-                process.State = ProcessState.Ready;
-                process.WaitReason = WaitReason.None;
-                return;
+                live++;
             }
         }
+        return live;
     }
 
-    // Called by the hardware when the CPU is idle: pick a Ready process, if any.
-    public void Schedule(Hardware hw)
+    private static void ClearEntry(Hardware hw, int entry)
     {
-        if (currentProcess != null)
-        {
-            return;
-        }
-        DrainPendingProcesses(hw);
-        if (activeProcesses.Count == 0)
-        {
-            return;
-        }
-        SwitchToNextReady(hw, null, (currentProcessIndex + 1) % activeProcesses.Count);
+        hw.WriteBytes(entry, new byte[Hardware.ProcessEntrySize]);
     }
 
-    public void HandleInvalidInstruction(Hardware hw, byte opcode, byte b1, byte b2, byte b3)
+    private static int ReadWord(Hardware hw, int address)
     {
-        string reason = "Unknown invalid instruction";
-        foreach (Trap trap in traps)
-        {
-            if (trap.Opcode == opcode)
-            {
-                reason = trap.Reason;
-                break;
-            }
-        }
-
-        log.WriteLine($"[INVALID INSTRUCTION] Process: {currentProcess?.ProgramFilePath ?? "unknown"} | Reason: {reason} | Instruction: {opcode:X2} {b1:X2} {b2:X2} {b3:X2}");
-        InvalidInstruction?.Invoke(this, new InvalidInstructionArgs { Opcode = opcode, B1 = b1, B2 = b2, B3 = b3, ProcessName = currentProcess?.ProgramFilePath, Reason = reason });
-
-        TerminateCurrentProcess(hw);
+        byte[] b = hw.ReadBytes(address);
+        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
     }
 
-    public void HandleHalt(Hardware hw)
+    private static void WriteWord(Hardware hw, int address, int value)
     {
-        log.WriteLine($"[HALT] Process: {currentProcess?.ProgramFilePath ?? "unknown"}");
-        TerminateCurrentProcess(hw);
+        hw.WriteBytes(address, new byte[]
+        {
+            (byte)(value & 0xFF),
+            (byte)((value >> 8)  & 0xFF),
+            (byte)((value >> 16) & 0xFF),
+            (byte)((value >> 24) & 0xFF)
+        });
     }
 }

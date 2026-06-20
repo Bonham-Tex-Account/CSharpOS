@@ -12,6 +12,7 @@ namespace CSharpOSConsole;
 public sealed class ConsoleVisualizer
 {
     private readonly Hardware hw;
+    private readonly OperatingSystem os;
     private string currentProcess = "(booting)";
     private bool manual;
     private int delayMs;
@@ -25,18 +26,21 @@ public sealed class ConsoleVisualizer
     public ConsoleVisualizer(Hardware hw, OperatingSystem os, int delayMs)
     {
         this.hw = hw;
+        this.os = os;
         this.delayMs = delayMs;
 
+        // Scheduling/fault observability now comes from Hardware (the OS logic runs
+        // as ISA code); process names are resolved from the OS's base->name map.
         hw.InstructionExecuted += OnInstructionExecuted;
         hw.MemoryWritten += OnMemoryWritten;
         hw.ProgramOutput += OnProgramOutput;
-        os.ContextSwitched += OnContextSwitched;
-        os.InvalidInstruction += OnInvalidInstruction;
+        hw.ContextSwitched += OnContextSwitched;
+        hw.InvalidInstruction += OnInvalidInstruction;
     }
 
     private void OnContextSwitched(object? sender, ContextSwitchArgs e)
     {
-        currentProcess = FriendlyName(e.ToProcess);
+        currentProcess = FriendlyName(os.NameForBase(e.ToProgramBase));
         WriteColored(ConsoleColor.Cyan, $"  ╞══ context switch → {currentProcess}");
     }
 
@@ -72,7 +76,8 @@ public sealed class ConsoleVisualizer
 
     private void OnInvalidInstruction(object? sender, InvalidInstructionArgs e)
     {
-        WriteColored(ConsoleColor.Red, $"      ✗ INVALID [{e.Opcode:X2}] in {FriendlyName(e.ProcessName)} — {e.Reason}");
+        string reason = e.Reason ?? "invalid instruction";
+        WriteColored(ConsoleColor.Red, $"      ✗ INVALID [{e.Opcode:X2}] in {currentProcess} — {reason}");
     }
 
     private string RegisterSnapshot()
@@ -83,8 +88,24 @@ public sealed class ConsoleVisualizer
             parts.Add($"{name}={hw.ReadRegister(name)}");
         }
         int flags = hw.ReadRegister(RegisterName.EFLAGS);
-        string zero = (flags & 1) != 0 ? "Z" : "-";
-        string sign = (flags & 2) != 0 ? "S" : "-";
+        string zero;
+        if ((flags & 1) != 0)
+        {
+            zero = "Z";
+        }
+        else
+        {
+            zero = "-";
+        }
+        string sign;
+        if ((flags & 2) != 0)
+        {
+            sign = "S";
+        }
+        else
+        {
+            sign = "-";
+        }
         parts.Add($"[{zero}{sign}]");
         return string.Join(" ", parts);
     }

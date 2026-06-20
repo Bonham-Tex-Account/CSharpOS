@@ -155,69 +155,93 @@ public class EventTests : IDisposable
         Assert.Equal(12345, captured!.Value);
     }
 
-    // ---- OperatingSystem events ----------------------------------------
+    // ---- Hardware-fired scheduling/observability events ----------------
+
+    private static byte[] MovThenHalt()
+    {
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Hlt();
+        return asm.Build();
+    }
 
     [Fact]
-    public void ContextSwitch_FiresContextSwitched_FirstSwitchHasNullFromProcess()
+    public void Scheduler_FiresContextSwitched_OnFirstResume_WithNoPriorProcess()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        string path = CreateProgramFile(new byte[] { 0, 0, 0, 0 });
-        os.LoadProcess(new Process(path, 16, 16));
-        ContextSwitchArgs? captured = null;
-        os.ContextSwitched += (object? sender, ContextSwitchArgs e) => { captured = e; };
+        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        string path = CreateProgramFile(MovThenHalt());
+        os.LoadProcess(new Process(path, 128, 64));
 
-        os.ContextSwitch(hw);
+        ContextSwitchArgs? captured = null;
+        hw.ContextSwitched += (object? sender, ContextSwitchArgs e) => { captured ??= e; };
+
+        for (int i = 0; i < 200 && captured == null; i++)
+        {
+            hw.Run();
+        }
 
         Assert.NotNull(captured);
-        Assert.Null(captured!.FromProcess);
-        Assert.Equal(path, captured.ToProcess);
+        Assert.Equal(-1, captured!.FromProgramBase);   // nothing was running before
+        Assert.Equal(path, os.NameForBase(captured.ToProgramBase));
     }
 
     [Fact]
-    public void ContextSwitch_FiresContextSwitched_WithFromAndToProcessNames()
+    public void Scheduler_FiresContextSwitched_WithDistinctProcessesAcrossSwitches()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        string firstPath = CreateProgramFile(new byte[] { 0, 0, 0, 0 });
-        string secondPath = CreateProgramFile(new byte[] { 0, 0, 0, 0 });
-        os.LoadProcess(new Process(firstPath, 16, 16));
-        os.LoadProcess(new Process(secondPath, 16, 16));
+        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
+        // Two long-running processes so the scheduler round-robins between them.
+        string firstPath = CreateProgramFile(LoopForever());
+        string secondPath = CreateProgramFile(LoopForever());
+        os.LoadProcess(new Process(firstPath, 128, 64));
+        os.LoadProcess(new Process(secondPath, 128, 64));
 
-        List<ContextSwitchArgs> switches = new List<ContextSwitchArgs>();
-        os.ContextSwitched += (object? sender, ContextSwitchArgs e) => { switches.Add(e); };
+        HashSet<int> resumedBases = new HashSet<int>();
+        hw.ContextSwitched += (object? sender, ContextSwitchArgs e) => { resumedBases.Add(e.ToProgramBase); };
 
-        os.ContextSwitch(hw); // null -> second
-        os.ContextSwitch(hw); // second -> first
+        for (int i = 0; i < 200 && resumedBases.Count < 2; i++)
+        {
+            hw.Run();
+        }
 
-        Assert.Equal(2, switches.Count);
-        Assert.Equal(secondPath, switches[0].ToProcess);
-        Assert.Equal(secondPath, switches[1].FromProcess);
-        Assert.Equal(firstPath, switches[1].ToProcess);
+        // Both processes were resumed at least once, identifiable by name.
+        Assert.Equal(2, resumedBases.Count);
+        List<string?> names = resumedBases.Select(os.NameForBase).ToList();
+        Assert.Contains(firstPath, names);
+        Assert.Contains(secondPath, names);
     }
 
     [Fact]
-    public void HandleInvalidInstruction_FiresOsInvalidInstruction_WithProcessNameAndReason()
+    public void Run_PrivilegeTrap_FiresHardwareInvalidInstruction_WithReason()
     {
-        StringWriter log = new StringWriter();
-        List<Trap> traps = new List<Trap>
-        {
-            new Trap { Opcode = 0xFF, Reason = "custom trap reason", Condition = (Hardware h, byte a, byte b, byte c) => true }
-        };
-        TrappingOS os = new TrappingOS(traps, log);
-        Hardware hw = Test.NewHardware(1024, os);
-        string path = CreateProgramFile(new byte[] { 0, 0, 0, 0 });
-        os.LoadProcess(new Process(path, 16, 16));
-        os.ContextSwitch(hw); // make the process current
+        // A user-mode IRET violates BasicOS's privilege trap; Hardware fires the
+        // fault event carrying the trap's reason.
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Assembler asm = new Assembler();
+        asm.Iret(); // privileged: traps in user mode
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
         InvalidInstructionArgs? captured = null;
-        os.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
+        hw.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
 
-        os.HandleInvalidInstruction(hw, 0xFF, 1, 2, 3);
+        for (int i = 0; i < 200 && captured == null; i++)
+        {
+            hw.Run();
+        }
 
         Assert.NotNull(captured);
-        Assert.Equal(0xFF, captured!.Opcode);
-        Assert.Equal(path, captured.ProcessName);
-        Assert.Equal("custom trap reason", captured.Reason);
+        Assert.Equal(Instruction.IRET, captured!.Opcode);
+        Assert.Equal("IRET is a privileged instruction", captured.Reason);
+    }
+
+    private static byte[] LoopForever()
+    {
+        Assembler asm = new Assembler();
+        asm.Label("top");
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Jmp("top");
+        return asm.Build();
     }
 }

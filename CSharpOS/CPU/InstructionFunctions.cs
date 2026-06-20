@@ -44,6 +44,12 @@ internal static class InstructionFunctions
         hw.WriteRegisterAt(b1, (int)b2);
     }
 
+    // MOV reg, imm16  — b2 is the high byte, b3 the low byte.
+    internal static void MovRegImm16(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.WriteRegisterAt(b1, (b2 << 8) | b3);
+    }
+
     // LOAD dest, [ptr]  — dest = 32-bit value at (programBase + reg[ptr])
     internal static void Load(Hardware hw, byte b1, byte b2, byte b3)
     {
@@ -210,5 +216,33 @@ internal static class InstructionFunctions
     internal static void Iret(Hardware hw, byte b1, byte b2, byte b3)
     {
         hw.Iret();
+    }
+
+    // SAVEREGS [ptr]  — saves the full register file (with the live IP folded into
+    // the EIP slot) to the absolute address in reg[b1]. Privileged-only.
+    internal static void SaveRegs(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.SaveRegistersTo(hw.ReadRegisterAt(b1));
+    }
+
+    // LOADREGS [ptr]  — restores the full register file from the absolute address
+    // in reg[b1] and sets the IP from the restored EIP slot. Privileged-only.
+    internal static void LoadRegs(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.LoadRegistersFrom(hw.ReadRegisterAt(b1));
+    }
+
+    // SETLAYOUT [ptr]  — refreshes the hardware process layout from the process
+    // table entry at the absolute address in reg[b1]. Privileged-only.
+    internal static void SetLayout(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.SetLayoutFromEntry(hw.ReadRegisterAt(b1));
+    }
+
+    // OSRET reg  — sets the privilege level to reg[b1]; execution resumes at the
+    // IP that LOADREGS restored. The OS's "return to a process" primitive.
+    internal static void OsRet(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.OsReturn(hw.ReadRegisterAt(b1));
     }
 }

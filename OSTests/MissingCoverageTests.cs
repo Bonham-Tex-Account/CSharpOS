@@ -71,14 +71,14 @@ public class MissingCoverageTests
     {
         // Uses BasicOS so the LOAD trap condition is active.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(1024, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 100;
         process.ProgramSize = 4;
         hw.LoadProcessLayout(process);
 
         InvalidInstructionArgs? trapped = null;
-        os.InvalidInstruction += (_, e) => { trapped = e; };
+        hw.InvalidInstruction += (_, e) => { trapped = e; };
 
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
         hw.WriteRegisterAt(1, 800); // address = 100 (programBase) + 800 = 900, outside [100, 376)
@@ -97,14 +97,14 @@ public class MissingCoverageTests
         // Uses BasicOS so the STORE trap is defined — but the Condition gates on
         // User mode only, so kernel-mode writes must not fire it.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(1024, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 100;
         process.ProgramSize = 4;
         hw.LoadProcessLayout(process);
 
         bool trapped = false;
-        os.InvalidInstruction += (_, _) => { trapped = true; };
+        hw.InvalidInstruction += (_, _) => { trapped = true; };
 
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         // programBase in Kernel = kernelSectionStart = 104
@@ -258,48 +258,6 @@ public class MissingCoverageTests
         Assert.Equal(104, hw.ReadRegister(RegisterName.ESP));
     }
 
-    // ---- OS state edge cases ------------------------------------------------
-
-    [Fact]
-    public void HasProcesses_WithOnlyPendingProcesses_ReturnsTrue()
-    {
-        TrappingOS os = new TrappingOS(new List<Trap>(), new StringWriter());
-        Test.NewHardware(1024, os); // constructor calls AttachHardware
-        // Enqueue without draining — process sits in pendingProcesses, not activeProcesses
-        os.LoadProcess(new Process("dummy.bin", 128, 64));
-        Assert.True(os.HasProcesses);
-        Assert.False(os.HasRunningProcess);
-    }
-
-    [Fact]
-    public void Schedule_WithNoActiveOrPendingProcesses_DoesNotContextSwitch()
-    {
-        TrappingOS os = new TrappingOS(new List<Trap>(), new StringWriter());
-        Hardware hw = Test.NewHardware(1024, os);
-        int switches = 0;
-        os.ContextSwitched += (_, _) => switches++;
-
-        os.Schedule(hw);
-
-        Assert.Equal(0, switches);
-        Assert.False(os.HasRunningProcess);
-    }
-
-    [Fact]
-    public void MultipleInputInterrupts_AllDrainedInSingleRunTick()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        hw.RaiseInputInterrupt(10);
-        hw.RaiseInputInterrupt(20);
-        hw.RaiseInputInterrupt(30);
-
-        hw.Run(); // DrainInterrupts at the start of Run processes all three
-
-        Assert.Equal(3, os.WakeCount);
-        Assert.Equal(WaitReason.Input, os.LastWakeReason);
-    }
-
     // ---- Assembler edge cases -----------------------------------------------
 
     [Fact]
@@ -387,29 +345,24 @@ public class MissingCoverageTests
         Assert.True(result);
     }
 
-    [Fact]
-    public void TrappingOS_HandleInvalidInstruction_UsesReasonFromTrapTable()
-    {
-        StringWriter log = new StringWriter();
-        TrappingOS os = new TrappingOS(
-            new List<Trap> { new Trap { Opcode = 0x42, Reason = "custom reason", Condition = null! } },
-            log);
-        Hardware hw = Test.NewHardware(512, os);
-
-        os.HandleInvalidInstruction(hw, 0x42, 0, 0, 0);
-
-        Assert.Contains("custom reason", log.ToString());
-    }
-
     // ---- Computer -----------------------------------------------------------
 
     [Fact]
     public void Computer_LoadProcess_DelegatesToOS()
     {
-        TrappingOS os = new TrappingOS(new List<Trap>(), new StringWriter());
-        Computer computer = new Computer(os, 4096, Test.AllRegisters(), new List<Process>());
-        computer.LoadProcess(new Process("dummy.bin", 128, 64));
-        Assert.True(os.HasProcesses);
+        string path = Path.Combine(Path.GetTempPath(), "csostest_" + Guid.NewGuid().ToString("N") + ".bin");
+        File.WriteAllBytes(path, new byte[] { 0, 0, 0, 0 });
+        try
+        {
+            BasicOS os = new BasicOS(new StringWriter());
+            Computer computer = new Computer(os, 8192, Test.AllRegisters(), new List<Process>());
+            computer.LoadProcess(new Process(path, 128, 64));
+            Assert.True(os.HasProcesses);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 }
 
@@ -464,9 +417,8 @@ public class OsEdgeCaseTests : IDisposable
         hw.ProgramOutput += (_, e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
 
         os.LoadProcess(new Process(TempFile(HltProgram()), 128, 64)); // P1 halts immediately
-        os.ContextSwitch(hw);
 
-        // Enqueue P2 after initial drain — it sits in pendingProcesses while P1 runs
+        // Load P2 while P1 is still present; it runs after P1 halts and frees memory.
         os.LoadProcess(new Process(TempFile(PrintThenHalt(99)), 128, 64));
 
         RunSteps(os, hw, 2000);
@@ -485,27 +437,10 @@ public class OsEdgeCaseTests : IDisposable
         asm.Hlt();
 
         os.LoadProcess(new Process(TempFile(asm.Build()), 128, 64));
-        os.ContextSwitch(hw);
         RunSteps(os, hw, 500);
 
         Assert.True(os.HasProcesses);       // process still exists, just blocked
         Assert.False(os.HasRunningProcess); // but CPU is idle
-    }
-
-    [Fact]
-    public void Schedule_WhenProcessAlreadyRunning_DoesNotFireContextSwitchedEvent()
-    {
-        BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
-        os.LoadProcess(new Process(TempFile(HltProgram()), 128, 64));
-        os.ContextSwitch(hw); // sets currentProcess
-
-        int extraSwitches = 0;
-        os.ContextSwitched += (_, _) => extraSwitches++;
-
-        os.Schedule(hw); // currentProcess != null → early return
-
-        Assert.Equal(0, extraSwitches);
     }
 
     [Fact]
@@ -522,7 +457,6 @@ public class OsEdgeCaseTests : IDisposable
         os.LoadProcess(new Process(TempFile(PrintThenHalt(11)), 128, 64));
         os.LoadProcess(new Process(TempFile(PrintThenHalt(22)), 128, 64));
 
-        os.ContextSwitch(hw);
         RunSteps(os, hw, 5000);
 
         Assert.Contains(11, outputs);

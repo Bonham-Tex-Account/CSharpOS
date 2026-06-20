@@ -9,6 +9,8 @@ namespace OSTests;
 internal sealed class FakeOS : IOperatingSystem
 {
     public byte[] KernelImage => Array.Empty<byte>();
+    public int OsMemorySize => 0;
+    public byte[] BuildOsImage(int osMemoryBase) => Array.Empty<byte>();
 
     public int AttachHardwareCount;
     public int ContextSwitchCount;
@@ -19,6 +21,16 @@ internal sealed class FakeOS : IOperatingSystem
     public byte LastB1;
     public byte LastB2;
     public byte LastB3;
+
+    // No OS image: the bare hardware harness used by low-level instruction tests.
+    public bool HasProcesses { get; set; }
+
+    public int LoadProcessCount;
+
+    public void LoadProcess(Process process)
+    {
+        LoadProcessCount++;
+    }
 
     public void AttachHardware(Hardware hw)
     {

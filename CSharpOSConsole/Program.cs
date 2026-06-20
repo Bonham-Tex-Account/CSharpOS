@@ -2,7 +2,7 @@ using CSharpOS;
 using CSharpOSConsole;
 using OperatingSystem = CSharpOS.OperatingSystem;
 
-const int MemorySize = 4096;
+const int MemorySize = 16384;
 const int RequiredMemory = 128;
 const int RequiredStackSize = 64;
 const int StepDelayMs = 250;
@@ -82,20 +82,28 @@ void Run(List<string> programPaths)
         os.LoadProcess(new Process(path, RequiredMemory, RequiredStackSize));
     }
 
-    // Boot: drain the pending queue and make the first process current,
-    // avoiding a spurious trap on un-loaded memory.
-    os.ContextSwitch(hw);
-
+    // The OS schedules the first process automatically on the first idle Run tick.
     while (os.HasProcesses)
     {
         hw.Run();
 
-        // The CPU only idles when every (remaining) process is blocked on I/O.
-        // Other Ready processes have already run; now read a value and raise an input
-        // interrupt to wake a waiter. Reading synchronously here is fine — nothing
-        // else can run. (Skip if all processes have finished.)
+        // The CPU appears idle both transiently (while an OS routine is mid-dispatch)
+        // and genuinely (every process blocked on input). Distinguish the two by
+        // pumping a bounded number of ticks: if nothing becomes runnable, the system
+        // is truly waiting on input, so read a value and raise an input interrupt.
         if (os.HasProcesses && !os.HasRunningProcess)
         {
+            int pump = 0;
+            while (pump < 1000 && os.HasProcesses && !os.HasRunningProcess)
+            {
+                hw.Run();
+                pump++;
+            }
+            if (!os.HasProcesses || os.HasRunningProcess)
+            {
+                continue; // scheduling settled onto a runnable process
+            }
+
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.Write("      ◆ enter a guess: ");
             Console.ResetColor();

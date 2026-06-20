@@ -5,6 +5,10 @@ public class BasicOS : OperatingSystem
     // ---- public properties -----------------------------------------------
     public override byte[] KernelImage => kernelImage;
 
+    // The OS runs its scheduler/allocator as ISA code in this much reserved memory.
+    public override int OsMemorySize => OsLayout.TotalSize;
+    public override byte[] BuildOsImage(int osMemoryBase) => OsRoutines.BuildOsImage();
+
     // ---- private fields --------------------------------------------------
 
     // The syscall library: I/O handlers copied into each process's kernel section.
