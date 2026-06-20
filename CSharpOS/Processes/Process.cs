@@ -2,6 +2,7 @@ namespace CSharpOS;
 
 public class Process
 {
+    // ---- public fields ---------------------------------------------------
     public int RegisterStateAddress;
     public int ModeStateAddress;
     public int InstructionPointer;
@@ -13,6 +14,7 @@ public class Process
     public ProcessState State = ProcessState.Ready;
     public WaitReason WaitReason = WaitReason.None;
 
+    // ---- constructor -----------------------------------------------------
     public Process(string programFilePath, int requiredMemory, int requiredStackSize)
     {
         ProgramFilePath = programFilePath;

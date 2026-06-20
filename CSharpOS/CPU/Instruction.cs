@@ -2,6 +2,7 @@ namespace CSharpOS;
 
 public static class Instruction
 {
+    // ---- public constants (opcodes) --------------------------------------
     public const byte MOV_REG_REG = 0x01;
     public const byte MOV_REG_IMM = 0x02;
     public const byte LOAD        = 0x05;
@@ -25,8 +26,10 @@ public static class Instruction
     public const byte HLT         = 0x32;
     public const byte IRET        = 0x33;
 
+    // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
+    // ---- constructor (static initializer) --------------------------------
     static Instruction()
     {
         opcodeTable[MOV_REG_REG] = InstructionFunctions.MovRegReg;
@@ -52,6 +55,8 @@ public static class Instruction
         opcodeTable[HLT]         = InstructionFunctions.Hlt;
         opcodeTable[IRET]        = InstructionFunctions.Iret;
     }
+
+    // ---- integral functions ----------------------------------------------
 
     // Returns true if a handler ran, false if the opcode was invalid and trapped.
     public static bool Execute(int address, Hardware hw)

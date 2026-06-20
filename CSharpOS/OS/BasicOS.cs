@@ -2,16 +2,22 @@ namespace CSharpOS;
 
 public class BasicOS : OperatingSystem
 {
+    // ---- public properties -----------------------------------------------
+    public override byte[] KernelImage => kernelImage;
+
+    // ---- private fields --------------------------------------------------
+
+    // The syscall library: I/O handlers copied into each process's kernel section.
+    // Built once at class load; assembled with origin = KernelHeaderSize so labels
+    // are section-relative (code lives just past the reserved header).
+    private static readonly byte[] kernelImage = BuildKernelImage();
+
+    // ---- constructor -----------------------------------------------------
     public BasicOS(TextWriter log) : base(new List<Trap>(), log)
     {
     }
 
-    // The syscall library: I/O handlers copied into each process's kernel section.
-    // Built once, assembled with origin = KernelHeaderSize so its labels are
-    // section-relative (the code is loaded just past the reserved header).
-    private static readonly byte[] kernelImage = BuildKernelImage();
-
-    public override byte[] KernelImage => kernelImage;
+    // ---- helper functions ------------------------------------------------
 
     // On entry the hardware has saved the user register file at section offset 0
     // and written trap-info at KernelTrapInfoOffset (faulting opcode, the operand's

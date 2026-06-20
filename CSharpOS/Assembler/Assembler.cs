@@ -7,20 +7,21 @@ namespace CSharpOS;
 /// shift label offsets when the code is loaded at a fixed offset (e.g. the kernel
 /// section, whose code begins after a reserved header).
 /// </summary>
-public sealed class Assembler
+public sealed partial class Assembler
 {
-    private struct Fixup
-    {
-        public int Position;
-        public string Label;
-        public bool Imm8;
-    }
-
+    // ---- private fields --------------------------------------------------
     private readonly List<byte> code = new List<byte>();
     private readonly Dictionary<string, int> labels = new Dictionary<string, int>();
     private readonly List<Fixup> fixups = new List<Fixup>();
     private readonly List<string> dataLabels = new List<string>();
 
+    // ---- accessor methods ------------------------------------------------
+    public void Label(string name)
+    {
+        labels[name] = code.Count;
+    }
+
+    // ---- helper functions ------------------------------------------------
     private void Emit(byte opcode, byte b1, byte b2, byte b3)
     {
         code.Add(opcode);
@@ -29,11 +30,14 @@ public sealed class Assembler
         code.Add(b3);
     }
 
-    public void Label(string name)
+    private void AddJump(byte opcode, string label)
     {
-        labels[name] = code.Count;
+        int position = code.Count;
+        Emit(opcode, 0, 0, 0);
+        fixups.Add(new Fixup { Position = position, Label = label, Imm8 = false });
     }
 
+    // ---- integral functions (instruction emission) -----------------------
     public void Mov(RegisterName dest, RegisterName src)
     {
         Emit(Instruction.MOV_REG_REG, (byte)dest, (byte)src, 0);
@@ -97,35 +101,12 @@ public sealed class Assembler
         Emit(Instruction.DEC, (byte)reg, 0, 0);
     }
 
-    public void Jmp(string label)
-    {
-        AddJump(Instruction.JMP, label);
-    }
-
-    public void Jz(string label)
-    {
-        AddJump(Instruction.JZ, label);
-    }
-
-    public void Jnz(string label)
-    {
-        AddJump(Instruction.JNZ, label);
-    }
-
-    public void Js(string label)
-    {
-        AddJump(Instruction.JS, label);
-    }
-
-    public void Jns(string label)
-    {
-        AddJump(Instruction.JNS, label);
-    }
-
-    public void Call(string label)
-    {
-        AddJump(Instruction.CALL, label);
-    }
+    public void Jmp(string label) { AddJump(Instruction.JMP, label); }
+    public void Jz(string label)  { AddJump(Instruction.JZ,  label); }
+    public void Jnz(string label) { AddJump(Instruction.JNZ, label); }
+    public void Js(string label)  { AddJump(Instruction.JS,  label); }
+    public void Jns(string label) { AddJump(Instruction.JNS, label); }
+    public void Call(string label) { AddJump(Instruction.CALL, label); }
 
     public void Ret()
     {
@@ -158,15 +139,8 @@ public sealed class Assembler
         dataLabels.Add(name);
     }
 
-    private void AddJump(byte opcode, string label)
-    {
-        int position = code.Count;
-        Emit(opcode, 0, 0, 0);
-        fixups.Add(new Fixup { Position = position, Label = label, Imm8 = false });
-    }
-
-    // origin is added to every resolved label offset, so code assembled here can be
-    // loaded at a non-zero offset within its program/section and still self-reference.
+    // origin is added to every resolved label offset, so code assembled here can
+    // be loaded at a non-zero offset and still self-reference correctly.
     public byte[] Build(int origin = 0)
     {
         foreach (string name in dataLabels)

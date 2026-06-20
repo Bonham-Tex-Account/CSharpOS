@@ -4,6 +4,18 @@ namespace CSharpOS;
 
 public abstract class OperatingSystem : IOperatingSystem
 {
+    // ---- public events and properties ------------------------------------
+    public event EventHandler<ContextSwitchArgs>? ContextSwitched;
+    public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
+
+    public bool HasProcesses { get { return activeProcesses.Count > 0 || !pendingProcesses.IsEmpty; } }
+    public bool HasRunningProcess { get { return currentProcess != null; } }
+
+    // Syscall functions shipped by this OS, copied into each process's kernel
+    // section. Empty until overridden; subclasses supply the syscall library.
+    public virtual byte[] KernelImage => Array.Empty<byte>();
+
+    // ---- private fields --------------------------------------------------
     private List<Process> activeProcesses;
     private ConcurrentQueue<Process> pendingProcesses;
     private Process? currentProcess;
@@ -11,15 +23,8 @@ public abstract class OperatingSystem : IOperatingSystem
     private List<Trap> traps;
     private List<MemoryRange> availableMemoryRanges;
     private TextWriter log;
-    public bool HasProcesses { get { return activeProcesses.Count > 0 || !pendingProcesses.IsEmpty; } }
 
-    public event EventHandler<ContextSwitchArgs>? ContextSwitched;
-    public event EventHandler<InvalidInstructionArgs>? InvalidInstruction;
-
-    // Syscall functions shipped by this OS, copied into each process's kernel
-    // section. Empty until the SYSCALL pass; subclasses override to add syscalls.
-    public virtual byte[] KernelImage => Array.Empty<byte>();
-
+    // ---- constructor -----------------------------------------------------
     protected OperatingSystem(List<Trap> traps, TextWriter log)
     {
         this.traps = traps;
@@ -30,6 +35,7 @@ public abstract class OperatingSystem : IOperatingSystem
         currentProcess = null;
     }
 
+    // ---- accessor methods ------------------------------------------------
     public void AttachHardware(Hardware hw)
     {
         availableMemoryRanges = new List<MemoryRange> { new MemoryRange { Start = 0, Size = hw.GetMemorySize() } };
@@ -40,6 +46,7 @@ public abstract class OperatingSystem : IOperatingSystem
         pendingProcesses.Enqueue(process);
     }
 
+    // ---- helper functions ------------------------------------------------
     private void DrainPendingProcesses(Hardware hw)
     {
         while (pendingProcesses.TryDequeue(out Process? process))
@@ -52,7 +59,6 @@ public abstract class OperatingSystem : IOperatingSystem
             {
                 process.RequiredMemory = minMemory;
             }
-            // The kernel section is the hardware-reserved header plus the kernel image.
             int kernelSectionSize = Hardware.KernelHeaderSize + KernelImage.Length;
             int totalSize = program.Length + kernelSectionSize + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
@@ -89,48 +95,6 @@ public abstract class OperatingSystem : IOperatingSystem
         if (range.Size > used)
         {
             availableMemoryRanges.Add(new MemoryRange { Start = range.Start + used, Size = range.Size - used });
-        }
-    }
-
-    public void HandleInvalidInstruction(Hardware hw, byte opcode, byte b1, byte b2, byte b3)
-    {
-        string reason = "Unknown invalid instruction";
-        foreach (Trap trap in traps)
-        {
-            if (trap.Opcode == opcode)
-            {
-                reason = trap.Reason;
-                break;
-            }
-        }
-
-        log.WriteLine($"[INVALID INSTRUCTION] Process: {currentProcess?.ProgramFilePath ?? "unknown"} | Reason: {reason} | Instruction: {opcode:X2} {b1:X2} {b2:X2} {b3:X2}");
-        InvalidInstruction?.Invoke(this, new InvalidInstructionArgs { Opcode = opcode, B1 = b1, B2 = b2, B3 = b3, ProcessName = currentProcess?.ProgramFilePath, Reason = reason });
-
-        TerminateCurrentProcess(hw);
-    }
-
-    public void HandleHalt(Hardware hw)
-    {
-        log.WriteLine($"[HALT] Process: {currentProcess?.ProgramFilePath ?? "unknown"}");
-        TerminateCurrentProcess(hw);
-    }
-
-    private void TerminateCurrentProcess(Hardware hw)
-    {
-        string? terminated = currentProcess?.ProgramFilePath;
-
-        FreeCurrentProcessMemory(hw);
-        activeProcesses.Remove(currentProcess!);
-        currentProcess = null;
-
-        DrainPendingProcesses(hw);
-
-        if (activeProcesses.Count > 0)
-        {
-            // The removed process's slot now holds the next process, so start the
-            // scan there.
-            SwitchToNextReady(hw, terminated, currentProcessIndex % activeProcesses.Count);
         }
     }
 
@@ -173,75 +137,27 @@ public abstract class OperatingSystem : IOperatingSystem
         availableMemoryRanges = merged;
     }
 
-    public bool HasRunningProcess { get { return currentProcess != null; } }
-
-    public void ContextSwitch(Hardware hw)
+    private void TerminateCurrentProcess(Hardware hw)
     {
+        string? terminated = currentProcess?.ProgramFilePath;
+
+        FreeCurrentProcessMemory(hw);
+        activeProcesses.Remove(currentProcess!);
+        currentProcess = null;
+
         DrainPendingProcesses(hw);
 
-        if (activeProcesses.Count == 0)
+        if (activeProcesses.Count > 0)
         {
-            currentProcess = null;
-            return;
-        }
-
-        string? fromProcess = currentProcess?.ProgramFilePath;
-        if (currentProcess != null)
-        {
-            SaveCurrent(hw); // the preempted process stays Ready
-        }
-
-        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
-    }
-
-    // Marks the running process Blocked on a device and immediately yields the CPU
-    // to the next Ready process (prioritized), or idles if none are Ready.
-    public void BlockCurrentProcess(Hardware hw, WaitReason reason)
-    {
-        if (currentProcess == null)
-        {
-            return;
-        }
-        string? fromProcess = currentProcess.ProgramFilePath;
-        currentProcess.State = ProcessState.Blocked;
-        currentProcess.WaitReason = reason;
-        SaveCurrent(hw); // saves the rewound IP so the I/O instruction re-runs on resume
-        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
-    }
-
-    // A device interrupt fired: make one process waiting on that device Ready again.
-    // Does not preempt the running process.
-    public void Wake(WaitReason reason)
-    {
-        foreach (Process process in activeProcesses)
-        {
-            if (process.State == ProcessState.Blocked && process.WaitReason == reason)
-            {
-                process.State = ProcessState.Ready;
-                process.WaitReason = WaitReason.None;
-                return;
-            }
+            // The removed process's slot now holds the next process, so start the
+            // scan there.
+            SwitchToNextReady(hw, terminated, currentProcessIndex % activeProcesses.Count);
         }
     }
 
-    // Called by the hardware when the CPU is idle (no running process): pick a Ready
-    // process to run, if any has become runnable.
-    public void Schedule(Hardware hw)
-    {
-        if (currentProcess != null)
-        {
-            return;
-        }
-        DrainPendingProcesses(hw);
-        if (activeProcesses.Count == 0)
-        {
-            return;
-        }
-        SwitchToNextReady(hw, null, (currentProcessIndex + 1) % activeProcesses.Count);
-    }
-
-    // Scans up to all processes from startIndex for a Ready one, loads it as current,
-    // and fires ContextSwitched. Sets currentProcess = null when none are Ready (idle).
+    // Scans up to all processes from startIndex for a Ready one, loads it as
+    // current, and fires ContextSwitched. Sets currentProcess = null (idle) when
+    // no Ready process exists.
     private void SwitchToNextReady(Hardware hw, string? fromProcess, int startIndex)
     {
         int count = activeProcesses.Count;
@@ -277,8 +193,8 @@ public abstract class OperatingSystem : IOperatingSystem
     }
 
     // The privilege level is part of each process's saved state, stored in a
-    // reserved slot in its protected area so it survives context switches (a
-    // process preempted mid-syscall resumes at the same level).
+    // reserved slot so it survives context switches (a process preempted
+    // mid-syscall resumes at the same level).
     private void SaveMode(Hardware hw, Process process)
     {
         hw.WriteBytes(process.ModeStateAddress, new byte[] { (byte)hw.GetPrivilegeLevel(), 0, 0, 0 });
@@ -288,5 +204,94 @@ public abstract class OperatingSystem : IOperatingSystem
     {
         byte[] mode = hw.ReadBytes(process.ModeStateAddress);
         hw.SetPrivilegeLevel((PrivilegeLevel)mode[0]);
+    }
+
+    // ---- integral functions ----------------------------------------------
+    public void ContextSwitch(Hardware hw)
+    {
+        DrainPendingProcesses(hw);
+
+        if (activeProcesses.Count == 0)
+        {
+            currentProcess = null;
+            return;
+        }
+
+        string? fromProcess = currentProcess?.ProgramFilePath;
+        if (currentProcess != null)
+        {
+            SaveCurrent(hw); // the preempted process stays Ready
+        }
+
+        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
+    }
+
+    // Marks the running process Blocked on a device and immediately yields the
+    // CPU to the next Ready process, or idles if none are Ready.
+    public void BlockCurrentProcess(Hardware hw, WaitReason reason)
+    {
+        if (currentProcess == null)
+        {
+            return;
+        }
+        string? fromProcess = currentProcess.ProgramFilePath;
+        currentProcess.State = ProcessState.Blocked;
+        currentProcess.WaitReason = reason;
+        SaveCurrent(hw); // saves the rewound IP so the I/O instruction re-runs on resume
+        SwitchToNextReady(hw, fromProcess, (currentProcessIndex + 1) % activeProcesses.Count);
+    }
+
+    // A device interrupt fired: make one process waiting on that device Ready.
+    // Does not preempt the running process.
+    public void Wake(WaitReason reason)
+    {
+        foreach (Process process in activeProcesses)
+        {
+            if (process.State == ProcessState.Blocked && process.WaitReason == reason)
+            {
+                process.State = ProcessState.Ready;
+                process.WaitReason = WaitReason.None;
+                return;
+            }
+        }
+    }
+
+    // Called by the hardware when the CPU is idle: pick a Ready process, if any.
+    public void Schedule(Hardware hw)
+    {
+        if (currentProcess != null)
+        {
+            return;
+        }
+        DrainPendingProcesses(hw);
+        if (activeProcesses.Count == 0)
+        {
+            return;
+        }
+        SwitchToNextReady(hw, null, (currentProcessIndex + 1) % activeProcesses.Count);
+    }
+
+    public void HandleInvalidInstruction(Hardware hw, byte opcode, byte b1, byte b2, byte b3)
+    {
+        string reason = "Unknown invalid instruction";
+        foreach (Trap trap in traps)
+        {
+            if (trap.Opcode == opcode)
+            {
+                reason = trap.Reason;
+                break;
+            }
+        }
+
+        log.WriteLine($"[INVALID INSTRUCTION] Process: {currentProcess?.ProgramFilePath ?? "unknown"} | Reason: {reason} | Instruction: {opcode:X2} {b1:X2} {b2:X2} {b3:X2}");
+        InvalidInstruction?.Invoke(this, new InvalidInstructionArgs { Opcode = opcode, B1 = b1, B2 = b2, B3 = b3, ProcessName = currentProcess?.ProgramFilePath, Reason = reason });
+
+        TerminateCurrentProcess(hw);
+    }
+
+    public void HandleHalt(Hardware hw)
+    {
+        log.WriteLine($"[HALT] Process: {currentProcess?.ProgramFilePath ?? "unknown"}");
+        TerminateCurrentProcess(hw);
     }
 }

@@ -2,8 +2,37 @@ namespace CSharpOS;
 
 internal static class InstructionFunctions
 {
+    // ---- private constants -----------------------------------------------
     private const int ZeroFlag = 1;
     private const int SignFlag = 2;
+
+    // ---- helper functions ------------------------------------------------
+    private static void UpdateFlags(Hardware hw, int result)
+    {
+        int flags = hw.ReadRegister(RegisterName.EFLAGS);
+
+        if (result == 0)
+        {
+            flags |= ZeroFlag;
+        }
+        else
+        {
+            flags &= ~ZeroFlag;
+        }
+
+        if (result < 0)
+        {
+            flags |= SignFlag;
+        }
+        else
+        {
+            flags &= ~SignFlag;
+        }
+
+        hw.WriteRegister(RegisterName.EFLAGS, flags);
+    }
+
+    // ---- integral functions (instruction implementations) ----------------
 
     internal static void MovRegReg(Hardware hw, byte b1, byte b2, byte b3)
     {
@@ -37,7 +66,7 @@ internal static class InstructionFunctions
         hw.WriteBytes(address, new byte[]
         {
             (byte)(value & 0xFF),
-            (byte)((value >> 8) & 0xFF),
+            (byte)((value >> 8)  & 0xFF),
             (byte)((value >> 16) & 0xFF),
             (byte)((value >> 24) & 0xFF)
         });
@@ -136,7 +165,7 @@ internal static class InstructionFunctions
         hw.WriteBytes(esp, new byte[]
         {
             (byte)(returnAddress & 0xFF),
-            (byte)((returnAddress >> 8) & 0xFF),
+            (byte)((returnAddress >> 8)  & 0xFF),
             (byte)((returnAddress >> 16) & 0xFF),
             (byte)((returnAddress >> 24) & 0xFF)
         });
@@ -153,9 +182,9 @@ internal static class InstructionFunctions
         hw.SetInstructionPointer(returnAddress);
     }
 
-    // OUT is privileged: in user mode it traps into the kernel (which performs the
-    // real device write in kernel mode); the operand byte-offset locates the user's
-    // value in the saved register file.
+    // OUT is privileged: in user mode it traps into the kernel (which performs
+    // the real device write); the operand byte-offset locates the value in the
+    // saved register file.
     internal static void Out(Hardware hw, byte b1, byte b2, byte b3)
     {
         if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
@@ -191,30 +220,5 @@ internal static class InstructionFunctions
             return;
         }
         hw.Iret();
-    }
-
-    private static void UpdateFlags(Hardware hw, int result)
-    {
-        int flags = hw.ReadRegister(RegisterName.EFLAGS);
-
-        if (result == 0)
-        {
-            flags |= ZeroFlag;
-        }
-        else
-        {
-            flags &= ~ZeroFlag;
-        }
-
-        if (result < 0)
-        {
-            flags |= SignFlag;
-        }
-        else
-        {
-            flags &= ~SignFlag;
-        }
-
-        hw.WriteRegister(RegisterName.EFLAGS, flags);
     }
 }
