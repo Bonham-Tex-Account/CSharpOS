@@ -203,6 +203,103 @@ public class OsSchedulingRoutineTests
         Assert.Equal(-1, ReadWord(hw, OsLayout.CurrentIndexOffset));
     }
 
+    [Fact]
+    public void InvalidInstruction_TerminatesCurrent_AndResumesNext()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 2);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        SeedEntry(hw, 0, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 1000, 0x111, 100);
+        SeedEntry(hw, 1, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 2000, 0x222, 300);
+
+        hw.SetInstructionPointer(0x60);
+        hw.DispatchOsRoutine(Hardware.IvtInvalidInstruction);
+        RunRoutine(hw);
+
+        int entry0 = OsLayout.ProcessEntryAddress(0);
+        Assert.Equal((int)ProcessState.Terminated, ReadWord(hw, entry0 + Hardware.ProcessEntryState));
+        Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
+        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+    }
+
+    [Fact]
+    public void InvalidInstruction_LastProcess_GoesIdle()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 1);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        SeedEntry(hw, 0, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 1000, 0x111, 100);
+
+        hw.DispatchOsRoutine(Hardware.IvtInvalidInstruction);
+        RunRoutine(hw);
+
+        int entry0 = OsLayout.ProcessEntryAddress(0);
+        Assert.Equal((int)ProcessState.Terminated, ReadWord(hw, entry0 + Hardware.ProcessEntryState));
+        Assert.Equal(-1, ReadWord(hw, OsLayout.CurrentIndexOffset));
+    }
+
+    [Fact]
+    public void Schedule_SkipsTerminated_ToFindReady()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 2);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, -1);
+        SeedEntry(hw, 0, ProcessState.Terminated, WaitReason.None, PrivilegeLevel.User,    0,     0, 100);
+        SeedEntry(hw, 1, ProcessState.Ready,      WaitReason.None, PrivilegeLevel.User, 2000, 0x222, 300);
+
+        hw.DispatchOsRoutine(Hardware.IvtSchedule);
+        RunRoutine(hw);
+
+        // Index 0 is Terminated — Schedule skips it and picks index 1.
+        Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
+        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(0x222, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void Wake_WhenNoMatchingBlockedProcess_ResumesCurrent()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 2);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        SeedEntry(hw, 0, ProcessState.Ready,   WaitReason.None,   PrivilegeLevel.User, 1000, 0x111, 100);
+        SeedEntry(hw, 1, ProcessState.Blocked, WaitReason.Output, PrivilegeLevel.User, 2000, 0x222, 300);
+
+        // WakeInput: only an Output waiter exists, so nothing matches.
+        hw.WriteRegisterAt(EAX, 999);
+        hw.SetInstructionPointer(0x50);
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        RunRoutine(hw);
+
+        // The Output waiter stays Blocked and the running process keeps going.
+        int entry1 = OsLayout.ProcessEntryAddress(1);
+        Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
+        Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));
+        Assert.Equal(999, hw.ReadRegisterAt(EAX));
+        Assert.Equal(0x50, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void Wake_WhenMultipleBlockedOnSameReason_WakesOnlyFirst()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 3);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        SeedEntry(hw, 0, ProcessState.Ready,   WaitReason.None,  PrivilegeLevel.User, 1000, 0x111, 100);
+        SeedEntry(hw, 1, ProcessState.Blocked, WaitReason.Input, PrivilegeLevel.User, 2000, 0x222, 300);
+        SeedEntry(hw, 2, ProcessState.Blocked, WaitReason.Input, PrivilegeLevel.User, 3000, 0x333, 500);
+
+        hw.SetInstructionPointer(0x50);
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        RunRoutine(hw);
+
+        // Only index 1 (the first matching waiter) should be woken.
+        int entry1 = OsLayout.ProcessEntryAddress(1);
+        int entry2 = OsLayout.ProcessEntryAddress(2);
+        Assert.Equal((int)ProcessState.Ready,   ReadWord(hw, entry1 + Hardware.ProcessEntryState));
+        Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry2 + Hardware.ProcessEntryState));
+    }
+
     private static int ReadWord(Hardware hw, int address)
     {
         byte[] b = hw.ReadBytes(address);

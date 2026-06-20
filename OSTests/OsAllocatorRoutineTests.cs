@@ -11,6 +11,7 @@ namespace OSTests;
 public class OsAllocatorRoutineTests
 {
     private const byte EAX = 0;
+    private const byte EBX = 1;
 
     private static Hardware NewSeededHardware()
     {
@@ -133,6 +134,91 @@ public class OsAllocatorRoutineTests
         Assert.Equal(5000, FreeRangeStart(hw, 0));
         Assert.Equal(800, FreeRangeSizeAt(hw, 0));
         Assert.Equal((int)ProcessState.Terminated, ReadWord(hw, entry + Hardware.ProcessEntryState));
+    }
+
+    [Fact]
+    public void Halt_AppendsToNonEmptyFreeList()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 1);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        // Seed one existing free range so Halt must append, not insert.
+        WriteWord(hw, OsLayout.FreeRangeCountOffset, 1);
+        SeedFreeRange(hw, 0, 1000, 200);
+
+        int entry = OsLayout.ProcessEntryAddress(0);
+        WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Ready);
+        WriteWord(hw, entry + Hardware.ProcessEntryProgramAddress, 5000);
+        WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 800);
+
+        hw.DispatchOsRoutine(Hardware.IvtHalt);
+        for (int step = 0; step < 2000 && hw.GetPrivilegeLevel() == PrivilegeLevel.Privileged; step++)
+        {
+            int ip = hw.GetInstructionPointer();
+            hw.SetInstructionPointer(ip + 4);
+            Instruction.Execute(ip, hw);
+        }
+
+        // Free list now has 2 entries; the existing range is untouched.
+        Assert.Equal(2, ReadWord(hw, OsLayout.FreeRangeCountOffset));
+        Assert.Equal(1000, FreeRangeStart(hw, 0));
+        Assert.Equal(200, FreeRangeSizeAt(hw, 0));
+        // The reclaimed range was appended at index 1.
+        Assert.Equal(5000, FreeRangeStart(hw, 1));
+        Assert.Equal(800, FreeRangeSizeAt(hw, 1));
+    }
+
+    [Fact]
+    public void InvalidInstruction_ReturnsProcessMemoryToFreeList()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 1);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        WriteWord(hw, OsLayout.FreeRangeCountOffset, 0);
+
+        int entry = OsLayout.ProcessEntryAddress(0);
+        WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Ready);
+        WriteWord(hw, entry + Hardware.ProcessEntryProgramAddress, 6000);
+        WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 400);
+
+        hw.DispatchOsRoutine(Hardware.IvtInvalidInstruction);
+        for (int step = 0; step < 2000 && hw.GetPrivilegeLevel() == PrivilegeLevel.Privileged; step++)
+        {
+            int ip = hw.GetInstructionPointer();
+            hw.SetInstructionPointer(ip + 4);
+            Instruction.Execute(ip, hw);
+        }
+
+        Assert.Equal(1, ReadWord(hw, OsLayout.FreeRangeCountOffset));
+        Assert.Equal(6000, FreeRangeStart(hw, 0));
+        Assert.Equal(400, FreeRangeSizeAt(hw, 0));
+        Assert.Equal((int)ProcessState.Terminated, ReadWord(hw, entry + Hardware.ProcessEntryState));
+    }
+
+    [Fact]
+    public void RunOsRoutineSynchronously_RestoresCpuStateAfterRoutine()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.FreeRangeCountOffset, 1);
+        SeedFreeRange(hw, 0, 4096, 8000);
+
+        int entry = OsLayout.ProcessEntryAddress(0);
+        WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 100);
+
+        // Establish a known CPU state before the synchronous call.
+        hw.WriteRegisterAt(EAX, 0xAA);
+        hw.WriteRegisterAt(EBX, 0xBB);
+        int savedIp = 1234;
+        hw.SetInstructionPointer(savedIp);
+        hw.SetPrivilegeLevel(PrivilegeLevel.User);
+
+        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+
+        // Registers, IP, and privilege level must be exactly restored.
+        Assert.Equal(0xAA, hw.ReadRegisterAt(EAX));
+        Assert.Equal(0xBB, hw.ReadRegisterAt(EBX));
+        Assert.Equal(savedIp, hw.GetInstructionPointer());
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
 
     private static int ReadWord(Hardware hw, int address)

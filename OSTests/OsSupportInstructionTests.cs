@@ -143,6 +143,38 @@ public class OsSupportInstructionTests
     }
 
     [Fact]
+    public void OsRet_WithNoPendingContext_SetsProcessNotRunning()
+    {
+        // OSRET without a prior LOADREGS (pendingContext == null) takes the idle path:
+        // it drops to the specified level but marks the CPU as not running a process.
+        Hardware hw = NewHw();
+        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+
+        hw.WriteRegisterAt(ECX, (int)PrivilegeLevel.User);
+        Exec(hw, Instruction.OSRET, ECX, 0, 0);
+
+        Assert.False(hw.IsProcessRunning());
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
+    }
+
+    [Fact]
+    public void SaveRegs_WithoutPriorCapture_PersistsLiveRegisters()
+    {
+        // When no DispatchOsRoutine has been called (trapFrame is empty), SAVEREGS
+        // falls back to persisting the live register file rather than a captured frame.
+        Hardware hw = NewHw();
+        hw.WriteRegisterAt(EAX, 321);
+        int target = 1024;
+        hw.WriteRegisterAt(ECX, target);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        // No CaptureInterruptedContext: trapFrame is still Array.Empty<byte>().
+
+        Exec(hw, Instruction.SAVEREGS, ECX, 0, 0);
+
+        Assert.Equal(321, ReadWord(hw, target + EAX * 4));
+    }
+
+    [Fact]
     public void SetLayout_RebuildsProcessLayoutFromEntry()
     {
         Hardware hw = NewHw();

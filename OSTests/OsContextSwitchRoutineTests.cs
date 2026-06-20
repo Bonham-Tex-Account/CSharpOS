@@ -144,6 +144,53 @@ public class OsContextSwitchRoutineTests
         Assert.Equal(7, ReadWord(hw, entry0 + EAX * 4));
     }
 
+    [Fact]
+    public void ContextSwitch_SkipsTerminated_ToFindReady()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 3);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
+        SeedEntry(hw, 0, (int)ProcessState.Ready,      (int)PrivilegeLevel.User, 1000, 0x111, 100, 4, 64, 32);
+        SeedEntry(hw, 1, (int)ProcessState.Terminated, (int)PrivilegeLevel.User,    0,     0, 200, 4, 64, 32);
+        SeedEntry(hw, 2, (int)ProcessState.Ready,      (int)PrivilegeLevel.User, 3000, 0x333, 500, 4, 64, 32);
+
+        hw.WriteRegisterAt(EAX, 7);
+        hw.SetInstructionPointer(0x10);
+        hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
+        RunRoutine(hw);
+
+        // Index 1 is Terminated — the scan skips it and lands on index 2.
+        Assert.Equal(2, ReadWord(hw, OsLayout.CurrentIndexOffset));
+        Assert.Equal(3000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(0x333, hw.GetInstructionPointer());
+    }
+
+    [Fact]
+    public void ContextSwitched_NotFiredWhenSameProcessResumes()
+    {
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 1);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, -1);
+        SeedEntry(hw, 0, (int)ProcessState.Ready, (int)PrivilegeLevel.User, 1000, 0x111, 100, 4, 64, 32);
+
+        // First: Schedule commits process 0 at base 100, establishing lastContextBase.
+        hw.DispatchOsRoutine(Hardware.IvtSchedule);
+        RunRoutine(hw);
+        Assert.Equal(100, hw.GetProgramBase()); // process 0 running
+
+        // Subscribe only after the first resume so we don't count that fire.
+        int eventCount = 0;
+        hw.ContextSwitched += (object? sender, ContextSwitchArgs e) => { eventCount++; };
+
+        // Wake with no blocked processes: saves and immediately restores the same
+        // entry, so the base stays at 100 and ContextSwitched must not fire.
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        RunRoutine(hw);
+
+        Assert.Equal(0, eventCount);
+        Assert.Equal(1000, hw.ReadRegisterAt(EAX)); // still process 0's register value
+    }
+
     private static int ReadWord(Hardware hw, int address)
     {
         byte[] b = hw.ReadBytes(address);
