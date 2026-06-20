@@ -39,6 +39,7 @@ public abstract class OperatingSystem : IOperatingSystem
     public void AttachHardware(Hardware hw)
     {
         availableMemoryRanges = new List<MemoryRange> { new MemoryRange { Start = 0, Size = hw.GetMemorySize() } };
+        hw.LoadTraps(traps);
     }
 
     public void LoadProcess(Process process)

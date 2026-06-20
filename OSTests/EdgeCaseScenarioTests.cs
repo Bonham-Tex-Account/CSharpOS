@@ -90,31 +90,31 @@ public class EdgeCaseScenarioTests : IDisposable
     [Fact]
     public void Iret_InUserMode_ShouldFault()
     {
-        // IRET returns from a kernel syscall; a user-mode process executing it should
-        // be rejected (privilege fault), not allowed to silently restore state and
-        // jump. This checks whether IRET is privilege-gated.
-        FakeOS os = new FakeOS();
+        // IRET in user mode must trap — the privilege check lives in BasicOS's trap
+        // table and is evaluated by Hardware.EvaluateTraps before dispatch.
+        BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = Test.NewHardware(1024, os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 0;
         process.ProgramSize = 4;
         hw.LoadProcessLayout(process);
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
-        hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.IRET, 0, 0, 0));
 
-        hw.Run();
+        bool faulted = false;
+        os.InvalidInstruction += (_, _) => { faulted = true; };
 
-        Assert.True(os.InvalidInstructionCalled, "user-mode IRET should be treated as an illegal instruction");
+        Instruction.Execute(0, hw);
+
+        Assert.True(faulted, "user-mode IRET should be treated as an illegal instruction");
     }
 
     [Fact]
     public void UserProcess_WritingOutsideItsMemory_ShouldBeTrapped()
     {
-        // No memory protection is enforced: a user STORE can scribble anywhere. A
-        // write outside the process's own ranges should be trapped. (Documents the
-        // missing protection — expected to fail.)
-        FakeOS os = new FakeOS();
+        // Out-of-bounds STORE in user mode must trap — the memory protection condition
+        // lives in BasicOS's trap table and is evaluated by Hardware.EvaluateTraps.
+        BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = Test.NewHardware(1024, os);
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
@@ -123,12 +123,14 @@ public class EdgeCaseScenarioTests : IDisposable
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
         hw.WriteRegisterAt(1, 900); // pointer well outside this process's footprint
         hw.WriteRegisterAt(0, 1234);
-        hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.STORE, 1, 0, 0));
 
-        hw.Run();
+        bool faulted = false;
+        os.InvalidInstruction += (_, _) => { faulted = true; };
 
-        Assert.True(os.InvalidInstructionCalled, "an out-of-bounds user write should be trapped");
+        Instruction.Execute(0, hw);
+
+        Assert.True(faulted, "an out-of-bounds user write should be trapped");
     }
 
     // ---- syscall transparency --------------------------------------------

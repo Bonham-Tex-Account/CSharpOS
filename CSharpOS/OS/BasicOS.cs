@@ -13,11 +13,40 @@ public class BasicOS : OperatingSystem
     private static readonly byte[] kernelImage = BuildKernelImage();
 
     // ---- constructor -----------------------------------------------------
-    public BasicOS(TextWriter log) : base(new List<Trap>(), log)
+    public BasicOS(TextWriter log) : base(BuildTraps(), log)
     {
     }
 
     // ---- helper functions ------------------------------------------------
+
+    private static List<Trap> BuildTraps()
+    {
+        return new List<Trap>
+        {
+            new Trap
+            {
+                Opcode = Instruction.IRET,
+                Reason = "IRET is a privileged instruction",
+                Condition = (hw, b1, b2, b3) => hw.GetPrivilegeLevel() == PrivilegeLevel.User
+            },
+            new Trap
+            {
+                Opcode = Instruction.LOAD,
+                Reason = "Memory read outside process bounds",
+                Condition = (hw, b1, b2, b3) =>
+                    hw.GetPrivilegeLevel() == PrivilegeLevel.User &&
+                    !hw.IsAddressInProcessRanges(hw.GetProgramBase() + hw.ReadRegisterAt(b2))
+            },
+            new Trap
+            {
+                Opcode = Instruction.STORE,
+                Reason = "Memory write outside process bounds",
+                Condition = (hw, b1, b2, b3) =>
+                    hw.GetPrivilegeLevel() == PrivilegeLevel.User &&
+                    !hw.IsAddressInProcessRanges(hw.GetProgramBase() + hw.ReadRegisterAt(b1))
+            }
+        };
+    }
 
     // On entry the hardware has saved the user register file at section offset 0
     // and written trap-info at KernelTrapInfoOffset (faulting opcode, the operand's

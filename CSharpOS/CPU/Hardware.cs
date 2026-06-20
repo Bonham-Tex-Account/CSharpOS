@@ -46,6 +46,8 @@ public partial class Hardware
     private int currentProcessKernelSectionStart;
     private int currentProcessKernelSectionSize;
 
+    private Dictionary<byte, List<Trap>> trapTable = new Dictionary<byte, List<Trap>>();
+
     private readonly Queue<int> inputBuffer = new Queue<int>();
     private bool outputBusy;
     private readonly ConcurrentQueue<Interrupt> pendingInterrupts = new ConcurrentQueue<Interrupt>();
@@ -72,6 +74,38 @@ public partial class Hardware
     public void SetInstructionPointer(int address) { instructionPointer = address; }
     public PrivilegeLevel GetPrivilegeLevel() { return level; }
     public void SetPrivilegeLevel(PrivilegeLevel value) { level = value; }
+
+    public void LoadTraps(List<Trap> traps)
+    {
+        trapTable = new Dictionary<byte, List<Trap>>();
+        foreach (Trap trap in traps)
+        {
+            if (!trapTable.ContainsKey(trap.Opcode))
+            {
+                trapTable[trap.Opcode] = new List<Trap>();
+            }
+            trapTable[trap.Opcode].Add(trap);
+        }
+    }
+
+    // Evaluates OS-defined traps for the given opcode. If a matching trap's
+    // condition fires, calls TrapInvalidInstruction and returns true.
+    public bool EvaluateTraps(byte opcode, byte b1, byte b2, byte b3)
+    {
+        if (!trapTable.TryGetValue(opcode, out List<Trap>? traps))
+        {
+            return false;
+        }
+        foreach (Trap trap in traps)
+        {
+            if (trap.Condition != null && trap.Condition(this, b1, b2, b3))
+            {
+                TrapInvalidInstruction(opcode, b1, b2, b3);
+                return true;
+            }
+        }
+        return false;
+    }
 
     // Program-relative addressing follows the privilege level: kernel code runs
     // relative to the kernel section, user code relative to its program image.

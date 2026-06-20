@@ -67,6 +67,11 @@ public static class Instruction
         byte b2 = bytes[2];
         byte b3 = bytes[3];
 
+        if (hw.EvaluateTraps(opcode, b1, b2, b3))
+        {
+            return false;
+        }
+
         if (opcodeTable.TryGetValue(opcode, out Action<Hardware, byte, byte, byte>? handler))
         {
             handler(hw, b1, b2, b3);

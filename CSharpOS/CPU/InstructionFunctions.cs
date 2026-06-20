@@ -57,11 +57,6 @@ internal static class InstructionFunctions
     internal static void Store(Hardware hw, byte b1, byte b2, byte b3)
     {
         int address = hw.GetProgramBase() + hw.ReadRegisterAt(b1);
-        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User && !hw.IsAddressInProcessRanges(address))
-        {
-            hw.TrapInvalidInstruction(Instruction.STORE, b1, b2, b3);
-            return;
-        }
         int value = hw.ReadRegisterAt(b2);
         hw.WriteBytes(address, new byte[]
         {
@@ -214,11 +209,6 @@ internal static class InstructionFunctions
 
     internal static void Iret(Hardware hw, byte b1, byte b2, byte b3)
     {
-        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
-        {
-            hw.TrapInvalidInstruction(Instruction.IRET, b1, b2, b3);
-            return;
-        }
         hw.Iret();
     }
 }
