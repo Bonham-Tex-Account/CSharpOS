@@ -4,18 +4,29 @@ using OperatingSystem = CSharpOS.OperatingSystem;
 namespace CSharpOSConsole;
 
 /// <summary>
-/// Subscribes to Hardware and OperatingSystem events and renders a step-by-step
-/// view of execution to the console. Paces execution either automatically (a
-/// fixed delay) or manually (one keypress per instruction); press 's' to switch
-/// to manual, 'a' to switch back to auto.
+/// Subscribes to Hardware events and renders a step-by-step view of execution.
+/// All text is written to an injected <see cref="TextWriter"/> (Console.Out in
+/// production, a StringWriter in tests), which makes the output easy to capture
+/// and assert on. Color is an optional side-channel applied to the real console
+/// only when <c>useColor</c> is set, and keyboard pacing only runs when
+/// <c>interactive</c> is set, so a captured run is plain, deterministic text.
+///
+/// Beyond the instruction stream it surfaces the OS's inner workings: privilege
+/// transitions (syscall traps / OS-routine dispatch), block and wake events, the
+/// process table read from OS memory on each context switch, and the free-memory
+/// map whenever it changes.
 /// </summary>
 public sealed class ConsoleVisualizer
 {
     private readonly Hardware hw;
     private readonly OperatingSystem os;
+    private readonly TextWriter output;
+    private readonly bool useColor;
+    private readonly bool interactive;
     private string currentProcess = "(booting)";
     private bool manual;
     private int delayMs;
+    private string lastFreeMap = "";
 
     private static readonly RegisterName[] Shown =
     {
@@ -23,37 +34,46 @@ public sealed class ConsoleVisualizer
         RegisterName.EDX, RegisterName.ESI, RegisterName.EDI
     };
 
-    public ConsoleVisualizer(Hardware hw, OperatingSystem os, int delayMs)
+    public ConsoleVisualizer(Hardware hw, OperatingSystem os, int delayMs,
+        TextWriter? output = null, bool useColor = true, bool interactive = true)
     {
         this.hw = hw;
         this.os = os;
         this.delayMs = delayMs;
+        this.output = output ?? Console.Out;
+        this.useColor = useColor;
+        this.interactive = interactive;
 
-        // Scheduling/fault observability now comes from Hardware (the OS logic runs
-        // as ISA code); process names are resolved from the OS's base->name map.
+        // Scheduling/fault observability comes from Hardware (the OS logic runs as
+        // ISA code); process names are resolved from the OS's base->name map.
         hw.InstructionExecuted += OnInstructionExecuted;
         hw.MemoryWritten += OnMemoryWritten;
         hw.ProgramOutput += OnProgramOutput;
         hw.ContextSwitched += OnContextSwitched;
         hw.InvalidInstruction += OnInvalidInstruction;
+        hw.PrivilegeChanged += OnPrivilegeChanged;
+        hw.ProcessBlocked += OnProcessBlocked;
+        hw.ProcessWoken += OnProcessWoken;
     }
 
     private void OnContextSwitched(object? sender, ContextSwitchArgs e)
     {
         currentProcess = FriendlyName(os.NameForBase(e.ToProgramBase));
         WriteColored(ConsoleColor.Cyan, $"  ╞══ context switch → {currentProcess}");
+        RenderProcessTable();
+        RenderFreeMemoryIfChanged();
     }
 
     private void OnInstructionExecuted(object? sender, InstructionExecutedArgs e)
     {
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write($"[{currentProcess,-12}] ");
-        Console.ResetColor();
-        Console.Write($"{e.Address,4}: ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.Write($"{Decode(e),-18}");
-        Console.ResetColor();
-        Console.WriteLine($"  {RegisterSnapshot()}");
+        SetColor(ConsoleColor.DarkGray);
+        output.Write($"[{currentProcess,-12}] ");
+        ResetColor();
+        output.Write($"{e.Address,4}: ");
+        SetColor(ConsoleColor.White);
+        output.Write($"{Decode(e),-18}");
+        ResetColor();
+        output.WriteLine($"  {RegisterSnapshot()}");
         Pace();
     }
 
@@ -78,6 +98,123 @@ public sealed class ConsoleVisualizer
     {
         string reason = e.Reason ?? "invalid instruction";
         WriteColored(ConsoleColor.Red, $"      ✗ INVALID [{e.Opcode:X2}] in {currentProcess} — {reason}");
+    }
+
+    private void OnPrivilegeChanged(object? sender, PrivilegeChangedArgs e)
+    {
+        WriteColored(ConsoleColor.Magenta, $"      ⚙ {e.From} → {e.To}  ({DescribeTransition(e.From, e.To)})");
+    }
+
+    private void OnProcessBlocked(object? sender, ProcessBlockedArgs e)
+    {
+        WriteColored(ConsoleColor.DarkYellow, $"      ⏸ {currentProcess} blocked on {e.Reason}");
+    }
+
+    private void OnProcessWoken(object? sender, ProcessWokenArgs e)
+    {
+        string detail = "";
+        if (e.Reason == WaitReason.Input)
+        {
+            detail = $" (value {e.Value})";
+        }
+        WriteColored(ConsoleColor.Green, $"      ⏵ wake signal: {e.Reason}{detail}");
+    }
+
+    // Describes a privilege transition in OS terms, so the dispatch path is legible.
+    private static string DescribeTransition(PrivilegeLevel from, PrivilegeLevel to)
+    {
+        if (to == PrivilegeLevel.Privileged)
+        {
+            return "OS routine";
+        }
+        if (to == PrivilegeLevel.Kernel)
+        {
+            // From user code this is a syscall trap; from an OS routine it is the
+            // resumption of a process that was interrupted inside a kernel handler.
+            if (from == PrivilegeLevel.User)
+            {
+                return "syscall trap";
+            }
+            return "resume (kernel)";
+        }
+        if (to == PrivilegeLevel.User && from == PrivilegeLevel.Kernel)
+        {
+            return "IRET to user";
+        }
+        return "resume process";
+    }
+
+    // Renders the OS process table read directly from OS memory, marking the
+    // currently scheduled slot. Only meaningful when an OS image is present.
+    private void RenderProcessTable()
+    {
+        if (hw.GetOsMemorySize() == 0)
+        {
+            return;
+        }
+        int count = ReadOsWord(OsLayout.ProcessCountOffset);
+        int current = ReadOsWord(OsLayout.CurrentIndexOffset);
+        string plural = "s";
+        if (count == 1)
+        {
+            plural = "";
+        }
+        WriteColored(ConsoleColor.DarkCyan, $"      ┌─ process table ({count} slot{plural}, current={current}) ─");
+        for (int i = 0; i < count; i++)
+        {
+            int entry = OsLayout.ProcessEntryAddress(i);
+            ProcessState state = (ProcessState)ReadOsWord(entry + Hardware.ProcessEntryState);
+            WaitReason wait = (WaitReason)ReadOsWord(entry + Hardware.ProcessEntryWaitReason);
+            int programAddress = ReadOsWord(entry + Hardware.ProcessEntryProgramAddress);
+            string name = FriendlyName(os.NameForBase(programAddress));
+            string marker = " ";
+            if (i == current)
+            {
+                marker = "▶";
+            }
+            string waitText = "";
+            if (wait != WaitReason.None)
+            {
+                waitText = $" on {wait}";
+            }
+            WriteColored(ConsoleColor.DarkCyan, $"      │ {marker} [{i}] {name,-12} {state}{waitText}");
+        }
+    }
+
+    // Renders the OS free-range table, but only when it has changed since the last
+    // render, so allocation and reclaim stand out without flooding the log.
+    private void RenderFreeMemoryIfChanged()
+    {
+        if (hw.GetOsMemorySize() == 0)
+        {
+            return;
+        }
+        int count = ReadOsWord(OsLayout.FreeRangeCountOffset);
+        List<string> blocks = new List<string>();
+        for (int i = 0; i < count; i++)
+        {
+            int slot = OsLayout.FreeRangeTableOffset + i * OsLayout.FreeRangeSize;
+            int start = ReadOsWord(slot);
+            int size = ReadOsWord(slot + 4);
+            blocks.Add($"[{start}+{size}]");
+        }
+        string map = "(none)";
+        if (blocks.Count != 0)
+        {
+            map = string.Join(" ", blocks);
+        }
+        if (map == lastFreeMap)
+        {
+            return;
+        }
+        lastFreeMap = map;
+        WriteColored(ConsoleColor.DarkGray, $"      free memory: {map}");
+    }
+
+    private int ReadOsWord(int address)
+    {
+        byte[] b = hw.ReadBytes(address);
+        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
     }
 
     private string RegisterSnapshot()
@@ -147,11 +284,11 @@ public sealed class ConsoleVisualizer
     {
         if (manual)
         {
-            Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.Write("      (Enter = step, a = auto) ");
-            Console.ResetColor();
+            SetColor(ConsoleColor.DarkGray);
+            output.Write("      (Enter = step, a = auto) ");
+            ResetColor();
             ConsoleKeyInfo key = Console.ReadKey(true);
-            Console.WriteLine();
+            output.WriteLine();
             if (key.KeyChar == 'a' || key.KeyChar == 'A')
             {
                 manual = false;
@@ -159,8 +296,11 @@ public sealed class ConsoleVisualizer
             return;
         }
 
-        Thread.Sleep(delayMs);
-        if (!Console.IsInputRedirected && Console.KeyAvailable)
+        if (delayMs > 0)
+        {
+            Thread.Sleep(delayMs);
+        }
+        if (interactive && !Console.IsInputRedirected && Console.KeyAvailable)
         {
             ConsoleKeyInfo key = Console.ReadKey(true);
             if (key.KeyChar == 's' || key.KeyChar == 'S')
@@ -179,10 +319,28 @@ public sealed class ConsoleVisualizer
         return Path.GetFileNameWithoutExtension(path);
     }
 
-    private static void WriteColored(ConsoleColor color, string text)
+    // Applies a foreground color to the real console only when coloring is enabled;
+    // the text itself always goes to the injected writer.
+    private void SetColor(ConsoleColor color)
     {
-        Console.ForegroundColor = color;
-        Console.WriteLine(text);
-        Console.ResetColor();
+        if (useColor)
+        {
+            Console.ForegroundColor = color;
+        }
+    }
+
+    private void ResetColor()
+    {
+        if (useColor)
+        {
+            Console.ResetColor();
+        }
+    }
+
+    private void WriteColored(ConsoleColor color, string text)
+    {
+        SetColor(color);
+        output.WriteLine(text);
+        ResetColor();
     }
 }

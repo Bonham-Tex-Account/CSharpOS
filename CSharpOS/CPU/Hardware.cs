@@ -52,6 +52,13 @@ public partial class Hardware
     public event EventHandler<ProgramOutputArgs>? ProgramOutput;
     // Fired when an OS routine resumes a different process than was last running.
     public event EventHandler<ContextSwitchArgs>? ContextSwitched;
+    // Fired on real privilege-level transitions during execution (syscall trap,
+    // OS-routine dispatch, return to a process); see PrivilegeChangedArgs.
+    public event EventHandler<PrivilegeChangedArgs>? PrivilegeChanged;
+    // Fired when the running process blocks on I/O and the OS switches away.
+    public event EventHandler<ProcessBlockedArgs>? ProcessBlocked;
+    // Fired when a device interrupt is delivered and a waiter is woken.
+    public event EventHandler<ProcessWokenArgs>? ProcessWoken;
 
     // ---- private constants -----------------------------------------------
     private const int SchedulerInstructionCount = 10;
@@ -66,6 +73,11 @@ public partial class Hardware
     private int instructionPointer;
     private PrivilegeLevel level;
     private bool trapTaken;
+
+    // Suppresses PrivilegeChanged while an OS routine is run synchronously (the
+    // C#-initiated allocation path), whose transitions are bookkeeping, not part
+    // of the visible execution timeline.
+    private bool suppressPrivilegeEvents;
 
     // The interrupted process's register file (incl. saved IP in the EIP slot),
     // snapshotted when an OS routine is dispatched so the routine can clobber the
@@ -141,6 +153,24 @@ public partial class Hardware
     public PrivilegeLevel GetPrivilegeLevel() { return level; }
     public void SetPrivilegeLevel(PrivilegeLevel value) { level = value; }
 
+    // Changes the privilege level, firing PrivilegeChanged on a real transition.
+    // Used by the execution-time transition points (dispatch, syscall, return) so
+    // they are observable; the test accessor and synchronous-run restore set the
+    // field directly to stay silent.
+    private void SetLevel(PrivilegeLevel newLevel)
+    {
+        if (newLevel == level)
+        {
+            return;
+        }
+        PrivilegeLevel from = level;
+        level = newLevel;
+        if (!suppressPrivilegeEvents)
+        {
+            PrivilegeChanged?.Invoke(this, new PrivilegeChangedArgs { From = from, To = newLevel });
+        }
+    }
+
     // Reserves the OS region at the front of memory (base 0). Processes are then
     // allocated above it, so user/kernel code can never address into the OS image.
     public void ReserveOsMemory(int size)
@@ -173,7 +203,7 @@ public partial class Hardware
     {
         CaptureInterruptedContext();
         int routineAddress = ReadWord(osMemoryBase + slot * 4);
-        level = PrivilegeLevel.Privileged;
+        SetLevel(PrivilegeLevel.Privileged);
         instructionPointer = routineAddress;
         trapTaken = true;
     }
@@ -397,11 +427,13 @@ public partial class Hardware
         if (interrupt.Kind == InterruptKind.InputReady)
         {
             inputBuffer.Enqueue(interrupt.Value);
+            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Input, Value = interrupt.Value });
             DispatchOsRoutine(IvtWakeInput, (int)WaitReason.Input);
         }
         else
         {
             outputBusy = false;
+            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Output, Value = 0 });
             DispatchOsRoutine(IvtWakeOutput, (int)WaitReason.Output);
         }
         return true;
@@ -415,6 +447,7 @@ public partial class Hardware
         instructionPointer -= 4;
         if (OsManaged)
         {
+            ProcessBlocked?.Invoke(this, new ProcessBlockedArgs { Reason = reason });
             int slot;
             if (reason == WaitReason.Input)
             {
@@ -556,7 +589,7 @@ public partial class Hardware
         WriteWord(kernelBase + KernelTrapInfoOffset,     opcode);
         WriteWord(kernelBase + KernelTrapInfoOffset + 4, operandByteOffset);
         WriteWord(kernelBase + KernelTrapInfoOffset + 8, instructionPointer);
-        level = PrivilegeLevel.Kernel;
+        SetLevel(PrivilegeLevel.Kernel);
         WriteRegister(RegisterName.ESP, currentProcessKernelStackStart + currentProcessKernelStackSize);
         instructionPointer = kernelBase + KernelHeaderSize;
         trapTaken = true;
@@ -569,7 +602,7 @@ public partial class Hardware
         int kernelBase = currentProcessKernelSectionStart;
         int returnIp = ReadWord(kernelBase + KernelTrapInfoOffset + 8);
         WriteRegisters(ReadRegisterState(kernelBase + KernelSaveAreaOffset));
-        level = PrivilegeLevel.User;
+        SetLevel(PrivilegeLevel.User);
         instructionPointer = returnIp;
     }
 
@@ -652,7 +685,7 @@ public partial class Hardware
                 lastContextBase = currentProcessInstructionStart;
             }
         }
-        level = (PrivilegeLevel)privilegeLevel;
+        SetLevel((PrivilegeLevel)privilegeLevel);
         trapTaken = true;
     }
 
@@ -669,6 +702,9 @@ public partial class Hardware
         bool savedTrap = trapTaken;
         bool savedRunning = processRunning;
 
+        // The transitions inside a synchronous allocation run are bookkeeping, not
+        // part of the visible timeline; keep them off the PrivilegeChanged feed.
+        suppressPrivilegeEvents = true;
         DispatchOsRoutine(slot, eaxArgument);
         int guard = 0;
         while (level == PrivilegeLevel.Privileged && guard++ < 1_000_000)
@@ -677,6 +713,7 @@ public partial class Hardware
             instructionPointer += 4;
             Instruction.Execute(ip, this);
         }
+        suppressPrivilegeEvents = false;
 
         WriteRegisters(savedRegisters);
         instructionPointer = savedIp;
@@ -695,7 +732,7 @@ public partial class Hardware
             DispatchOsRoutine(IvtHalt);
             return;
         }
-        level = PrivilegeLevel.Privileged;
+        SetLevel(PrivilegeLevel.Privileged);
         trapTaken = true;
     }
 
@@ -711,7 +748,7 @@ public partial class Hardware
             DispatchOsRoutine(IvtInvalidInstruction, opcode);
             return;
         }
-        level = PrivilegeLevel.Privileged;
+        SetLevel(PrivilegeLevel.Privileged);
         trapTaken = true;
     }
 
