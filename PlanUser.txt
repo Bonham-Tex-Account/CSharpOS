@@ -38,8 +38,15 @@ Running timeline:
 -will finish when all processes are run and will "turn off"
 
 
-
+ [lets fix all three, if user should not have access to IRET add a trap that marks it as invalid if it tries to call
+  it, we should not need all the registers in order to run kernel commands so only save the amount that can fit in the
+  space we have, a process storing data outside its memory should be trapped so add a trap]
 Future fixes:
 
 -make OS use custom instructions stored in the same place as other instructions (priv ISA, defined by Hardware)
 -make I/O and other systemcall instructions to use a proper kernel and user stack  
+-process that can spawn a process (spawner using id or fork clone method)
+-process killing
+-arg count /arg values
+-cd/ls
+-process priority

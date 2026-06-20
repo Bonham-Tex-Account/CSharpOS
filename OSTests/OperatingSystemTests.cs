@@ -70,9 +70,9 @@ public class OperatingSystemTests : IDisposable
 
         os.ContextSwitch(hw);
 
-        // total per process = program(4) + kernel section(128) + memory(16) +
-        // user stack(16) + kernel stack(64)
-        int perProcess = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + 16 + 16 + Hardware.KernelStackSize;
+        // total per process = program(4) + kernel section + memory (auto-sized to fit
+        // the register file) + user stack(16) + kernel stack(64)
+        int perProcess = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length) + first.RequiredMemory + first.RequiredStackSize + Hardware.KernelStackSize;
         Assert.Equal(0, first.ProgramAddress);
         Assert.Equal(perProcess, second.ProgramAddress);
     }

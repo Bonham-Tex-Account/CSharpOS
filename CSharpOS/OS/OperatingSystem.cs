@@ -45,6 +45,13 @@ public abstract class OperatingSystem : IOperatingSystem
         while (pendingProcesses.TryDequeue(out Process? process))
         {
             byte[] program = File.ReadAllBytes(process.ProgramFilePath);
+            // The memory region must hold the full register-file save block plus the
+            // mode-state slot; bump RequiredMemory up if the caller undersized it.
+            int minMemory = hw.GetRegisterFileSize() + 4;
+            if (process.RequiredMemory < minMemory)
+            {
+                process.RequiredMemory = minMemory;
+            }
             // The kernel section is the hardware-reserved header plus the kernel image.
             int kernelSectionSize = Hardware.KernelHeaderSize + KernelImage.Length;
             int totalSize = program.Length + kernelSectionSize + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;

@@ -25,6 +25,7 @@ public class Hardware
     private Dictionary<RegisterName, int> registerIndex;
     private IOperatingSystem os;
     public int GetMemorySize() { return memory.Length; }
+    public int GetRegisterFileSize() { return registers.Length; }
 
     private int instructionCount;
     private int instructionPointer;
@@ -37,6 +38,11 @@ public class Hardware
     // Set by a trap (EnterKernel / Halt / TrapInvalidInstruction) so Run does not
     // also report the faulting instruction as executed or tick the quantum.
     private bool trapTaken;
+
+    // Set once the first process layout is loaded; guards the user-mode bounds check
+    // in IsAddressInProcessRanges so plain unit tests without a process layout
+    // (no LoadProcessLayout call) are not rejected.
+    private bool processLayoutLoaded;
 
     private int currentProcessMemoryStart;
     private int currentProcessMemorySize;
@@ -254,6 +260,22 @@ public class Hardware
         MemoryWritten?.Invoke(this, new MemoryWrittenArgs { Address = address, Data = (byte[])data.Clone() });
     }
 
+    public bool IsAddressInProcessRanges(int address)
+    {
+        if (!processLayoutLoaded)
+        {
+            return true;
+        }
+        foreach (MemoryRange range in GetCurrentProcessRanges())
+        {
+            if (address >= range.Start && address < range.Start + range.Size)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public List<MemoryRange> GetCurrentProcessRanges()
     {
         List<MemoryRange> ranges = new List<MemoryRange>
@@ -319,6 +341,7 @@ public class Hardware
     // currentProcessMemoryStart).
     private void SetProcessLayout(int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
+        processLayoutLoaded = true;
         currentProcessInstructionStart = programAddress;
         currentProcessInstructionSize = programSize;
         currentProcessKernelSectionStart = programAddress + programSize;
