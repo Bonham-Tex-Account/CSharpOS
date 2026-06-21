@@ -35,15 +35,18 @@ public class ConsoleVisualizerTests : IDisposable
     }
 
     // Builds a BasicOS + Hardware wired to a fresh visualizer that renders into the
-    // returned StringWriter. The output device completes instantly so OUT does not
-    // block. The visualizer is returned only to keep it referenced.
-    private (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) NewRun()
+    // returned StringWriter. Defaults to Verbose so every channel is captured; tier
+    // tests pass an explicit mode. The output device completes instantly so OUT does
+    // not block. The visualizer is returned only to keep it referenced.
+    private (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) NewRun(
+        VisualizerMode mode = VisualizerMode.Verbose, bool showProgramIo = true)
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
         StringWriter sink = new StringWriter();
-        ConsoleVisualizer vis = new ConsoleVisualizer(hw, os, 0, sink, useColor: false, interactive: false);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(); };
+        ConsoleVisualizer vis = new ConsoleVisualizer(hw, os, 0, sink, useColor: false, interactive: false,
+            mode: mode, showProgramIo: showProgramIo);
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
         return (hw, os, sink, vis);
     }
 
@@ -232,5 +235,159 @@ public class ConsoleVisualizerTests : IDisposable
         Assert.Contains("OUTPUT: 1", text);
         Assert.Contains("OUTPUT: 10", text);
         Assert.False(os.HasProcesses);
+    }
+
+    // ---- OS routine markers ---------------------------------------------
+
+    [Fact]
+    public void MarksNamedOsRoutines_WhenTheyRun()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun();
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(1)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("OS routine: Schedule", text);   // idle -> picks the process
+        Assert.Contains("OS routine: Halt", text);       // HLT tears it down
+    }
+
+    [Fact]
+    public void MarksContextSwitchRoutine_WithMultipleProcesses()
+    {
+        // Two long-running programs force quantum preemption -> ContextSwitch routine.
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun();
+        os.LoadProcess(new Process(CreateProgramFile(Programs.CounterToTen()), 128, 64));
+        os.LoadProcess(new Process(CreateProgramFile(Programs.CounterToTen()), 128, 64));
+
+        RunSteps(os, hw, 6000);
+
+        Assert.Contains("OS routine: ContextSwitch", sink.ToString());
+    }
+
+    [Fact]
+    public void MarksBlockAndWakeRoutines_OnIoBlocking()
+    {
+        Assembler reader = new Assembler();
+        reader.In(RegisterName.EAX);
+        reader.Out(RegisterName.EAX);
+        reader.Hlt();
+
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun();
+        os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64));
+
+        RunSteps(os, hw, 2000);
+        Assert.Contains("OS routine: Block (input)", sink.ToString());
+
+        hw.RaiseInputInterrupt(42);
+        RunSteps(os, hw, 2000);
+        Assert.Contains("OS routine: Wake (input)", sink.ToString());
+    }
+
+    // ---- Detail tiers ---------------------------------------------------
+
+    [Fact]
+    public void MinimalMode_ShowsOsNarrative_OmitsInstructionsAndTables()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Minimal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        // High-level narrative is present...
+        Assert.Contains("context switch", text);
+        Assert.Contains("OS routine:", text);
+        Assert.Contains("OUTPUT: 5", text);
+        // ...but the instruction stream, tables, memory and privilege lines are not.
+        Assert.DoesNotContain("MOV EAX, 5", text);
+        Assert.DoesNotContain("process table", text);
+        Assert.DoesNotContain("mem[", text);
+        Assert.DoesNotContain("syscall trap", text);
+    }
+
+    [Fact]
+    public void NormalMode_ShowsInstructionsAndTables_OmitsMemoryAndPrivilege()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("MOV EAX, 5", text);     // instruction stream on
+        Assert.Contains("process table", text);    // tables on
+        Assert.DoesNotContain("mem[", text);       // memory writes off
+        Assert.DoesNotContain("syscall trap", text); // privilege transitions off
+    }
+
+    // ---- program I/O mirroring toggle -----------------------------------
+
+    [Fact]
+    public void ProgramOutput_HiddenInOsWindow_WhenIoMirroringOff()
+    {
+        // I/O belongs to the process window; with mirroring off the OS/Hardware
+        // window shows the hardware data (instructions) but not the OUTPUT.
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Verbose, showProgramIo: false);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        Assert.DoesNotContain("OUTPUT", text);   // program output not mirrored
+        Assert.Contains("MOV EAX, 5", text);       // instruction/hardware data still shown
+    }
+
+    [Fact]
+    public void ProgramOutput_ShownInOsWindow_WhenIoMirroringOn()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Verbose, showProgramIo: true);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        Assert.Contains("OUTPUT: 5", sink.ToString());
+    }
+
+    [Fact]
+    public void WakeSignal_OmitsInputValue_WhenIoMirroringOff()
+    {
+        Assembler reader = new Assembler();
+        reader.In(RegisterName.EAX);
+        reader.Out(RegisterName.EAX);
+        reader.Hlt();
+
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Verbose, showProgramIo: false);
+        os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64));
+
+        RunSteps(os, hw, 2000);
+        hw.RaiseInputInterrupt(42);
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("wake signal: Input", text); // the interrupt event still shows
+        Assert.DoesNotContain("value 42", text);       // but not the input value (it's I/O)
+    }
+
+    [Fact]
+    public void VerboseMode_AddsMemoryWritesAndPrivilegeTransitions()
+    {
+        Assembler asm = new Assembler();
+        asm.MovImmLabel(RegisterName.EBX, "slot");
+        asm.MovImm(RegisterName.EAX, 123);
+        asm.Store(RegisterName.EBX, RegisterName.EAX);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+        asm.DataInt("slot");
+
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Verbose);
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("mem[", text);           // memory writes on
+        Assert.Contains("syscall trap", text);     // privilege transitions on
+        Assert.Contains("OS routine:", text);      // routine markers still present
     }
 }

@@ -57,7 +57,7 @@ public class EdgeCaseScenarioTests : IDisposable
     private static List<int> BootCollecting(BasicOS os, Hardware hw)
     {
         List<int> outputs = new List<int>();
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(e.Device); };
         return outputs;
     }
 
@@ -216,27 +216,30 @@ public class EdgeCaseScenarioTests : IDisposable
     }
 
     [Fact]
-    public void OneInputInterrupt_WakesExactlyOneOfTwoWaiters()
+    public void InputInterrupt_WakesOnlyTheTargetedDevicesProcess()
     {
+        // Two readers, each its own input device (device id == process index 0/1).
+        // Input for device 0 wakes only the first reader; the second stays blocked
+        // until input arrives for device 1 — mirroring real per-device interrupts.
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
-        os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
-        os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
+        os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64)); // index 0
+        os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64)); // index 1
         List<int> outputs = BootCollecting(os, hw);
         Step(os, hw, 8000); // both block on input
 
         Assert.False(os.HasRunningProcess);
 
-        hw.RaiseInputInterrupt(7);
+        hw.RaiseInputInterrupt(7, 0); // wakes only the device-0 process
         Step(os, hw, 8000);
 
-        Assert.Single(outputs);             // exactly one waiter woke and finished
-        Assert.True(os.HasProcesses);       // the other is still blocked
+        Assert.Equal(new List<int> { 7 }, outputs); // exactly the first reader finished
+        Assert.True(os.HasProcesses);               // the device-1 reader still blocked
 
-        hw.RaiseInputInterrupt(8);
+        hw.RaiseInputInterrupt(8, 1); // now wake the device-1 process
         Step(os, hw, 8000);
 
-        Assert.Equal(2, outputs.Count);
+        Assert.Equal(new List<int> { 7, 8 }, outputs);
         Assert.False(os.HasProcesses);
     }
 
@@ -276,7 +279,7 @@ public class EdgeCaseScenarioTests : IDisposable
         Assert.Contains(3, outputs);
         Assert.True(os.HasProcesses);
 
-        hw.RaiseInputInterrupt(2);
+        hw.RaiseInputInterrupt(2, 1); // the reader is the device-1 process (load index 1)
         Step(os, hw, 8000);
 
         Assert.Contains(2, outputs);

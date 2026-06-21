@@ -59,6 +59,11 @@ public partial class Hardware
     public event EventHandler<ProcessBlockedArgs>? ProcessBlocked;
     // Fired when a device interrupt is delivered and a waiter is woken.
     public event EventHandler<ProcessWokenArgs>? ProcessWoken;
+    // Fired when an OS routine is dispatched through the IVT, naming which one.
+    public event EventHandler<OsRoutineArgs>? OsRoutineEntered;
+    // Fired when a process is torn down (HLT or invalid-instruction fault), so a
+    // host can release per-process resources (e.g. close its terminal window).
+    public event EventHandler<ProcessTerminatedArgs>? ProcessTerminated;
 
     // ---- private constants -----------------------------------------------
     private const int SchedulerInstructionCount = 10;
@@ -74,10 +79,10 @@ public partial class Hardware
     private PrivilegeLevel level;
     private bool trapTaken;
 
-    // Suppresses PrivilegeChanged while an OS routine is run synchronously (the
-    // C#-initiated allocation path), whose transitions are bookkeeping, not part
-    // of the visible execution timeline.
-    private bool suppressPrivilegeEvents;
+    // Suppresses observability events (PrivilegeChanged, OsRoutineEntered) while an
+    // OS routine is run synchronously (the C#-initiated allocation path), whose
+    // transitions are bookkeeping, not part of the visible execution timeline.
+    private bool suppressOsEvents;
 
     // The interrupted process's register file (incl. saved IP in the EIP slot),
     // snapshotted when an OS routine is dispatched so the routine can clobber the
@@ -125,8 +130,11 @@ public partial class Hardware
     private int osMemoryBase;
     private int osMemorySize;
 
-    private readonly Queue<int> inputBuffer = new Queue<int>();
-    private bool outputBusy;
+    // Per-device I/O state, keyed by device id (== the owning process's table
+    // index). Each process's terminal is its own device, so its input never leaks
+    // to another process and its output device is busy-tracked independently.
+    private readonly Dictionary<int, Queue<int>> inputByDevice = new Dictionary<int, Queue<int>>();
+    private readonly HashSet<int> outputBusyDevices = new HashSet<int>();
     private readonly ConcurrentQueue<Interrupt> pendingInterrupts = new ConcurrentQueue<Interrupt>();
 
     // ---- constructor -----------------------------------------------------
@@ -165,7 +173,7 @@ public partial class Hardware
         }
         PrivilegeLevel from = level;
         level = newLevel;
-        if (!suppressPrivilegeEvents)
+        if (!suppressOsEvents)
         {
             PrivilegeChanged?.Invoke(this, new PrivilegeChangedArgs { From = from, To = newLevel });
         }
@@ -199,10 +207,32 @@ public partial class Hardware
         WriteRegisterAt(0, eaxArgument); // EAX is register index 0
     }
 
+    // Human-readable name for an IVT slot, for the OsRoutineEntered event.
+    private static string NameForRoutineSlot(int slot)
+    {
+        switch (slot)
+        {
+            case IvtContextSwitch:      return "ContextSwitch";
+            case IvtHalt:               return "Halt";
+            case IvtInvalidInstruction: return "InvalidInstruction";
+            case IvtWakeInput:          return "Wake (input)";
+            case IvtWakeOutput:         return "Wake (output)";
+            case IvtBlockInput:         return "Block (input)";
+            case IvtBlockOutput:        return "Block (output)";
+            case IvtSchedule:           return "Schedule";
+            case IvtLoadProcess:        return "LoadProcess";
+            default:                    return $"slot {slot}";
+        }
+    }
+
     private void EnterOsRoutine(int slot)
     {
         CaptureInterruptedContext();
         int routineAddress = ReadWord(osMemoryBase + slot * 4);
+        if (!suppressOsEvents)
+        {
+            OsRoutineEntered?.Invoke(this, new OsRoutineArgs { Slot = slot, Name = NameForRoutineSlot(slot) });
+        }
         SetLevel(PrivilegeLevel.Privileged);
         instructionPointer = routineAddress;
         trapTaken = true;
@@ -380,7 +410,39 @@ public partial class Hardware
     // ---- helper functions ------------------------------------------------
     public void Output(int value)
     {
-        ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = value });
+        Output(value, CurrentDeviceId());
+    }
+
+    public void Output(int value, int device)
+    {
+        ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = value, Device = device });
+    }
+
+    // The device id of the running process: its process-table index, since each
+    // process owns one terminal device. Falls back to device 0 with no OS image
+    // (bare-hardware harness) or when idle.
+    private int CurrentDeviceId()
+    {
+        if (!OsManaged)
+        {
+            return 0;
+        }
+        int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
+        if (index < 0)
+        {
+            return 0;
+        }
+        return index;
+    }
+
+    private Queue<int> InputQueueFor(int device)
+    {
+        if (!inputByDevice.TryGetValue(device, out Queue<int>? queue))
+        {
+            queue = new Queue<int>();
+            inputByDevice[device] = queue;
+        }
+        return queue;
     }
 
     private int ReadWord(int address)
@@ -426,15 +488,17 @@ public partial class Hardware
         }
         if (interrupt.Kind == InterruptKind.InputReady)
         {
-            inputBuffer.Enqueue(interrupt.Value);
-            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Input, Value = interrupt.Value });
-            DispatchOsRoutine(IvtWakeInput, (int)WaitReason.Input);
+            InputQueueFor(interrupt.Device).Enqueue(interrupt.Value);
+            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Input, Value = interrupt.Value, Device = interrupt.Device });
+            // Wake routines take the target device (== process index) in EAX and
+            // wake that specific process if it is blocked on the matching reason.
+            DispatchOsRoutine(IvtWakeInput, interrupt.Device);
         }
         else
         {
-            outputBusy = false;
-            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Output, Value = 0 });
-            DispatchOsRoutine(IvtWakeOutput, (int)WaitReason.Output);
+            outputBusyDevices.Remove(interrupt.Device);
+            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Output, Value = 0, Device = interrupt.Device });
+            DispatchOsRoutine(IvtWakeOutput, interrupt.Device);
         }
         return true;
     }
@@ -703,8 +767,8 @@ public partial class Hardware
         bool savedRunning = processRunning;
 
         // The transitions inside a synchronous allocation run are bookkeeping, not
-        // part of the visible timeline; keep them off the PrivilegeChanged feed.
-        suppressPrivilegeEvents = true;
+        // part of the visible timeline; keep them off the observability feeds.
+        suppressOsEvents = true;
         DispatchOsRoutine(slot, eaxArgument);
         int guard = 0;
         while (level == PrivilegeLevel.Privileged && guard++ < 1_000_000)
@@ -713,7 +777,7 @@ public partial class Hardware
             instructionPointer += 4;
             Instruction.Execute(ip, this);
         }
-        suppressPrivilegeEvents = false;
+        suppressOsEvents = false;
 
         WriteRegisters(savedRegisters);
         instructionPointer = savedIp;
@@ -729,6 +793,7 @@ public partial class Hardware
         instructionCount = 0;
         if (OsManaged)
         {
+            ProcessTerminated?.Invoke(this, new ProcessTerminatedArgs { Device = CurrentDeviceId() });
             DispatchOsRoutine(IvtHalt);
             return;
         }
@@ -745,6 +810,7 @@ public partial class Hardware
         instructionCount = 0;
         if (OsManaged)
         {
+            ProcessTerminated?.Invoke(this, new ProcessTerminatedArgs { Device = CurrentDeviceId() });
             DispatchOsRoutine(IvtInvalidInstruction, opcode);
             return;
         }
@@ -762,38 +828,55 @@ public partial class Hardware
         return null;
     }
 
-    // Kernel-mode input: deliver a buffered value, or block the process until an
-    // input interrupt wakes it (the IN instruction re-runs on resume).
+    // Kernel-mode input: deliver a value from the running process's own input
+    // device, or block the process until that device's input interrupt wakes it
+    // (the IN instruction re-runs on resume).
     public void KernelInput(byte register)
     {
-        if (inputBuffer.Count == 0)
+        Queue<int> queue = InputQueueFor(CurrentDeviceId());
+        if (queue.Count == 0)
         {
             BlockCurrent(WaitReason.Input);
             return;
         }
-        WriteRegisterAt(register, inputBuffer.Dequeue());
+        WriteRegisterAt(register, queue.Dequeue());
     }
 
-    // Kernel-mode output: deliver if the device is free (marking it busy until an
-    // output-complete interrupt), otherwise block until it frees.
+    // Kernel-mode output: deliver if the running process's output device is free
+    // (marking it busy until an output-complete interrupt), otherwise block.
     public void KernelOutput(int value)
     {
-        if (outputBusy)
+        int device = CurrentDeviceId();
+        if (outputBusyDevices.Contains(device))
         {
             BlockCurrent(WaitReason.Output);
             return;
         }
-        Output(value);
-        outputBusy = true;
+        Output(value, device);
+        outputBusyDevices.Add(device);
     }
 
+    // Raises an input interrupt for device 0 (the default single device).
     public void RaiseInputInterrupt(int value)
     {
-        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.InputReady, value));
+        RaiseInputInterrupt(value, 0);
     }
 
+    // Raises an input interrupt for a specific device (== owning process index).
+    public void RaiseInputInterrupt(int value, int deviceId)
+    {
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.InputReady, value, deviceId));
+    }
+
+    // Signals output completion for device 0 (the default single device).
     public void RaiseOutputComplete()
     {
-        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.OutputComplete, 0));
+        RaiseOutputComplete(0);
+    }
+
+    // Signals output completion for a specific device (== owning process index).
+    public void RaiseOutputComplete(int deviceId)
+    {
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.OutputComplete, 0, deviceId));
     }
 }

@@ -7,4 +7,6 @@ public class ProcessWokenArgs : EventArgs
 {
     public WaitReason Reason { get; init; }
     public int Value { get; init; }
+    // The device (== owning process's table index) whose interrupt caused the wake.
+    public int Device { get; init; }
 }

@@ -23,10 +23,22 @@ public sealed class ConsoleVisualizer
     private readonly TextWriter output;
     private readonly bool useColor;
     private readonly bool interactive;
+    private readonly VisualizerMode mode;
     private string currentProcess = "(booting)";
     private bool manual;
     private int delayMs;
     private string lastFreeMap = "";
+
+    // Whether program I/O (OUTPUT, and the value of an input interrupt) is mirrored
+    // into the OS/Hardware window. Off by default — I/O lives in the per-process
+    // windows; toggled live with the 'o' key.
+    public bool ShowProgramIo { get; set; }
+
+    // Per-tier gates. Higher tiers are supersets of lower ones.
+    private bool ShowInstructions { get { return mode >= VisualizerMode.Normal; } }
+    private bool ShowTables { get { return mode >= VisualizerMode.Normal; } }
+    private bool ShowMemory { get { return mode >= VisualizerMode.Verbose; } }
+    private bool ShowPrivilege { get { return mode >= VisualizerMode.Verbose; } }
 
     private static readonly RegisterName[] Shown =
     {
@@ -35,7 +47,8 @@ public sealed class ConsoleVisualizer
     };
 
     public ConsoleVisualizer(Hardware hw, OperatingSystem os, int delayMs,
-        TextWriter? output = null, bool useColor = true, bool interactive = true)
+        TextWriter? output = null, bool useColor = true, bool interactive = true,
+        VisualizerMode mode = VisualizerMode.Normal, bool showProgramIo = false)
     {
         this.hw = hw;
         this.os = os;
@@ -43,6 +56,8 @@ public sealed class ConsoleVisualizer
         this.output = output ?? Console.Out;
         this.useColor = useColor;
         this.interactive = interactive;
+        this.mode = mode;
+        ShowProgramIo = showProgramIo;
 
         // Scheduling/fault observability comes from Hardware (the OS logic runs as
         // ISA code); process names are resolved from the OS's base->name map.
@@ -54,18 +69,33 @@ public sealed class ConsoleVisualizer
         hw.PrivilegeChanged += OnPrivilegeChanged;
         hw.ProcessBlocked += OnProcessBlocked;
         hw.ProcessWoken += OnProcessWoken;
+        hw.OsRoutineEntered += OnOsRoutineEntered;
+    }
+
+    // Marks which OS routine is running (ContextSwitch, Halt, Schedule, ...) in
+    // every tier, so the OS's own activity is always visible.
+    private void OnOsRoutineEntered(object? sender, OsRoutineArgs e)
+    {
+        WriteColored(ConsoleColor.Magenta, $"      *  OS routine: {e.Name}");
     }
 
     private void OnContextSwitched(object? sender, ContextSwitchArgs e)
     {
         currentProcess = FriendlyName(os.NameForBase(e.ToProgramBase));
-        WriteColored(ConsoleColor.Cyan, $"  ╞══ context switch → {currentProcess}");
-        RenderProcessTable();
-        RenderFreeMemoryIfChanged();
+        WriteColored(ConsoleColor.Cyan, $"  === context switch -> {currentProcess}");
+        if (ShowTables)
+        {
+            RenderProcessTable();
+            RenderFreeMemoryIfChanged();
+        }
     }
 
     private void OnInstructionExecuted(object? sender, InstructionExecutedArgs e)
     {
+        if (!ShowInstructions)
+        {
+            return;
+        }
         SetColor(ConsoleColor.DarkGray);
         output.Write($"[{currentProcess,-12}] ");
         ResetColor();
@@ -79,6 +109,10 @@ public sealed class ConsoleVisualizer
 
     private void OnMemoryWritten(object? sender, MemoryWrittenArgs e)
     {
+        if (!ShowMemory)
+        {
+            return;
+        }
         // Skip bulk writes (program image load, register-state saves) and show
         // only word-sized writes, which are the program's own STORE operations.
         if (e.Data.Length > 4)
@@ -91,33 +125,52 @@ public sealed class ConsoleVisualizer
 
     private void OnProgramOutput(object? sender, ProgramOutputArgs e)
     {
-        WriteColored(ConsoleColor.Green, $"      ► OUTPUT: {e.Value}");
+        // Program output belongs to the process's own window; only mirror it here
+        // when I/O display is toggled on.
+        if (!ShowProgramIo)
+        {
+            return;
+        }
+        WriteColored(ConsoleColor.Green, $"      >  OUTPUT: {e.Value}");
     }
 
     private void OnInvalidInstruction(object? sender, InvalidInstructionArgs e)
     {
         string reason = e.Reason ?? "invalid instruction";
-        WriteColored(ConsoleColor.Red, $"      ✗ INVALID [{e.Opcode:X2}] in {currentProcess} — {reason}");
+        WriteColored(ConsoleColor.Red, $"      XX INVALID [{e.Opcode:X2}] in {currentProcess} - {reason}");
     }
 
     private void OnPrivilegeChanged(object? sender, PrivilegeChangedArgs e)
     {
-        WriteColored(ConsoleColor.Magenta, $"      ⚙ {e.From} → {e.To}  ({DescribeTransition(e.From, e.To)})");
+        if (!ShowPrivilege)
+        {
+            return;
+        }
+        // The dispatch into an OS routine (-> Privileged) is already announced by
+        // OsRoutineEntered; here we surface the other transitions (syscall, IRET,
+        // process resume) so they aren't doubly reported.
+        if (e.To == PrivilegeLevel.Privileged)
+        {
+            return;
+        }
+        WriteColored(ConsoleColor.DarkMagenta, $"      *  {e.From} -> {e.To}  ({DescribeTransition(e.From, e.To)})");
     }
 
     private void OnProcessBlocked(object? sender, ProcessBlockedArgs e)
     {
-        WriteColored(ConsoleColor.DarkYellow, $"      ⏸ {currentProcess} blocked on {e.Reason}");
+        WriteColored(ConsoleColor.DarkYellow, $"      || {currentProcess} blocked on {e.Reason}");
     }
 
     private void OnProcessWoken(object? sender, ProcessWokenArgs e)
     {
+        // The wake (interrupt delivery) is OS/hardware activity and always shows; the
+        // input value itself is program I/O, shown only when I/O display is on.
         string detail = "";
-        if (e.Reason == WaitReason.Input)
+        if (e.Reason == WaitReason.Input && ShowProgramIo)
         {
             detail = $" (value {e.Value})";
         }
-        WriteColored(ConsoleColor.Green, $"      ⏵ wake signal: {e.Reason}{detail}");
+        WriteColored(ConsoleColor.Green, $"      >> wake signal: {e.Reason}{detail}");
     }
 
     // Describes a privilege transition in OS terms, so the dispatch path is legible.
@@ -159,7 +212,7 @@ public sealed class ConsoleVisualizer
         {
             plural = "";
         }
-        WriteColored(ConsoleColor.DarkCyan, $"      ┌─ process table ({count} slot{plural}, current={current}) ─");
+        WriteColored(ConsoleColor.DarkCyan, $"      +- process table ({count} slot{plural}, current={current}) -");
         for (int i = 0; i < count; i++)
         {
             int entry = OsLayout.ProcessEntryAddress(i);
@@ -170,14 +223,14 @@ public sealed class ConsoleVisualizer
             string marker = " ";
             if (i == current)
             {
-                marker = "▶";
+                marker = ">";
             }
             string waitText = "";
             if (wait != WaitReason.None)
             {
                 waitText = $" on {wait}";
             }
-            WriteColored(ConsoleColor.DarkCyan, $"      │ {marker} [{i}] {name,-12} {state}{waitText}");
+            WriteColored(ConsoleColor.DarkCyan, $"      | {marker} [{i}] {name,-12} {state}{waitText}");
         }
     }
 
@@ -285,13 +338,17 @@ public sealed class ConsoleVisualizer
         if (manual)
         {
             SetColor(ConsoleColor.DarkGray);
-            output.Write("      (Enter = step, a = auto) ");
+            output.Write("      (Enter = step, a = auto, o = toggle I/O) ");
             ResetColor();
             ConsoleKeyInfo key = Console.ReadKey(true);
             output.WriteLine();
             if (key.KeyChar == 'a' || key.KeyChar == 'A')
             {
                 manual = false;
+            }
+            else if (key.KeyChar == 'o' || key.KeyChar == 'O')
+            {
+                ToggleProgramIo();
             }
             return;
         }
@@ -307,7 +364,22 @@ public sealed class ConsoleVisualizer
             {
                 manual = true;
             }
+            else if (key.KeyChar == 'o' || key.KeyChar == 'O')
+            {
+                ToggleProgramIo();
+            }
         }
+    }
+
+    private void ToggleProgramIo()
+    {
+        ShowProgramIo = !ShowProgramIo;
+        string state = "off";
+        if (ShowProgramIo)
+        {
+            state = "on";
+        }
+        WriteColored(ConsoleColor.DarkGreen, $"      [program I/O in this window: {state}]");
     }
 
     private static string FriendlyName(string? path)

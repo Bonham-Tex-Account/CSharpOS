@@ -124,8 +124,10 @@ public class OsSchedulingRoutineTests
     }
 
     [Fact]
-    public void Wake_MakesWaiterReady_AndResumesInterruptedProcess()
+    public void Wake_MakesTargetedWaiterReady_AndResumesInterruptedProcess()
     {
+        // The wake routine takes the target device (== process index) in EAX, set
+        // by DispatchOsRoutine's argument.
         Hardware hw = NewSeededHardware();
         WriteWord(hw, OsLayout.ProcessCountOffset, 2);
         WriteWord(hw, OsLayout.CurrentIndexOffset, 0); // process 0 running
@@ -134,7 +136,7 @@ public class OsSchedulingRoutineTests
 
         hw.WriteRegisterAt(EAX, 555);
         hw.SetInstructionPointer(0x50);
-        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, 1); // device 1 (process index 1)
         RunRoutine(hw);
 
         // The waiter became Ready, but the running process keeps running unchanged.
@@ -148,24 +150,22 @@ public class OsSchedulingRoutineTests
     }
 
     [Fact]
-    public void Wake_OnlyWakesMatchingReason()
+    public void Wake_DoesNotWakeTarget_WhenItIsBlockedOnADifferentReason()
     {
         Hardware hw = NewSeededHardware();
-        WriteWord(hw, OsLayout.ProcessCountOffset, 3);
+        WriteWord(hw, OsLayout.ProcessCountOffset, 2);
         WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
         SeedEntry(hw, 0, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 1000, 0x111, 100);
         SeedEntry(hw, 1, ProcessState.Blocked, WaitReason.Output, PrivilegeLevel.User, 2000, 0x222, 300);
-        SeedEntry(hw, 2, ProcessState.Blocked, WaitReason.Input, PrivilegeLevel.User, 3000, 0x333, 500);
 
+        // An INPUT interrupt for device 1, but that process is blocked on OUTPUT:
+        // the reason does not match, so it stays blocked.
         hw.SetInstructionPointer(0x50);
-        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, 1);
         RunRoutine(hw);
 
-        // The Output waiter stays blocked; only the Input waiter is woken.
         int entry1 = OsLayout.ProcessEntryAddress(1);
-        int entry2 = OsLayout.ProcessEntryAddress(2);
         Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
-        Assert.Equal((int)ProcessState.Ready, ReadWord(hw, entry2 + Hardware.ProcessEntryState));
     }
 
     [Fact]
@@ -257,30 +257,30 @@ public class OsSchedulingRoutineTests
     }
 
     [Fact]
-    public void Wake_WhenNoMatchingBlockedProcess_ResumesCurrent()
+    public void Wake_WhenTargetNotBlocked_ResumesCurrentUnchanged()
     {
         Hardware hw = NewSeededHardware();
         WriteWord(hw, OsLayout.ProcessCountOffset, 2);
         WriteWord(hw, OsLayout.CurrentIndexOffset, 0);
-        SeedEntry(hw, 0, ProcessState.Ready,   WaitReason.None,   PrivilegeLevel.User, 1000, 0x111, 100);
-        SeedEntry(hw, 1, ProcessState.Blocked, WaitReason.Output, PrivilegeLevel.User, 2000, 0x222, 300);
+        SeedEntry(hw, 0, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 1000, 0x111, 100);
+        SeedEntry(hw, 1, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 2000, 0x222, 300);
 
-        // WakeInput: only an Output waiter exists, so nothing matches.
+        // A (spurious) input interrupt for device 1, which is not blocked: nothing
+        // changes and the running process keeps going.
         hw.WriteRegisterAt(EAX, 999);
         hw.SetInstructionPointer(0x50);
-        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, 1);
         RunRoutine(hw);
 
-        // The Output waiter stays Blocked and the running process keeps going.
         int entry1 = OsLayout.ProcessEntryAddress(1);
-        Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
+        Assert.Equal((int)ProcessState.Ready, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
         Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(999, hw.ReadRegisterAt(EAX));
         Assert.Equal(0x50, hw.GetInstructionPointer());
     }
 
     [Fact]
-    public void Wake_WhenMultipleBlockedOnSameReason_WakesOnlyFirst()
+    public void Wake_TargetsOnlyTheSignaledDevice_NotOtherWaiters()
     {
         Hardware hw = NewSeededHardware();
         WriteWord(hw, OsLayout.ProcessCountOffset, 3);
@@ -289,15 +289,15 @@ public class OsSchedulingRoutineTests
         SeedEntry(hw, 1, ProcessState.Blocked, WaitReason.Input, PrivilegeLevel.User, 2000, 0x222, 300);
         SeedEntry(hw, 2, ProcessState.Blocked, WaitReason.Input, PrivilegeLevel.User, 3000, 0x333, 500);
 
+        // Input arrives for device 2 only: device 1 must stay blocked.
         hw.SetInstructionPointer(0x50);
-        hw.DispatchOsRoutine(Hardware.IvtWakeInput, (int)WaitReason.Input);
+        hw.DispatchOsRoutine(Hardware.IvtWakeInput, 2);
         RunRoutine(hw);
 
-        // Only index 1 (the first matching waiter) should be woken.
         int entry1 = OsLayout.ProcessEntryAddress(1);
         int entry2 = OsLayout.ProcessEntryAddress(2);
-        Assert.Equal((int)ProcessState.Ready,   ReadWord(hw, entry1 + Hardware.ProcessEntryState));
-        Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry2 + Hardware.ProcessEntryState));
+        Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
+        Assert.Equal((int)ProcessState.Ready,   ReadWord(hw, entry2 + Hardware.ProcessEntryState));
     }
 
     private static int ReadWord(Hardware hw, int address)

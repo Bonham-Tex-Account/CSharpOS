@@ -37,7 +37,9 @@ public static class OsRoutines
         int contextSwitch = OsLayout.CodeBase + asm.CodeLength; EmitContextSwitch(asm);
         int schedule      = OsLayout.CodeBase + asm.CodeLength; EmitSchedule(asm);
         int block         = OsLayout.CodeBase + asm.CodeLength; EmitBlock(asm);
-        int wake          = OsLayout.CodeBase + asm.CodeLength; EmitWake(asm);
+        int wakeInput     = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, (int)WaitReason.Input);
+        int wakeOutput    = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, (int)WaitReason.Output);
+        EmitWakeBody(asm);
         int halt          = OsLayout.CodeBase + asm.CodeLength; EmitHalt(asm);
         int invalid       = OsLayout.CodeBase + asm.CodeLength; EmitInvalidInstruction(asm);
         int loadProcess   = OsLayout.CodeBase + asm.CodeLength; EmitLoadProcess(asm);
@@ -57,8 +59,8 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtSchedule * 4,           schedule);
         WriteWord(image, Hardware.IvtBlockInput * 4,         block);
         WriteWord(image, Hardware.IvtBlockOutput * 4,        block);
-        WriteWord(image, Hardware.IvtWakeInput * 4,          wake);
-        WriteWord(image, Hardware.IvtWakeOutput * 4,         wake);
+        WriteWord(image, Hardware.IvtWakeInput * 4,          wakeInput);
+        WriteWord(image, Hardware.IvtWakeOutput * 4,         wakeOutput);
         WriteWord(image, Hardware.IvtHalt * 4,               halt);
         WriteWord(image, Hardware.IvtInvalidInstruction * 4, invalid);
         WriteWord(image, Hardware.IvtLoadProcess * 4,        loadProcess);
@@ -208,36 +210,35 @@ public static class OsRoutines
         asm.OsRet(R(EAX));                          // return without switching
     }
 
-    // Wake: a device interrupt for the reason in EAX fired. Make one process waiting
-    // on that reason Ready, then resume the interrupted process unchanged (a device
-    // interrupt does not preempt the running process).
-    private static void EmitWake(Assembler asm)
+    // Wake entry stub: a device interrupt fired for the device whose id (== process
+    // table index) is in EAX. Like real hardware, the interrupt identifies the
+    // device; this stub records which reason the device signals (input vs output)
+    // and falls through to the shared body, which wakes that specific process if it
+    // is blocked on that reason. Two stubs (input/output) point at distinct IVT slots.
+    private static void EmitWakeEntry(Assembler asm, int reason)
     {
-        asm.Mov(R(EDX), R(EAX));                   // EDX = target wait reason
-        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
-        asm.Load(R(EDI), R(EAX));                 // EDI = count
-        asm.MovImm(R(ESI), 0);                     // ESI = index
+        asm.MovImm(R(EBP), reason);                 // EBP = this device's signal reason
+        asm.Jmp("wk_body");
+    }
 
-        asm.Label("wk_scan");
-        asm.Mov(R(EAX), R(EDI));
-        asm.Cmp(R(EAX), R(ESI));                   // count - i
-        asm.Js("wk_resume");                       // i > count: scanned all
-        asm.Jz("wk_resume");                       // i == count: scanned all
-        EntryAddress(asm, ESI, EBX);              // EBX = entry[i]
+    // Shared wake body: EAX = target device/process index, EBP = the reason the
+    // device signals. Wake that process if (and only if) it is Blocked on that
+    // reason, then resume the interrupted process unchanged (a device interrupt
+    // does not preempt the running process).
+    private static void EmitWakeBody(Assembler asm)
+    {
+        asm.Label("wk_body");
+        asm.Mov(R(EDX), R(EBP));                    // EDX = reason (EBP is scratch below)
+        EntryAddress(asm, EAX, EBX);              // EBX = entry[index]
         LoadField(asm, EBX, Hardware.ProcessEntryState, EAX);
         asm.MovImm(R(EBP), Blocked);
         asm.Cmp(R(EAX), R(EBP));
-        asm.Jnz("wk_next");                        // not blocked
+        asm.Jnz("wk_resume");                       // not blocked: spurious, just resume
         LoadField(asm, EBX, Hardware.ProcessEntryWaitReason, EAX);
         asm.Cmp(R(EAX), R(EDX));
-        asm.Jnz("wk_next");                        // not waiting on this reason
+        asm.Jnz("wk_resume");                       // blocked on a different reason
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);
-        asm.Jmp("wk_resume");                      // wake exactly one
-
-        asm.Label("wk_next");
-        asm.Inc(R(ESI));
-        asm.Jmp("wk_scan");
 
         asm.Label("wk_resume");
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);

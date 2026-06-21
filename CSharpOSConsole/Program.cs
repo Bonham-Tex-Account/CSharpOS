@@ -2,6 +2,18 @@ using CSharpOS;
 using CSharpOSConsole;
 using OperatingSystem = CSharpOS.OperatingSystem;
 
+// When relaunched as a per-process terminal window, run that loop and exit.
+if (args.Length >= 2 && args[0] == "--terminal")
+{
+    string terminalTitle = "process";
+    if (args.Length >= 3)
+    {
+        terminalTitle = args[2];
+    }
+    TerminalHost.Run(args[1], terminalTitle);
+    return;
+}
+
 const int MemorySize = 16384;
 const int RequiredMemory = 128;
 const int RequiredStackSize = 64;
@@ -25,30 +37,32 @@ while (true)
     Console.WriteLine("  4) Counter + Average together (round-robin scheduling)");
     Console.WriteLine("  5) All three together");
     Console.WriteLine("  q) Quit");
-    Console.WriteLine("  (during a run: press 's' to single-step, 'a' to resume auto)");
+    Console.WriteLine("  (during a run: 's' single-step, 'a' resume auto, 'o' toggle program I/O in this window)");
+    Console.WriteLine("  (each process gets its own window for input/output; it closes when the process ends)");
     Console.Write("Select: ");
 
     string? choice = Console.ReadLine();
     if (choice == null)
     {
-        return; // end of input (e.g. piped stdin) — quit instead of looping
+        return; // end of input (e.g. piped stdin) - quit instead of looping
     }
+    List<string>? programs = null;
     switch (choice.Trim())
     {
         case "1":
-            Run(new List<string> { counterPath });
+            programs = new List<string> { counterPath };
             break;
         case "2":
-            Run(new List<string> { averagePath });
+            programs = new List<string> { averagePath };
             break;
         case "3":
-            Run(new List<string> { guessPath });
+            programs = new List<string> { guessPath };
             break;
         case "4":
-            Run(new List<string> { counterPath, averagePath });
+            programs = new List<string> { counterPath, averagePath };
             break;
         case "5":
-            Run(new List<string> { counterPath, averagePath, guessPath });
+            programs = new List<string> { counterPath, averagePath, guessPath };
             break;
         case "q":
         case "Q":
@@ -57,6 +71,31 @@ while (true)
             Console.WriteLine("Unknown option.");
             break;
     }
+
+    if (programs != null)
+    {
+        VisualizerMode mode = PromptMode();
+        Run(programs, mode);
+    }
+}
+
+// Asks which detail level to render at; defaults to Normal on blank/unknown input.
+VisualizerMode PromptMode()
+{
+    Console.WriteLine("  Detail: 1) minimal  2) normal  3) verbose");
+    Console.Write("  Select [2]: ");
+    string? line = Console.ReadLine();
+    if (line != null)
+    {
+        switch (line.Trim())
+        {
+            case "1":
+                return VisualizerMode.Minimal;
+            case "3":
+                return VisualizerMode.Verbose;
+        }
+    }
+    return VisualizerMode.Normal;
 }
 
 string WriteProgram(string name, byte[] bytes)
@@ -66,57 +105,49 @@ string WriteProgram(string name, byte[] bytes)
     return path;
 }
 
-void Run(List<string> programPaths)
+void Run(List<string> programPaths, VisualizerMode mode)
 {
     Console.WriteLine();
     BasicOS os = new BasicOS(Console.Out);
     Hardware hw = new Hardware(MemorySize, registers, os);
 
-    // Output device: the console transfers instantly, so signal completion right away.
-    hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(); };
+    // One terminal window per process, keyed by device id. Processes are loaded in
+    // order, so the i-th process gets process-table index i == device i. Building
+    // the terminals before loading keeps that mapping aligned.
+    Dictionary<int, IProcessTerminal> terminals = new Dictionary<int, IProcessTerminal>();
+    for (int i = 0; i < programPaths.Count; i++)
+    {
+        string title = Path.GetFileNameWithoutExtension(programPaths[i]);
+        terminals[i] = new ConsoleWindowTerminal(title);
+    }
 
-    ConsoleVisualizer visualizer = new ConsoleVisualizer(hw, os, StepDelayMs);
+    // The router moves each process's I/O to its own window; this main window shows
+    // only the OS/Hardware activity.
+    ProcessIoRouter router = new ProcessIoRouter(hw, terminals);
+    ConsoleVisualizer visualizer = new ConsoleVisualizer(hw, os, StepDelayMs, mode: mode);
 
     foreach (string path in programPaths)
     {
         os.LoadProcess(new Process(path, RequiredMemory, RequiredStackSize));
     }
 
-    // The OS schedules the first process automatically on the first idle Run tick.
+    // The emulator runs continuously and never blocks on input: input arrives
+    // asynchronously from the terminal windows (raising per-device interrupts), so
+    // while one process waits the scheduler keeps running the others. When every
+    // process is blocked the CPU is genuinely idle, so yield briefly to avoid a
+    // busy-spin until a window delivers input.
     while (os.HasProcesses)
     {
         hw.Run();
-
-        // The CPU appears idle both transiently (while an OS routine is mid-dispatch)
-        // and genuinely (every process blocked on input). Distinguish the two by
-        // pumping a bounded number of ticks: if nothing becomes runnable, the system
-        // is truly waiting on input, so read a value and raise an input interrupt.
         if (os.HasProcesses && !os.HasRunningProcess)
         {
-            int pump = 0;
-            while (pump < 1000 && os.HasProcesses && !os.HasRunningProcess)
-            {
-                hw.Run();
-                pump++;
-            }
-            if (!os.HasProcesses || os.HasRunningProcess)
-            {
-                continue; // scheduling settled onto a runnable process
-            }
-
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.Write("      ◆ enter a guess: ");
-            Console.ResetColor();
-            string? line = Console.ReadLine();
-            if (line == null)
-            {
-                break;
-            }
-            if (int.TryParse(line, out int value))
-            {
-                hw.RaiseInputInterrupt(value);
-            }
+            Thread.Sleep(15);
         }
+    }
+
+    foreach (IProcessTerminal terminal in terminals.Values)
+    {
+        terminal.Close();
     }
 
     Console.WriteLine();
