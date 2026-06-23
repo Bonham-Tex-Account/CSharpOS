@@ -7,27 +7,30 @@ public partial class Hardware
     // ---- public constants ------------------------------------------------
     public const int KernelStackSize = 64;
     public const int KernelSaveAreaOffset = 0;
-    public const int KernelTrapInfoOffset = 64;
+    public const int KernelTrapInfoOffset = 96;
     public const int KernelTrapInfoSize = 16;
     public const int KernelHeaderSize = KernelTrapInfoOffset + KernelTrapInfoSize;
 
     // ---- process-table entry layout --------------------------------------
-    // An entry in the OS process table (held in OS memory). The first 64 bytes
-    // mirror the register file (the EIP slot holds the saved instruction pointer);
-    // the remaining fields hold the saved privilege level, schedule state, and the
-    // sizing data the hardware needs to rebuild the process's memory layout.
-    public const int ProcessEntryRegisterFile     = 0;
-    public const int ProcessEntryLevel            = 64;
-    public const int ProcessEntryState            = 68;
-    public const int ProcessEntryWaitReason       = 72;
-    public const int ProcessEntryProgramAddress   = 76;
-    public const int ProcessEntryProgramSize      = 80;
-    public const int ProcessEntryRequiredMemory   = 84;
-    public const int ProcessEntryRequiredStackSize = 88;
+    // An entry in the OS process table (held in OS memory). The first 96 bytes
+    // mirror the register file (24 registers × 4 bytes; the EIP slot holds the
+    // saved instruction pointer); the remaining fields hold the saved privilege
+    // level, schedule state, and the sizing data the hardware needs to rebuild
+    // the process's memory layout.
+    public const int ProcessEntryRegisterFile      = 0;
+    public const int ProcessEntryLevel             = 96;
+    public const int ProcessEntryState             = 100;
+    public const int ProcessEntryWaitReason        = 104;
+    public const int ProcessEntryProgramAddress    = 108;
+    public const int ProcessEntryProgramSize       = 112;
+    public const int ProcessEntryRequiredMemory    = 116;
+    public const int ProcessEntryRequiredStackSize = 120;
     // Total bytes the process occupies (program + kernel section + memory + stacks);
     // the OS allocator first-fits this size and Halt returns it to the free list.
-    public const int ProcessEntryTotalSize        = 92;
-    public const int ProcessEntrySize             = 128;
+    public const int ProcessEntryTotalSize         = 124;
+    public const int ProcessEntryPriority           = 128;  // MLFQ queue level (0 = highest)
+    public const int ProcessEntryTicksUsed          = 132;  // hardware ticks used in current level
+    public const int ProcessEntrySize               = 160;
 
     // ---- interrupt vector table -----------------------------------------
     // One 4-byte slot per OS routine at the front of the OS region. Hardware reads
@@ -66,7 +69,7 @@ public partial class Hardware
     public event EventHandler<ProcessTerminatedArgs>? ProcessTerminated;
 
     // ---- private constants -----------------------------------------------
-    private const int SchedulerInstructionCount = 10;
+    private const int SchedulerInstructionCount = 30;
 
     // ---- private fields --------------------------------------------------
     private byte[] memory;

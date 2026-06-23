@@ -8,7 +8,8 @@ namespace OSTests;
 public class MissingCoverageTests
 {
     // Returns Hardware with a process layout loaded at ProgramAddress=100, ProgramSize=4.
-    // The total merged range is [100, 376) — exclusive end.
+    // The total merged range is [100, 408) — exclusive end.
+    // 100 + 4 (prog) + 112 (kernel) + 64 (mem) + 64 (stack) + 64 (kstack) = 408
     private static Hardware BuildWithLayout()
     {
         FakeOS os = new FakeOS();
@@ -42,16 +43,15 @@ public class MissingCoverageTests
     [Fact]
     public void IsAddressInProcessRanges_OneBeforeRangeEnd_ReturnsTrue()
     {
-        // Range is [100, 376): 100 + 4 (prog) + 80 (kernel) + 64 (mem) + 64 (stack) + 64 (kstack) = 376
         Hardware hw = BuildWithLayout();
-        Assert.True(hw.IsAddressInProcessRanges(375));
+        Assert.True(hw.IsAddressInProcessRanges(407));
     }
 
     [Fact]
     public void IsAddressInProcessRanges_AtRangeEnd_ReturnsFalse()
     {
         Hardware hw = BuildWithLayout();
-        Assert.False(hw.IsAddressInProcessRanges(376));
+        Assert.False(hw.IsAddressInProcessRanges(408));
     }
 
     [Fact]
@@ -275,10 +275,8 @@ public class MissingCoverageTests
     }
 
     [Fact]
-    public void Assembler_BuildCalledTwice_WithDataInt_SecondBuildLarger()
+    public void Assembler_BuildCalledTwice_WithDataInt_ReturnsSameBytes()
     {
-        // Bug: Build() appends the data section in-place each call. Calling it
-        // a second time appends the data again and re-patches with wrong offsets.
         Assembler asm = new Assembler();
         asm.MovImmLabel(RegisterName.EAX, "slot");
         asm.DataInt("slot");
@@ -286,9 +284,8 @@ public class MissingCoverageTests
         byte[] first = asm.Build();
         byte[] second = asm.Build();
 
-        // Documents the current (broken) behavior: second call grows the code.
-        // A fixed Build() would either throw or return the same bytes as the first.
-        Assert.True(second.Length > first.Length);
+        Assert.Equal(first.Length, second.Length);
+        Assert.Equal(first, second);
     }
 
     [Fact]
@@ -412,7 +409,7 @@ public class OsEdgeCaseTests : IDisposable
     public void PendingProcess_LoadedAfterRunningProcessTerminates()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (_, e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
 
@@ -450,7 +447,7 @@ public class OsEdgeCaseTests : IDisposable
         // the kernel handler, one process will resume in User mode and IRET will
         // trap, killing the process. Both printing confirms mode was preserved.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (_, e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
 

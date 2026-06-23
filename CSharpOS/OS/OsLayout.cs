@@ -14,17 +14,23 @@ public static class OsLayout
     // base must clear the assembled routines (~1KB); BuildOsImage guards against
     // overrun, so this is kept just above the code to conserve memory.
     public const int CodeBase = Hardware.IvtSize;
-    public const int DataBase = 1280;
+    public const int DataBase = 2048;
 
     // ---- scheduler state header (4-byte fields at the data section base) ---
-    public const int ProcessCountOffset  = DataBase + 0;
-    public const int CurrentIndexOffset  = DataBase + 4;   // -1 when the CPU is idle
+    public const int ProcessCountOffset   = DataBase + 0;
+    public const int CurrentIndexOffset   = DataBase + 4;   // -1 when the CPU is idle
     public const int FreeRangeCountOffset = DataBase + 8;
     public const int PendingCountOffset   = DataBase + 12;
+    public const int BoostTimerOffset     = DataBase + 16;  // MLFQ: ticks until global priority reset
+    public const int QuantumTableOffset   = DataBase + 20;  // MLFQ: 4 × 4-byte tick thresholds per level
+
+    // ---- MLFQ constants ---------------------------------------------------
+    public const int QueueCount    = 4;
+    public const int BoostInterval = 20;
 
     // ---- process table -----------------------------------------------------
     public const int MaxProcesses       = 8;
-    public const int ProcessTableOffset = DataBase + 16;
+    public const int ProcessTableOffset = DataBase + 36;  // after header + boost timer + quantum table
 
     // ---- free memory ranges (Start:4, Size:4 each) -------------------------
     public const int MaxFreeRanges       = 16;

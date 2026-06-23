@@ -390,4 +390,113 @@ public class ConsoleVisualizerTests : IDisposable
         Assert.Contains("syscall trap", text);     // privilege transitions on
         Assert.Contains("OS routine:", text);      // routine markers still present
     }
+
+    // ---- OsLayout offset regression tests (MLFQ shift) -----------------
+
+    // EDGE CASE: ProcessTableOffset shifted from DataBase+16 to DataBase+36 when
+    // BoostTimer and QuantumTable were inserted. ConsoleVisualizer reads the process
+    // table via OsLayout.ProcessEntryAddress, which derives from ProcessTableOffset.
+    // If the visualizer caches a stale offset or hard-codes the old value, the
+    // process table render would show garbage or crash. This test verifies that a
+    // real run after LoadProcess produces a non-empty process-table block.
+    [Fact]
+    public void RenderProcessTable_ReadsCorrectOffsets_AfterMlfqShift()
+    {
+        // EDGE CASE: OsLayout.ProcessTableOffset = DataBase+36; visualizer must read
+        // from this shifted address, not a stale DataBase+16 literal.
+
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(1)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        // A process table block is always rendered on a context switch in Normal mode.
+        Assert.Contains("process table", text);
+        // The slot line must show slot 0, meaning the count was read correctly.
+        Assert.Contains("[0]", text);
+        // The slot must not read garbage (e.g. a state of "2147483647"); accepting
+        // only the three valid state names is a proxy for a correct-offset read.
+        bool hasValidState = text.Contains("Ready") || text.Contains("Blocked") || text.Contains("Terminated");
+        Assert.True(hasValidState, "Process table entry shows an unrecognised state — offset may be wrong.");
+    }
+
+    // EDGE CASE: The free-range map is read from FreeRangeTableOffset, which is
+    // computed as ProcessTableOffset + MaxProcesses * ProcessEntrySize. With the
+    // shifted ProcessTableOffset the free-range table also shifted. If the visualizer
+    // reads from the old unshifted address it would display stale/wrong range data.
+    [Fact]
+    public void RenderFreeMemoryMap_ReadsCorrectOffset_AfterMlfqShift()
+    {
+        // EDGE CASE: FreeRangeTableOffset derives from the shifted ProcessTableOffset;
+        // an old hard-coded offset would misread the count, potentially displaying
+        // a garbage range count or crashing with a huge loop.
+
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(2)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("free memory:", text);
+        // A correctly read free map shows a bracketed range like "[N+M]".
+        Assert.Contains("[", text);
+        Assert.Contains("+", text);
+        Assert.Contains("]", text);
+    }
+
+    // EDGE CASE: CurrentIndexOffset and ProcessCountOffset are at DataBase+0 and
+    // DataBase+4 — these did NOT shift. The process table header line ("N slot(s),
+    // current=M") must parse these correctly. Verify the current-index label matches
+    // the process that just ran.
+    [Fact]
+    public void RenderProcessTable_CurrentIndexLabel_MatchesRunningProcess()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(3)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        // The process-table header must include "current=0" since there is only one
+        // process (index 0).
+        Assert.Contains("current=0", text);
+    }
+
+    // EDGE CASE: After a process terminates (HLT), a second context switch renders
+    // the table with the terminated slot. Verify the visualizer does not crash when
+    // iterating a table that contains a Terminated entry. The Terminated state name
+    // must appear in the rendered output.
+    [Fact]
+    public void RenderProcessTable_AfterProcessTerminates_ShowsTerminatedSlot()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(1)), 128, 64));
+        os.LoadProcess(new Process(CreateProgramFile(Programs.CounterToTen()), 128, 64));
+
+        RunSteps(os, hw, 4000);
+
+        string text = sink.ToString();
+        Assert.Contains("Terminated", text);
+        Assert.Contains("[0]", text);
+        Assert.Contains("[1]", text);
+    }
+
+    // EDGE CASE: With two processes that have the same MLFQ-boosted priority (0 after
+    // wake), the process table must list both without showing a negative current index
+    // or an index beyond the count. This guards against a visualizer that misreads
+    // CurrentIndexOffset and produces "current=-1" while a process is running.
+    [Fact]
+    public void RenderProcessTable_CurrentIndex_IsNeverNegative_WhenProcessIsRunning()
+    {
+        (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(1)), 128, 64));
+
+        RunSteps(os, hw, 2000);
+
+        string text = sink.ToString();
+        // While a process is being scheduled, "current=-1" must not appear in a
+        // table line rendered during an active context switch.
+        Assert.DoesNotContain("current=-1", text);
+    }
 }

@@ -9,6 +9,8 @@ namespace CSharpOS;
 /// Register convention across a routine: ECX = current index, EDI = process count,
 /// ESI = scan/loop counter, EDX = a carried argument (wait reason) or the chosen
 /// candidate index; EAX, EBX, EBP are scratch (EBX usually holds an entry address).
+/// R8-R15 are used by ContextSwitch and resume_mlfq for MLFQ state that does not
+/// fit in the classic set without spilling.
 /// </summary>
 public static class OsRoutines
 {
@@ -19,6 +21,14 @@ public static class OsRoutines
     private const byte ESI = (byte)RegisterName.ESI;
     private const byte EDI = (byte)RegisterName.EDI;
     private const byte EBP = (byte)RegisterName.EBP;
+    private const byte R8  = (byte)RegisterName.R8;
+    private const byte R9  = (byte)RegisterName.R9;
+    private const byte R10 = (byte)RegisterName.R10;
+    private const byte R11 = (byte)RegisterName.R11;
+    private const byte R12 = (byte)RegisterName.R12;
+    private const byte R13 = (byte)RegisterName.R13;
+    private const byte R14 = (byte)RegisterName.R14;
+    private const byte R15 = (byte)RegisterName.R15;
 
     private const int Ready      = (int)ProcessState.Ready;
     private const int Blocked    = (int)ProcessState.Blocked;
@@ -43,7 +53,7 @@ public static class OsRoutines
         int halt          = OsLayout.CodeBase + asm.CodeLength; EmitHalt(asm);
         int invalid       = OsLayout.CodeBase + asm.CodeLength; EmitInvalidInstruction(asm);
         int loadProcess   = OsLayout.CodeBase + asm.CodeLength; EmitLoadProcess(asm);
-        EmitResumeTail(asm);
+        EmitResumeMlfq(asm);
 
         byte[] code = asm.Build(OsLayout.CodeBase);
 
@@ -67,19 +77,98 @@ public static class OsRoutines
         return image;
     }
 
-    // ContextSwitch: persist the interrupted process (if any), then resume the next
-    // Ready process after it.
+    // ContextSwitch: save the interrupted process (if any), apply MLFQ demotion if
+    // the process used its full quantum, tick the global boost timer (resetting all
+    // process priorities if it expires), then resume the highest-priority Ready process.
     private static void EmitContextSwitch(Assembler asm)
     {
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EAX));                 // ECX = currentIndex
         asm.MovImm(R(EDX), 0);
         asm.Cmp(R(ECX), R(EDX));
-        asm.Js("cs_skip");                         // no current -> nothing to save
+        asm.Js("cs_skip");                         // no current process: skip save and MLFQ update
+
         EntryAddress(asm, ECX, EBX);              // EBX = current entry
         asm.SaveRegs(R(EBX));
+
+        // ---- increment TicksUsed ----
+        LoadField(asm, EBX, Hardware.ProcessEntryTicksUsed, R8); // R8 = ticksUsed
+        asm.Inc(R(R8));
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryTicksUsed, R8);
+
+        // ---- quantum check: demote if ticks >= threshold for this level ----
+        LoadField(asm, EBX, Hardware.ProcessEntryPriority, R9); // R9 = priority
+        asm.MovImm(R(R10), OsLayout.QueueCount - 1);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("cs_no_demote");                    // level 3: never demote
+
+        // threshold = QuantumTable[priority]  (R10 = &table[priority])
+        asm.Mov(R(R10), R(R9));
+        asm.MovImm(R(R11), 4);
+        asm.Mul(R(R10), R(R11));                   // R10 = priority * 4
+        asm.MovImm16(R(R11), OsLayout.QuantumTableOffset);
+        asm.Add(R(R10), R(R11));                   // R10 = address of threshold entry
+        asm.Load(R(R10), R(R10));                  // R10 = threshold
+
+        asm.Cmp(R(R8), R(R10));                    // ticksUsed - threshold
+        asm.Js("cs_no_demote");                    // ticksUsed < threshold: no demote
+
+        // Demote: priority++, reset TicksUsed.
+        // Priority was 0/1/2 (never 3 due to early exit above), so increment is safe.
+        asm.Inc(R(R9));
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryPriority, R9);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryTicksUsed, 0);
+
+        asm.Label("cs_no_demote");
+
+        // ---- boost timer: periodically reset all process priorities to 0 ----
+        Imm16(asm, R8, OsLayout.BoostTimerOffset);
+        asm.Load(R(R10), R(R8));                   // R10 = boostTimer
+        asm.Dec(R(R10));
+        asm.Store(R(R8), R(R10));                  // write back decremented timer
+
+        asm.MovImm(R(R11), 0);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jnz("cs_boost_skip");                  // timer != 0: skip boost
+
+        // Boost loop: iterate all entries, reset Priority and TicksUsed on non-Terminated ones.
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));                  // EDI = processCount
+        asm.MovImm(R(ESI), 0);                     // ESI = i
+
+        asm.Label("cs_boost_loop");
+        asm.Mov(R(R11), R(EDI));
+        asm.Cmp(R(R11), R(ESI));                   // count - i
+        asm.Jz("cs_boost_done");                   // i == count: done
+        asm.Js("cs_boost_done");                   // i > count: done
+
+        // R12 = entry address for process i
+        asm.Mov(R(R12), R(ESI));
+        asm.MovImm(R(R13), EntrySize);
+        asm.Mul(R(R12), R(R13));
+        asm.MovImm16(R(R13), OsLayout.ProcessTableOffset);
+        asm.Add(R(R12), R(R13));
+
+        LoadField(asm, R12, Hardware.ProcessEntryState, R13); // R13 = state
+        asm.MovImm(R(R14), Terminated);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("cs_boost_skip_entry");             // terminated slot: skip
+
+        StoreFieldImm(asm, R12, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, R12, Hardware.ProcessEntryTicksUsed, 0);
+
+        asm.Label("cs_boost_skip_entry");
+        asm.Inc(R(ESI));
+        asm.Jmp("cs_boost_loop");
+
+        asm.Label("cs_boost_done");
+        Imm16(asm, R8, OsLayout.BoostTimerOffset);
+        asm.MovImm(R(R10), OsLayout.BoostInterval);
+        asm.Store(R(R8), R(R10));                  // reset boost timer
+
+        asm.Label("cs_boost_skip");
         asm.Label("cs_skip");
-        asm.Jmp("resume_next");                    // ECX is the scan basis
+        asm.Jmp("resume_mlfq");
     }
 
     // Schedule: called when the CPU is idle; resume any Ready process.
@@ -87,7 +176,7 @@ public static class OsRoutines
     {
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EAX));                 // ECX = currentIndex (-1 when idle)
-        asm.Jmp("resume_next");
+        asm.Jmp("resume_mlfq");
     }
 
     // Block: mark the running process Blocked on the wait reason passed in EAX, save
@@ -101,7 +190,7 @@ public static class OsRoutines
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Blocked);
         StoreFieldReg(asm, EBX, Hardware.ProcessEntryWaitReason, EDX);
         asm.SaveRegs(R(EBX));
-        asm.Jmp("resume_next");
+        asm.Jmp("resume_mlfq");
     }
 
     // Halt: free the running process's slot (mark it Terminated, so the scheduler
@@ -114,7 +203,7 @@ public static class OsRoutines
         EntryAddress(asm, ECX, EBX);              // EBX = current entry (kept below)
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
         EmitFreeListAppend(asm);                  // append {ProgramAddress, TotalSize}
-        asm.Jmp("resume_next");
+        asm.Jmp("resume_mlfq");
     }
 
     // Appends the entry's memory range (ProgramAddress, TotalSize) to the free list.
@@ -153,7 +242,7 @@ public static class OsRoutines
         EntryAddress(asm, ECX, EBX);
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
         EmitFreeListAppend(asm);
-        asm.Jmp("resume_next");
+        asm.Jmp("resume_mlfq");
     }
 
     // LoadProcess: first-fit allocation for the staged entry (address in EAX). Reads
@@ -223,8 +312,8 @@ public static class OsRoutines
 
     // Shared wake body: EAX = target device/process index, EBP = the reason the
     // device signals. Wake that process if (and only if) it is Blocked on that
-    // reason, then resume the interrupted process unchanged (a device interrupt
-    // does not preempt the running process).
+    // reason, boost it to priority 0 (I/O-bound processes stay responsive), then
+    // resume the interrupted process unchanged (a device interrupt does not preempt).
     private static void EmitWakeBody(Assembler asm)
     {
         asm.Label("wk_body");
@@ -237,8 +326,12 @@ public static class OsRoutines
         LoadField(asm, EBX, Hardware.ProcessEntryWaitReason, EAX);
         asm.Cmp(R(EAX), R(EDX));
         asm.Jnz("wk_resume");                       // blocked on a different reason
+
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);
+        // Boost woken process to the top queue so I/O-bound processes stay responsive.
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryTicksUsed, 0);
 
         asm.Label("wk_resume");
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
@@ -257,49 +350,73 @@ public static class OsRoutines
         asm.OsRet(R(EAX));                          // stay idle (currentIndex == -1)
     }
 
-    // Shared tail: scan from ECX+1 (wrapping) for the next Ready process, switch to
-    // it, and resume it; if none are Ready, record idle (currentIndex = -1).
-    private static void EmitResumeTail(Assembler asm)
+    // Shared MLFQ scheduling tail: scan all priority levels 0..QueueCount-1 in order.
+    // Within each level, round-robin from ECX+1 (wrapping). Switch to the first Ready
+    // process found at the highest level; if none are Ready at any level, go idle.
+    private static void EmitResumeMlfq(Assembler asm)
     {
-        asm.Label("resume_next");
+        asm.Label("resume_mlfq");
         Imm16(asm, EAX, OsLayout.ProcessCountOffset);
-        asm.Load(R(EDI), R(EAX));                 // EDI = count
-        asm.MovImm(R(ESI), 0);                     // ESI = i
+        asm.Load(R(EDI), R(EAX));                 // EDI = processCount
+
+        asm.MovImm(R(R8), 0);                      // R8 = current priority level (outer loop)
+
+        asm.Label("rn_level");
+        asm.MovImm(R(R9), OsLayout.QueueCount);
+        asm.Cmp(R(R8), R(R9));                     // priority - QueueCount
+        asm.Jns("rn_idle");                        // priority >= QueueCount: no one Ready
+
+        asm.MovImm(R(ESI), 0);                     // ESI = i (inner round-robin counter)
 
         asm.Label("rn_scan");
         asm.Inc(R(ESI));
-        asm.Mov(R(EAX), R(EDI));
-        asm.Cmp(R(EAX), R(ESI));                   // count - i
-        asm.Js("rn_idle");                         // i > count: none Ready
-        asm.Mov(R(EBX), R(ECX));
-        asm.Add(R(EBX), R(ESI));                   // candidate = current + i
-        asm.Mov(R(EAX), R(EDI));
-        asm.Cmp(R(EBX), R(EAX));                   // candidate - count
-        asm.Js("rn_have");
-        asm.Sub(R(EBX), R(EDI));                    // wrap once into [0, count)
-        asm.Label("rn_have");
-        asm.Mov(R(EDX), R(EBX));                    // EDX = candidate index
-        asm.MovImm(R(EAX), EntrySize);
-        asm.Mul(R(EBX), R(EAX));
-        Imm16(asm, EAX, OsLayout.ProcessTableOffset);
-        asm.Add(R(EBX), R(EAX));                    // EBX = candidate entry
-        LoadField(asm, EBX, Hardware.ProcessEntryState, EAX);
-        asm.MovImm(R(EBP), Ready);
-        asm.Cmp(R(EAX), R(EBP));
-        asm.Jnz("rn_scan");                        // not Ready: keep scanning
+        asm.Mov(R(R9), R(EDI));
+        asm.Cmp(R(R9), R(ESI));                    // count - i
+        asm.Js("rn_next_level");                   // i > count: exhausted this level
 
+        // candidate = (currentIndex + i) % processCount
+        asm.Mov(R(R10), R(ECX));
+        asm.Add(R(R10), R(ESI));
+        asm.Cmp(R(R10), R(EDI));
+        asm.Js("rn_in_range");
+        asm.Sub(R(R10), R(EDI));                   // wrap once into [0, count)
+        asm.Label("rn_in_range");
+
+        // R11 = entry address for candidate R10
+        asm.Mov(R(R11), R(R10));
+        asm.MovImm(R(R12), EntrySize);
+        asm.Mul(R(R11), R(R12));
+        asm.MovImm16(R(R12), OsLayout.ProcessTableOffset);
+        asm.Add(R(R11), R(R12));
+
+        // Skip if not Ready
+        LoadField(asm, R11, Hardware.ProcessEntryState, R13);
+        asm.MovImm(R(R14), Ready);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jnz("rn_scan");
+
+        // Skip if not at the target priority level
+        LoadField(asm, R11, Hardware.ProcessEntryPriority, R13);
+        asm.Cmp(R(R13), R(R8));
+        asm.Jnz("rn_scan");
+
+        // Found — switch to this process.
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
-        asm.Store(R(EAX), R(EDX));                  // currentIndex = candidate
-        asm.LoadRegs(R(EBX));
-        asm.SetLayout(R(EBX));
-        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.Store(R(EAX), R(R10));                 // currentIndex = candidate index
+        asm.LoadRegs(R(R11));
+        asm.SetLayout(R(R11));
+        LoadField(asm, R11, Hardware.ProcessEntryLevel, EAX);
         asm.OsRet(R(EAX));
+
+        asm.Label("rn_next_level");
+        asm.Inc(R(R8));
+        asm.Jmp("rn_level");
 
         asm.Label("rn_idle");
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.MovImm(R(EBX), 0);
         asm.Dec(R(EBX));                            // EBX = -1
-        asm.Store(R(EAX), R(EBX));                  // currentIndex = -1
+        asm.Store(R(EAX), R(EBX));                 // currentIndex = -1
         asm.MovImm(R(EAX), User);
         asm.OsRet(R(EAX));
     }

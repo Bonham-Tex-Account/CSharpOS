@@ -61,6 +61,11 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, OsLayout.FreeRangeCountOffset, 1);
         WriteWord(hw, OsLayout.FreeRangeTableOffset, OsMemorySize);
         WriteWord(hw, OsLayout.FreeRangeTableOffset + 4, hw.GetMemorySize() - OsMemorySize);
+        WriteWord(hw, OsLayout.BoostTimerOffset, OsLayout.BoostInterval);
+        WriteWord(hw, OsLayout.QuantumTableOffset + 0,  1);
+        WriteWord(hw, OsLayout.QuantumTableOffset + 4,  2);
+        WriteWord(hw, OsLayout.QuantumTableOffset + 8,  4);
+        WriteWord(hw, OsLayout.QuantumTableOffset + 12, 255);
     }
 
     // ---- process loading -------------------------------------------------
@@ -126,6 +131,8 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, entry + Hardware.ProcessEntryLevel, (int)PrivilegeLevel.User);
         WriteWord(hw, entry + Hardware.ProcessEntryWaitReason, (int)WaitReason.None);
         WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Ready);
+        WriteWord(hw, entry + Hardware.ProcessEntryPriority, 0);
+        WriteWord(hw, entry + Hardware.ProcessEntryTicksUsed, 0);
 
         // Grow the table high-water mark when this is a fresh slot.
         int count = ReadWord(hw, OsLayout.ProcessCountOffset);

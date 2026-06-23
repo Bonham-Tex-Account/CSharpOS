@@ -177,18 +177,21 @@ public sealed partial class Assembler
     // be loaded at a non-zero offset and still self-reference correctly.
     public byte[] Build(int origin = 0)
     {
+        List<byte> output = new List<byte>(code);
+        Dictionary<string, int> resolvedLabels = new Dictionary<string, int>(labels);
+
         foreach (string name in dataLabels)
         {
-            labels[name] = code.Count;
-            code.Add(0);
-            code.Add(0);
-            code.Add(0);
-            code.Add(0);
+            resolvedLabels[name] = output.Count;
+            output.Add(0);
+            output.Add(0);
+            output.Add(0);
+            output.Add(0);
         }
 
         foreach (Fixup fixup in fixups)
         {
-            if (!labels.TryGetValue(fixup.Label, out int position))
+            if (!resolvedLabels.TryGetValue(fixup.Label, out int position))
             {
                 throw new InvalidOperationException($"Undefined label: {fixup.Label}");
             }
@@ -201,15 +204,15 @@ public sealed partial class Assembler
                 {
                     throw new InvalidOperationException($"Label '{fixup.Label}' offset {target} does not fit in an 8-bit immediate.");
                 }
-                code[fixup.Position + 2] = (byte)target;
+                output[fixup.Position + 2] = (byte)target;
             }
             else
             {
-                code[fixup.Position + 1] = (byte)((target >> 8) & 0xFF);
-                code[fixup.Position + 2] = (byte)(target & 0xFF);
+                output[fixup.Position + 1] = (byte)((target >> 8) & 0xFF);
+                output[fixup.Position + 2] = (byte)(target & 0xFF);
             }
         }
 
-        return code.ToArray();
+        return output.ToArray();
     }
 }

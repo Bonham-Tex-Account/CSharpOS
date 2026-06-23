@@ -292,7 +292,7 @@ public class SyscallTests : IDisposable
         // is longer than one quantum, so handlers are preempted and resumed; both
         // values must still print correctly.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(100)), 128, 64));
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(200)), 128, 64));
 
@@ -345,7 +345,7 @@ public class SyscallTests : IDisposable
         reader.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
         os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64));   // P1
