@@ -14,6 +14,17 @@ if (args.Length >= 2 && args[0] == "--terminal")
     return;
 }
 
+// Resolve OS plugin path: --os-plugin <path> overrides the default.
+string pluginPath = Path.Combine(AppContext.BaseDirectory, "BasicOSPlugin.dll");
+for (int i = 0; i < args.Length - 1; i++)
+{
+    if (args[i] == "--os-plugin")
+    {
+        pluginPath = args[i + 1];
+        break;
+    }
+}
+
 const int MemorySize = 16384;
 const int RequiredMemory = 128;
 const int RequiredStackSize = 64;
@@ -31,6 +42,7 @@ while (true)
 {
     Console.WriteLine();
     Console.WriteLine("=== CSharpOS Visualizer ===");
+    Console.WriteLine($"  OS Plugin: {pluginPath}");
     Console.WriteLine("  1) Counter to ten");
     Console.WriteLine("  2) Average of a list");
     Console.WriteLine("  3) Guessing game (interactive, secret = 42)");
@@ -108,7 +120,7 @@ string WriteProgram(string name, byte[] bytes)
 void Run(List<string> programPaths, VisualizerMode mode)
 {
     Console.WriteLine();
-    BasicOS os = new BasicOS(Console.Out);
+    OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
     Hardware hw = new Hardware(MemorySize, registers, os);
 
     // One terminal window per process, keyed by device id. Processes are loaded in

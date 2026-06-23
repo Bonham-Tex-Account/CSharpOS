@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace CSharpOS;
 
 public class BasicOS : OperatingSystem
@@ -17,39 +19,27 @@ public class BasicOS : OperatingSystem
     private static readonly byte[] kernelImage = BuildKernelImage();
 
     // ---- constructor -----------------------------------------------------
-    public BasicOS(TextWriter log) : base(BuildTraps(), log)
+    public BasicOS(TextWriter log) : base(CollectTraps(), log)
     {
     }
 
     // ---- helper functions ------------------------------------------------
 
-    private static List<Trap> BuildTraps()
+    // Discovers all ITrapProvider implementations in this assembly via reflection
+    // and collects their traps, so new trap handlers can be added without touching
+    // a manual registration list.
+    private static List<Trap> CollectTraps()
     {
-        return new List<Trap>
+        List<Trap> traps = new List<Trap>();
+        foreach (Type type in Assembly.GetExecutingAssembly().GetTypes())
         {
-            new Trap
+            if (!type.IsAbstract && typeof(ITrapProvider).IsAssignableFrom(type))
             {
-                Opcode = Instruction.IRET,
-                Reason = "IRET is a privileged instruction",
-                Condition = (hw, b1, b2, b3) => hw.GetPrivilegeLevel() == PrivilegeLevel.User
-            },
-            new Trap
-            {
-                Opcode = Instruction.LOAD,
-                Reason = "Memory read outside process bounds",
-                Condition = (hw, b1, b2, b3) =>
-                    hw.GetPrivilegeLevel() == PrivilegeLevel.User &&
-                    !hw.IsAddressInProcessRanges(hw.GetProgramBase() + hw.ReadRegisterAt(b2))
-            },
-            new Trap
-            {
-                Opcode = Instruction.STORE,
-                Reason = "Memory write outside process bounds",
-                Condition = (hw, b1, b2, b3) =>
-                    hw.GetPrivilegeLevel() == PrivilegeLevel.User &&
-                    !hw.IsAddressInProcessRanges(hw.GetProgramBase() + hw.ReadRegisterAt(b1))
+                ITrapProvider provider = (ITrapProvider)Activator.CreateInstance(type)!;
+                traps.Add(provider.GetTrap());
             }
-        };
+        }
+        return traps;
     }
 
     // On entry the hardware has saved the user register file at section offset 0

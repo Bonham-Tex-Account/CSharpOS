@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CSharpOS\CSharpOS.csproj" />
+    <ProjectReference Include="..\BasicOSPlugin\BasicOSPlugin.csproj" />
     <ProjectReference Include="..\CSharpOSConsole\CSharpOSConsole.csproj" />
   </ItemGroup>
 
