@@ -10,11 +10,6 @@ namespace OSTests;
 /// </summary>
 public class OsSupportInstructionTests
 {
-    private const byte EAX = 0;
-    private const byte EBX = 1;
-    private const byte ECX = 2;
-    private const byte EIP = 8;
-
     private static Hardware NewHw()
     {
         return Test.NewHardware(4096, new FakeOS());
@@ -32,8 +27,8 @@ public class OsSupportInstructionTests
     public void MovImm16_LoadsFullSixteenBitValue()
     {
         Hardware hw = NewHw();
-        Exec(hw, Instruction.MOV_REG_IMM16, EAX, 0x12, 0x34);
-        Assert.Equal(0x1234, hw.ReadRegisterAt(EAX));
+        Exec(hw, Instruction.MOV_REG_IMM16, (byte)RegisterName.EAX, 0x12, 0x34);
+        Assert.Equal(0x1234, hw.ReadRegisterAt((byte)RegisterName.EAX));
     }
 
     [Fact]
@@ -45,7 +40,7 @@ public class OsSupportInstructionTests
         Hardware hw = NewHw();
         hw.WriteBytes(0, code);
         Instruction.Execute(0, hw);
-        Assert.Equal(1000, hw.ReadRegisterAt(EBX));
+        Assert.Equal(1000, hw.ReadRegisterAt((byte)RegisterName.EBX));
     }
 
     [Fact]
@@ -60,22 +55,22 @@ public class OsSupportInstructionTests
     public void SaveRegs_WritesCapturedContextIncludingIp()
     {
         Hardware hw = NewHw();
-        hw.WriteRegisterAt(EAX, 111);
-        hw.WriteRegisterAt(EBX, 222);
+        hw.WriteRegisterAt((byte)RegisterName.EAX, 111);
+        hw.WriteRegisterAt((byte)RegisterName.EBX, 222);
         hw.SetInstructionPointer(900);
         hw.CaptureInterruptedContext();
 
         // Routine clobbers the live registers as scratch before persisting.
-        hw.WriteRegisterAt(EAX, -1);
+        hw.WriteRegisterAt((byte)RegisterName.EAX, -1);
         int target = 1024;
-        hw.WriteRegisterAt(ECX, target);
+        hw.WriteRegisterAt((byte)RegisterName.ECX, target);
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        Exec(hw, Instruction.SAVEREGS, ECX, 0, 0);
+        Exec(hw, Instruction.SAVEREGS, (byte)RegisterName.ECX, 0, 0);
 
         // The persisted frame holds the interrupted values, not the scratch ones.
-        Assert.Equal(111, ReadWord(hw, target + EAX * 4));
-        Assert.Equal(222, ReadWord(hw, target + EBX * 4));
-        Assert.Equal(900, ReadWord(hw, target + EIP * 4));
+        Assert.Equal(111, ReadWord(hw, target + hw.GetRegisterOffset(RegisterName.EAX)));
+        Assert.Equal(222, ReadWord(hw, target + hw.GetRegisterOffset(RegisterName.EBX)));
+        Assert.Equal(900, ReadWord(hw, target + hw.GetRegisterOffset(RegisterName.EIP)));
     }
 
     [Fact]
@@ -83,16 +78,16 @@ public class OsSupportInstructionTests
     {
         Hardware hw = NewHw();
         int entry = 1024;
-        WriteWord(hw, entry + EAX * 4, 777);
-        WriteWord(hw, entry + EIP * 4, 1500);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EAX), 777);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), 1500);
 
-        hw.WriteRegisterAt(EAX, 5);
-        hw.WriteRegisterAt(EBX, entry);
+        hw.WriteRegisterAt((byte)RegisterName.EAX, 5);
+        hw.WriteRegisterAt((byte)RegisterName.EBX, entry);
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
 
-        Exec(hw, Instruction.LOADREGS, EBX, 0, 0);
+        Exec(hw, Instruction.LOADREGS, (byte)RegisterName.EBX, 0, 0);
         // Live registers are still the routine's scratch after LOADREGS.
-        Assert.Equal(5, hw.ReadRegisterAt(EAX));
+        Assert.Equal(5, hw.ReadRegisterAt((byte)RegisterName.EAX));
     }
 
     [Fact]
@@ -100,18 +95,18 @@ public class OsSupportInstructionTests
     {
         Hardware hw = NewHw();
         int entry = 1024;
-        WriteWord(hw, entry + EAX * 4, 777);
-        WriteWord(hw, entry + EIP * 4, 1500);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EAX), 777);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), 1500);
 
-        hw.WriteRegisterAt(EBX, entry);
+        hw.WriteRegisterAt((byte)RegisterName.EBX, entry);
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        Exec(hw, Instruction.LOADREGS, EBX, 0, 0);
+        Exec(hw, Instruction.LOADREGS, (byte)RegisterName.EBX, 0, 0);
 
         // Routine computes the return level into a live register, then OSRETs it.
-        hw.WriteRegisterAt(ECX, (int)PrivilegeLevel.User);
-        Exec(hw, Instruction.OSRET, ECX, 0, 0);
+        hw.WriteRegisterAt((byte)RegisterName.ECX, (int)PrivilegeLevel.User);
+        Exec(hw, Instruction.OSRET, (byte)RegisterName.ECX, 0, 0);
 
-        Assert.Equal(777, hw.ReadRegisterAt(EAX));            // committed register file
+        Assert.Equal(777, hw.ReadRegisterAt((byte)RegisterName.EAX));            // committed register file
         Assert.Equal(1500, hw.GetInstructionPointer());        // IP from EIP slot
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
@@ -125,7 +120,7 @@ public class OsSupportInstructionTests
         WriteWord(hw, Hardware.IvtContextSwitch * 4, 200);
 
         hw.SetInstructionPointer(50);
-        hw.WriteRegisterAt(EAX, 42);
+        hw.WriteRegisterAt((byte)RegisterName.EAX, 42);
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
 
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
@@ -136,10 +131,10 @@ public class OsSupportInstructionTests
         // The interrupted context (regs + the IP it was about to run) is recoverable
         // via SAVEREGS even though the routine may now clobber live registers.
         int frame = 1024;
-        hw.WriteRegisterAt(ECX, frame);
-        Exec(hw, Instruction.SAVEREGS, ECX, 0, 0);
-        Assert.Equal(42, ReadWord(hw, frame + EAX * 4));
-        Assert.Equal(50, ReadWord(hw, frame + EIP * 4));
+        hw.WriteRegisterAt((byte)RegisterName.ECX, frame);
+        Exec(hw, Instruction.SAVEREGS, (byte)RegisterName.ECX, 0, 0);
+        Assert.Equal(42, ReadWord(hw, frame + hw.GetRegisterOffset(RegisterName.EAX)));
+        Assert.Equal(50, ReadWord(hw, frame + hw.GetRegisterOffset(RegisterName.EIP)));
     }
 
     [Fact]
@@ -150,8 +145,8 @@ public class OsSupportInstructionTests
         Hardware hw = NewHw();
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
 
-        hw.WriteRegisterAt(ECX, (int)PrivilegeLevel.User);
-        Exec(hw, Instruction.OSRET, ECX, 0, 0);
+        hw.WriteRegisterAt((byte)RegisterName.ECX, (int)PrivilegeLevel.User);
+        Exec(hw, Instruction.OSRET, (byte)RegisterName.ECX, 0, 0);
 
         Assert.False(hw.IsProcessRunning());
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
@@ -163,15 +158,15 @@ public class OsSupportInstructionTests
         // When no DispatchOsRoutine has been called (trapFrame is empty), SAVEREGS
         // falls back to persisting the live register file rather than a captured frame.
         Hardware hw = NewHw();
-        hw.WriteRegisterAt(EAX, 321);
+        hw.WriteRegisterAt((byte)RegisterName.EAX, 321);
         int target = 1024;
-        hw.WriteRegisterAt(ECX, target);
+        hw.WriteRegisterAt((byte)RegisterName.ECX, target);
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
         // No CaptureInterruptedContext: trapFrame is still Array.Empty<byte>().
 
-        Exec(hw, Instruction.SAVEREGS, ECX, 0, 0);
+        Exec(hw, Instruction.SAVEREGS, (byte)RegisterName.ECX, 0, 0);
 
-        Assert.Equal(321, ReadWord(hw, target + EAX * 4));
+        Assert.Equal(321, ReadWord(hw, target + hw.GetRegisterOffset(RegisterName.EAX)));
     }
 
     [Fact]
@@ -184,9 +179,9 @@ public class OsSupportInstructionTests
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredMemory, 64);
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredStackSize, 32);
 
-        hw.WriteRegisterAt(EBX, entry);
+        hw.WriteRegisterAt((byte)RegisterName.EBX, entry);
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        Exec(hw, Instruction.SETLAYOUT, EBX, 0, 0);
+        Exec(hw, Instruction.SETLAYOUT, (byte)RegisterName.EBX, 0, 0);
 
         // In user mode the program base is the program address the entry described.
         hw.SetPrivilegeLevel(PrivilegeLevel.User);

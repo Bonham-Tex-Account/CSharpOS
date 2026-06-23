@@ -10,9 +10,6 @@ namespace OSTests;
 /// </summary>
 public class OsAllocatorRoutineTests
 {
-    private const byte EAX = 0;
-    private const byte EBX = 1;
-
     private static Hardware NewSeededHardware()
     {
         Hardware hw = Test.NewHardware(16384, new FakeOS());
@@ -206,8 +203,8 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 100);
 
         // Establish a known CPU state before the synchronous call.
-        hw.WriteRegisterAt(EAX, 0xAA);
-        hw.WriteRegisterAt(EBX, 0xBB);
+        hw.WriteRegisterAt((byte)RegisterName.EAX, 0xAA);
+        hw.WriteRegisterAt((byte)RegisterName.EBX, 0xBB);
         int savedIp = 1234;
         hw.SetInstructionPointer(savedIp);
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
@@ -215,8 +212,8 @@ public class OsAllocatorRoutineTests
         hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
 
         // Registers, IP, and privilege level must be exactly restored.
-        Assert.Equal(0xAA, hw.ReadRegisterAt(EAX));
-        Assert.Equal(0xBB, hw.ReadRegisterAt(EBX));
+        Assert.Equal(0xAA, hw.ReadRegisterAt((byte)RegisterName.EAX));
+        Assert.Equal(0xBB, hw.ReadRegisterAt((byte)RegisterName.EBX));
         Assert.Equal(savedIp, hw.GetInstructionPointer());
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }

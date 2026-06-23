@@ -44,14 +44,17 @@ public class MissingCoverageTests
     public void IsAddressInProcessRanges_OneBeforeRangeEnd_ReturnsTrue()
     {
         Hardware hw = BuildWithLayout();
-        Assert.True(hw.IsAddressInProcessRanges(407));
+        // 100 (ProgramAddress) + 4 (ProgramSize) + KernelHeaderSize + 64 (mem) + 64 (stack) + KernelStackSize
+        int rangeEnd = 100 + 4 + Hardware.KernelHeaderSize + 64 + 64 + Hardware.KernelStackSize;
+        Assert.True(hw.IsAddressInProcessRanges(rangeEnd - 1));
     }
 
     [Fact]
     public void IsAddressInProcessRanges_AtRangeEnd_ReturnsFalse()
     {
         Hardware hw = BuildWithLayout();
-        Assert.False(hw.IsAddressInProcessRanges(408));
+        int rangeEnd = 100 + 4 + Hardware.KernelHeaderSize + 64 + 64 + Hardware.KernelStackSize;
+        Assert.False(hw.IsAddressInProcessRanges(rangeEnd));
     }
 
     [Fact]

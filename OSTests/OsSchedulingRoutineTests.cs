@@ -10,9 +10,6 @@ namespace OSTests;
 /// </summary>
 public class OsSchedulingRoutineTests
 {
-    private const byte EAX = 0;
-    private const byte EIP = 8;
-
     private static Hardware NewSeededHardware()
     {
         Hardware hw = Test.NewHardware(8192, new FakeOS());
@@ -40,8 +37,8 @@ public class OsSchedulingRoutineTests
         PrivilegeLevel level, int eax, int eip, int programAddress)
     {
         int entry = OsLayout.ProcessEntryAddress(index);
-        WriteWord(hw, entry + EAX * 4, eax);
-        WriteWord(hw, entry + EIP * 4, eip);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EAX), eax);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), eip);
         WriteWord(hw, entry + Hardware.ProcessEntryLevel, (int)level);
         WriteWord(hw, entry + Hardware.ProcessEntryState, (int)state);
         WriteWord(hw, entry + Hardware.ProcessEntryWaitReason, (int)wait);
@@ -64,7 +61,7 @@ public class OsSchedulingRoutineTests
         RunRoutine(hw);
 
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
         Assert.Equal(0x222, hw.GetInstructionPointer());
     }
 
@@ -91,7 +88,7 @@ public class OsSchedulingRoutineTests
         SeedEntry(hw, 0, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 1000, 0x111, 100);
         SeedEntry(hw, 1, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 2000, 0x222, 300);
 
-        hw.WriteRegisterAt(EAX, 1234);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,1234);
         hw.SetInstructionPointer(0x40);
         hw.DispatchOsRoutine(Hardware.IvtBlockInput, (int)WaitReason.Input);
         RunRoutine(hw);
@@ -100,10 +97,10 @@ public class OsSchedulingRoutineTests
         int entry0 = OsLayout.ProcessEntryAddress(0);
         Assert.Equal((int)ProcessState.Blocked, ReadWord(hw, entry0 + Hardware.ProcessEntryState));
         Assert.Equal((int)WaitReason.Input, ReadWord(hw, entry0 + Hardware.ProcessEntryWaitReason));
-        Assert.Equal(1234, ReadWord(hw, entry0 + EAX * 4));
-        Assert.Equal(0x40, ReadWord(hw, entry0 + EIP * 4));
+        Assert.Equal(1234, ReadWord(hw, entry0 + hw.GetRegisterOffset(RegisterName.EAX)));
+        Assert.Equal(0x40, ReadWord(hw, entry0 + hw.GetRegisterOffset(RegisterName.EIP)));
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
     }
 
     [Fact]
@@ -134,7 +131,7 @@ public class OsSchedulingRoutineTests
         SeedEntry(hw, 0, ProcessState.Ready, WaitReason.None, PrivilegeLevel.User, 1000, 0x111, 100);
         SeedEntry(hw, 1, ProcessState.Blocked, WaitReason.Input, PrivilegeLevel.User, 2000, 0x222, 300);
 
-        hw.WriteRegisterAt(EAX, 555);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,555);
         hw.SetInstructionPointer(0x50);
         hw.DispatchOsRoutine(Hardware.IvtWakeInput, 1); // device 1 (process index 1)
         RunRoutine(hw);
@@ -144,7 +141,7 @@ public class OsSchedulingRoutineTests
         Assert.Equal((int)ProcessState.Ready, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
         Assert.Equal((int)WaitReason.None, ReadWord(hw, entry1 + Hardware.ProcessEntryWaitReason));
         Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));   // still process 0
-        Assert.Equal(555, hw.ReadRegisterAt(EAX));                    // its registers restored
+        Assert.Equal(555, hw.ReadRegisterAt((byte)RegisterName.EAX));                    // its registers restored
         Assert.Equal(0x50, hw.GetInstructionPointer());               // and its IP
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
@@ -184,7 +181,7 @@ public class OsSchedulingRoutineTests
         int entry0 = OsLayout.ProcessEntryAddress(0);
         Assert.Equal((int)ProcessState.Terminated, ReadWord(hw, entry0 + Hardware.ProcessEntryState));
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
     }
 
     [Fact]
@@ -219,7 +216,7 @@ public class OsSchedulingRoutineTests
         int entry0 = OsLayout.ProcessEntryAddress(0);
         Assert.Equal((int)ProcessState.Terminated, ReadWord(hw, entry0 + Hardware.ProcessEntryState));
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
     }
 
     [Fact]
@@ -252,7 +249,7 @@ public class OsSchedulingRoutineTests
 
         // Index 0 is Terminated — Schedule skips it and picks index 1.
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(2000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
         Assert.Equal(0x222, hw.GetInstructionPointer());
     }
 
@@ -267,7 +264,7 @@ public class OsSchedulingRoutineTests
 
         // A (spurious) input interrupt for device 1, which is not blocked: nothing
         // changes and the running process keeps going.
-        hw.WriteRegisterAt(EAX, 999);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,999);
         hw.SetInstructionPointer(0x50);
         hw.DispatchOsRoutine(Hardware.IvtWakeInput, 1);
         RunRoutine(hw);
@@ -275,7 +272,7 @@ public class OsSchedulingRoutineTests
         int entry1 = OsLayout.ProcessEntryAddress(1);
         Assert.Equal((int)ProcessState.Ready, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
         Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(999, hw.ReadRegisterAt(EAX));
+        Assert.Equal(999, hw.ReadRegisterAt((byte)RegisterName.EAX));
         Assert.Equal(0x50, hw.GetInstructionPointer());
     }
 

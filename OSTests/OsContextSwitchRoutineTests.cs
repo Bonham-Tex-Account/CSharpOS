@@ -10,9 +10,6 @@ namespace OSTests;
 /// </summary>
 public class OsContextSwitchRoutineTests
 {
-    private const byte EAX = 0;
-    private const byte EIP = 8;
-
     private static Hardware NewSeededHardware()
     {
         Hardware hw = Test.NewHardware(8192, new FakeOS());
@@ -42,8 +39,8 @@ public class OsContextSwitchRoutineTests
         int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
         int entry = OsLayout.ProcessEntryAddress(index);
-        WriteWord(hw, entry + EAX * 4, eax);
-        WriteWord(hw, entry + EIP * 4, eip);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EAX), eax);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), eip);
         WriteWord(hw, entry + Hardware.ProcessEntryLevel, level);
         WriteWord(hw, entry + Hardware.ProcessEntryState, state);
         WriteWord(hw, entry + Hardware.ProcessEntryProgramAddress, programAddress);
@@ -62,7 +59,7 @@ public class OsContextSwitchRoutineTests
         SeedEntry(hw, 1, (int)ProcessState.Ready, (int)PrivilegeLevel.User, 2000, 0x222, 300, 8, 64, 32);
 
         // Process 0 is running: its live registers and the IP it was about to run.
-        hw.WriteRegisterAt(EAX, 1234);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,1234);
         hw.SetInstructionPointer(0x999);
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
 
@@ -70,14 +67,14 @@ public class OsContextSwitchRoutineTests
 
         // Switched to process 1.
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(2000, hw.ReadRegisterAt(EAX));        // process 1's registers live
+        Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));        // process 1's registers live
         Assert.Equal(0x222, hw.GetInstructionPointer());    // resumed at process 1's IP
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
 
         // Process 0's interrupted context was persisted to its entry.
         int entry0 = OsLayout.ProcessEntryAddress(0);
-        Assert.Equal(1234, ReadWord(hw, entry0 + EAX * 4));
-        Assert.Equal(0x999, ReadWord(hw, entry0 + EIP * 4));
+        Assert.Equal(1234, ReadWord(hw, entry0 + hw.GetRegisterOffset(RegisterName.EAX)));
+        Assert.Equal(0x999, ReadWord(hw, entry0 + hw.GetRegisterOffset(RegisterName.EIP)));
 
         // Layout now targets process 1.
         Assert.Equal(300, hw.GetProgramBase());
@@ -93,14 +90,14 @@ public class OsContextSwitchRoutineTests
         SeedEntry(hw, 1, (int)ProcessState.Blocked, (int)PrivilegeLevel.User, 2000, 0x222, 300, 4, 64, 32);
         SeedEntry(hw, 2, (int)ProcessState.Ready, (int)PrivilegeLevel.User, 3000, 0x333, 500, 4, 64, 32);
 
-        hw.WriteRegisterAt(EAX, 1);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,1);
         hw.SetInstructionPointer(0x10);
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
         RunRoutine(hw);
 
         // Index 1 is Blocked, so the scan skips it and lands on index 2.
         Assert.Equal(2, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(3000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(3000, hw.ReadRegisterAt((byte)RegisterName.EAX));
         Assert.Equal(0x333, hw.GetInstructionPointer());
     }
 
@@ -114,14 +111,14 @@ public class OsContextSwitchRoutineTests
         SeedEntry(hw, 1, (int)ProcessState.Blocked, (int)PrivilegeLevel.User, 2000, 0x222, 300, 4, 64, 32);
         SeedEntry(hw, 2, (int)ProcessState.Ready, (int)PrivilegeLevel.User, 3000, 0x333, 500, 4, 64, 32);
 
-        hw.WriteRegisterAt(EAX, 9);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,9);
         hw.SetInstructionPointer(0x20);
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
         RunRoutine(hw);
 
         // From index 2, scan wraps past blocked 1 to index 0.
         Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(1000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(1000, hw.ReadRegisterAt((byte)RegisterName.EAX));
     }
 
     [Fact]
@@ -133,7 +130,7 @@ public class OsContextSwitchRoutineTests
         SeedEntry(hw, 0, (int)ProcessState.Blocked, (int)PrivilegeLevel.User, 1000, 0x111, 100, 4, 64, 32);
         SeedEntry(hw, 1, (int)ProcessState.Blocked, (int)PrivilegeLevel.User, 2000, 0x222, 300, 4, 64, 32);
 
-        hw.WriteRegisterAt(EAX, 7);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,7);
         hw.SetInstructionPointer(0x30);
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
         RunRoutine(hw);
@@ -141,7 +138,7 @@ public class OsContextSwitchRoutineTests
         // No Ready process: idle sentinel, and the running process was still saved.
         Assert.Equal(-1, ReadWord(hw, OsLayout.CurrentIndexOffset));
         int entry0 = OsLayout.ProcessEntryAddress(0);
-        Assert.Equal(7, ReadWord(hw, entry0 + EAX * 4));
+        Assert.Equal(7, ReadWord(hw, entry0 + hw.GetRegisterOffset(RegisterName.EAX)));
     }
 
     [Fact]
@@ -154,14 +151,14 @@ public class OsContextSwitchRoutineTests
         SeedEntry(hw, 1, (int)ProcessState.Terminated, (int)PrivilegeLevel.User,    0,     0, 200, 4, 64, 32);
         SeedEntry(hw, 2, (int)ProcessState.Ready,      (int)PrivilegeLevel.User, 3000, 0x333, 500, 4, 64, 32);
 
-        hw.WriteRegisterAt(EAX, 7);
+        hw.WriteRegisterAt((byte)RegisterName.EAX,7);
         hw.SetInstructionPointer(0x10);
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
         RunRoutine(hw);
 
         // Index 1 is Terminated — the scan skips it and lands on index 2.
         Assert.Equal(2, ReadWord(hw, OsLayout.CurrentIndexOffset));
-        Assert.Equal(3000, hw.ReadRegisterAt(EAX));
+        Assert.Equal(3000, hw.ReadRegisterAt((byte)RegisterName.EAX));
         Assert.Equal(0x333, hw.GetInstructionPointer());
     }
 
@@ -188,7 +185,7 @@ public class OsContextSwitchRoutineTests
         RunRoutine(hw);
 
         Assert.Equal(0, eventCount);
-        Assert.Equal(1000, hw.ReadRegisterAt(EAX)); // still process 0's register value
+        Assert.Equal(1000, hw.ReadRegisterAt((byte)RegisterName.EAX)); // still process 0's register value
     }
 
     private static int ReadWord(Hardware hw, int address)

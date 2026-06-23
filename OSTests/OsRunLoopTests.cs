@@ -10,9 +10,6 @@ namespace OSTests;
 /// </summary>
 public class OsRunLoopTests
 {
-    private const byte EAX = 0;
-    private const byte EIP = 8;
-
     private static Hardware NewSeededHardware()
     {
         Hardware hw = Test.NewHardware(8192, new FakeOS());
@@ -25,8 +22,8 @@ public class OsRunLoopTests
         int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
         int entry = OsLayout.ProcessEntryAddress(index);
-        WriteWord(hw, entry + EAX * 4, eax);
-        WriteWord(hw, entry + EIP * 4, eip);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EAX), eax);
+        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), eip);
         WriteWord(hw, entry + Hardware.ProcessEntryLevel, level);
         WriteWord(hw, entry + Hardware.ProcessEntryState, state);
         WriteWord(hw, entry + Hardware.ProcessEntryProgramAddress, programAddress);

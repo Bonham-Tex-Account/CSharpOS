@@ -39,8 +39,14 @@ Running timeline:
 
 
 Future fixes
+-fix hardcode errors in unit tests
 -process that can spawn a process (spawner using id or fork clone method)
--process killing
--arg count /arg values
--cd/ls
--process Scheduler improvement priority queue (uses important scale, amount of time it shouls take-amount of time currently taken, if it was a yeilded process)
+-dynamically add OS with reflection
+-better memory management (split method where we have blocks that will split in half over and over to better fit smaller and larger processes without bad reclaimation)
+--buddy allocator
+full space lets say 64k
+start at 0
+lets say we allocate 5k
+we take a chunk of each section and mark the first byte on the way down (3 markers: 0 open space, 1 space availible , 2:lower space availible (since 8 bytes maybe would be faster to store layers that are free))
+will mark on the way down and allocate the space
+external structure perhaps 1 bit or more will decide
