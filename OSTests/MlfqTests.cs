@@ -13,7 +13,7 @@ public class MlfqTests
 
     private static Hardware NewSeededHardware()
     {
-        Hardware hw = Test.NewHardware(8192, new FakeOS());
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), new FakeOS());
         hw.ReserveOsMemory(OsLayout.TotalSize);
         hw.WriteBytes(0, OsRoutines.BuildOsImage());
         return hw;
@@ -59,19 +59,12 @@ public class MlfqTests
 
     private static int ReadWord(Hardware hw, int address)
     {
-        byte[] b = hw.ReadBytes(address);
-        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+        return Test.ReadWord(hw, address);
     }
 
     private static void WriteWord(Hardware hw, int address, int value)
     {
-        hw.WriteBytes(address, new byte[]
-        {
-            (byte)(value & 0xFF),
-            (byte)((value >> 8)  & 0xFF),
-            (byte)((value >> 16) & 0xFF),
-            (byte)((value >> 24) & 0xFF)
-        });
+        Test.WriteWord(hw, address, value);
     }
 
     // ---- demotion --------------------------------------------------------
@@ -374,7 +367,7 @@ public class MlfqTests
         // BuddyBitmapOffset; its Priority/TicksUsed fields are 128/132 bytes further.
         // Hardware must be large enough that those addresses are valid memory.
 
-        Hardware hw = Test.NewHardware(16384, new FakeOS());
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(16384), new FakeOS());
         hw.ReserveOsMemory(OsLayout.TotalSize);
         hw.WriteBytes(0, OsRoutines.BuildOsImage());
         SeedMlfqDefaults(hw);
@@ -675,7 +668,7 @@ public class MlfqTests
         // EDGE CASE: OsLayout offsets shifted when MLFQ fields were added. This test
         // confirms each table entry is at the address OsRoutines actually reads.
 
-        Hardware hw = Test.NewHardware(8192, new FakeOS());
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), new FakeOS());
         hw.ReserveOsMemory(OsLayout.TotalSize);
         hw.WriteBytes(0, OsRoutines.BuildOsImage());
 
@@ -740,7 +733,7 @@ public class MlfqTests
 
         System.IO.StringWriter log = new System.IO.StringWriter();
         BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(16384, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(16384), os);
 
         // Build a minimal program: just a HLT.
         Assembler asm = new Assembler();
@@ -777,7 +770,7 @@ public class MlfqTests
 
         System.IO.StringWriter log = new System.IO.StringWriter();
         BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(16384, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(16384), os);
 
         Assembler asm = new Assembler();
         asm.Hlt();

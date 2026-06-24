@@ -805,18 +805,11 @@ public class OsAllocatorRoutineTests
 
     private static int ReadWord(Hardware hw, int address)
     {
-        byte[] b = hw.ReadBytes(address);
-        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+        return Test.ReadWord(hw, address);
     }
 
     private static void WriteWord(Hardware hw, int address, int value)
     {
-        hw.WriteBytes(address, new byte[]
-        {
-            (byte)(value & 0xFF),
-            (byte)((value >> 8)  & 0xFF),
-            (byte)((value >> 16) & 0xFF),
-            (byte)((value >> 24) & 0xFF)
-        });
+        Test.WriteWord(hw, address, value);
     }
 }

@@ -129,7 +129,7 @@ public class HardwareTests
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
-        byte[] state = new byte[Test.AllRegisters().Length * 4];
+        byte[] state = new byte[Test.RegisterFileBytes()];
         state[0] = 0x01;
         state[4] = 0x02;
         hw.WriteRegisters(state);
@@ -161,11 +161,16 @@ public class HardwareTests
 
         List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
 
-        // program (4) + kernel section (128) + memory (16) + user stack (16) +
-        // kernel stack (64) are contiguous from 0.
+        // program + kernel section + user memory + user stack + kernel stack are
+        // contiguous from 0. Each term is derived from the process/kernel sizes so
+        // the assertion survives changes to the kernel header, image, or process dims.
+        int expectedSize = program.Length
+            + (Hardware.KernelHeaderSize + os.KernelImage.Length)
+            + process.RequiredMemory + process.RequiredStackSize
+            + Hardware.KernelStackSize;
         Assert.Single(ranges);
         Assert.Equal(0, ranges[0].Start);
-        Assert.Equal(4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
+        Assert.Equal(expectedSize, ranges[0].Size);
     }
 
     [Fact]
@@ -254,9 +259,9 @@ public class HardwareTests
         Hardware hw = Test.NewHardware(1024, os);
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
-        // Mimic the OS: register state begins after the program + kernel section.
-        process.RegisterStateAddress = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length);
         byte[] program = new byte[] { 0, 0, 0, 0 };
+        // Mimic the OS: register state begins after the program + kernel section.
+        process.RegisterStateAddress = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length);
         hw.LoadProcess(process, program);
 
         // ESP is seeded into the saved register state; load it into the registers
@@ -264,7 +269,7 @@ public class HardwareTests
         byte[] savedState = hw.ReadRegisterState(process.RegisterStateAddress);
         hw.WriteRegisters(savedState);
 
-        int expectedTop = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + process.RequiredMemory + process.RequiredStackSize;
+        int expectedTop = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length) + process.RequiredMemory + process.RequiredStackSize;
         Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
     }
 
@@ -275,14 +280,20 @@ public class HardwareTests
         Hardware hw = Test.NewHardware(1024, os);
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
-        process.RegisterStateAddress = 4 + (Hardware.KernelHeaderSize + os.KernelImage.Length);
-        hw.LoadProcess(process, new byte[] { 0, 0, 0, 0 });
+        byte[] program = new byte[] { 0, 0, 0, 0 };
+        process.RegisterStateAddress = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length);
+        hw.LoadProcess(process, program);
 
         List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
 
-        // The reserved kernel stack (64) is part of the process's footprint.
+        // The reserved kernel stack is part of the process's footprint. Sizes are
+        // derived from the process/kernel constants, not hard-coded.
+        int expectedSize = program.Length
+            + (Hardware.KernelHeaderSize + os.KernelImage.Length)
+            + process.RequiredMemory + process.RequiredStackSize
+            + Hardware.KernelStackSize;
         Assert.Single(ranges);
-        Assert.Equal(4 + (Hardware.KernelHeaderSize + os.KernelImage.Length) + 16 + 16 + Hardware.KernelStackSize, ranges[0].Size);
+        Assert.Equal(expectedSize, ranges[0].Size);
     }
 
     [Fact]

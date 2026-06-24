@@ -123,6 +123,17 @@ internal static class Test
     // Useful for "fill the heap then fail" tests where leafCount must not exceed MaxProcesses.
     public static int FullHeapMachineSize => OsLayout.TotalSize + OsLayout.BuddyDefaultMinBlock * OsLayout.MaxProcesses;
 
+    // Machine size for tests that load or hand-seed the OS region: the OS image plus
+    // `heapBytes` of headroom for process memory and heap pokes. Sizing relative to
+    // OsLayout.TotalSize (instead of a bare literal) means a future growth of the OS
+    // region or kernel never silently outgrows a test's machine, and making a machine
+    // bigger is a one-line change to the heapBytes argument rather than chasing
+    // hard-coded sizes across the suite.
+    public static int MachineWithHeap(int heapBytes)
+    {
+        return OsLayout.TotalSize + heapBytes;
+    }
+
     /// <summary>
     /// Builds a Hardware instance with the full register set declared in RegisterName.
     /// </summary>
@@ -137,11 +148,71 @@ internal static class Test
         return Enum.GetValues<RegisterName>();
     }
 
+    // Width in bytes of a machine word / register / instruction. The ISA is fixed at
+    // 4-byte words, so the register file size, per-register offsets, and instruction
+    // stride are all multiples of this. Mirrors the 4-byte word the production
+    // Hardware code uses throughout; kept here so the tests have a single source.
+    public const int WordSize = 4;
+
+    // EFLAGS bit masks. The corresponding ZeroFlag/SignFlag bits inside
+    // InstructionFunctions are private, so they can't be shared across the assembly
+    // boundary; these mirror them for the tests. Bit 0 = zero flag, bit 1 = sign flag.
+    public const int ZeroFlagMask = 1;
+    public const int SignFlagMask = 2;
+
+    /// <summary>
+    /// Total size in bytes of the full register file: one WordSize-wide slot per
+    /// register declared in RegisterName.
+    /// </summary>
+    public static int RegisterFileBytes()
+    {
+        return AllRegisters().Length * WordSize;
+    }
+
+    /// <summary>
+    /// Returns the EFLAGS zero flag as 0 or 1.
+    /// </summary>
+    public static int ZeroFlag(Hardware hw)
+    {
+        return hw.ReadRegister(RegisterName.EFLAGS) & ZeroFlagMask;
+    }
+
+    /// <summary>
+    /// Returns the EFLAGS sign flag as 0 or 1.
+    /// </summary>
+    public static int SignFlag(Hardware hw)
+    {
+        return (hw.ReadRegister(RegisterName.EFLAGS) & SignFlagMask) >> 1;
+    }
+
     /// <summary>
     /// Encodes a single 4-byte instruction word.
     /// </summary>
     public static byte[] Word(byte opcode, byte b1, byte b2, byte b3)
     {
         return new byte[] { opcode, b1, b2, b3 };
+    }
+
+    /// <summary>
+    /// Reads a 4-byte little-endian word from hardware memory at the given address.
+    /// </summary>
+    public static int ReadWord(Hardware hw, int address)
+    {
+        byte[] b = hw.ReadBytes(address);
+        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+    }
+
+    /// <summary>
+    /// Writes a value as a 4-byte little-endian word to hardware memory at the given address.
+    /// </summary>
+    public static void WriteWord(Hardware hw, int address, int value)
+    {
+        hw.WriteBytes(address, new byte[]
+        {
+            (byte)(value & 0xFF),
+            (byte)((value >> 8) & 0xFF),
+            (byte)((value >> 16) & 0xFF),
+            (byte)((value >> 24) & 0xFF)
+        });
     }
 }

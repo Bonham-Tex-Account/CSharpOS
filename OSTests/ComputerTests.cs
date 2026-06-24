@@ -32,7 +32,7 @@ public class ComputerTests : IDisposable
         Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
         List<Process> starters = new List<Process> { process };
 
-        Computer computer = new Computer(os, 8192, Test.AllRegisters(), starters); // memory must clear the OS region
+        Computer computer = new Computer(os, Test.MachineWithHeap(8192), Test.AllRegisters(), starters); // sized to clear the OS region
 
         Assert.True(os.HasProcesses);
     }
@@ -41,7 +41,7 @@ public class ComputerTests : IDisposable
     public void LoadProcess_AddsToOs()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Computer computer = new Computer(os, 8192, Test.AllRegisters(), new List<Process>());
+        Computer computer = new Computer(os, Test.MachineWithHeap(8192), Test.AllRegisters(), new List<Process>());
         Assert.False(os.HasProcesses);
 
         computer.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16));
@@ -57,7 +57,7 @@ public class ComputerTests : IDisposable
         // single process is torn down, eventually leaving the OS with no work.
         Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
         List<Process> starters = new List<Process> { process };
-        Computer computer = new Computer(os, 8192, Test.AllRegisters(), starters); // memory must clear the OS region
+        Computer computer = new Computer(os, Test.MachineWithHeap(8192), Test.AllRegisters(), starters); // sized to clear the OS region
 
         computer.Run();
 

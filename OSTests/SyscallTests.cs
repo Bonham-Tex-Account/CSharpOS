@@ -33,16 +33,21 @@ public class SyscallTests : IDisposable
 
     private static int ReadWord(Hardware hw, int address)
     {
-        byte[] b = hw.ReadBytes(address);
-        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+        return Test.ReadWord(hw, address);
     }
+
+    // Required user memory / stack of the process laid out for the trap-mechanism
+    // tests. Shared between HardwareWithLayout and the assertions that compute the
+    // kernel-stack top, so changing the layout is a single edit here.
+    private const int LayoutUserMemory = 64;
+    private const int LayoutUserStack = 64;
 
     // Lays out a single process directly on the hardware (no OS), so the kernel
     // section / stacks are positioned for the trap-mechanism tests.
     private static Hardware HardwareWithLayout(IOperatingSystem os, int programAddress, int programSize)
     {
         Hardware hw = Test.NewHardware(1024, os);
-        Process process = new Process("ignored", 64, 64);
+        Process process = new Process("ignored", LayoutUserMemory, LayoutUserStack);
         process.ProgramAddress = programAddress;
         process.ProgramSize = programSize;
         hw.LoadProcessLayout(process);
@@ -122,7 +127,7 @@ public class SyscallTests : IDisposable
         // user EAX saved into the kernel-section save area
         Assert.Equal(99, ReadWord(hw, section + Hardware.KernelSaveAreaOffset));
         // running on the process's kernel stack
-        int kernelStackTop = section + Hardware.KernelHeaderSize + 64 + 64 + Hardware.KernelStackSize;
+        int kernelStackTop = section + Hardware.KernelHeaderSize + LayoutUserMemory + LayoutUserStack + Hardware.KernelStackSize;
         Assert.Equal(kernelStackTop, hw.ReadRegister(RegisterName.ESP));
     }
 
@@ -292,7 +297,7 @@ public class SyscallTests : IDisposable
         // is longer than one quantum, so handlers are preempted and resumed; both
         // values must still print correctly.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(100)), 128, 64));
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(200)), 128, 64));
 
@@ -345,7 +350,7 @@ public class SyscallTests : IDisposable
         reader.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
         os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64));   // P1

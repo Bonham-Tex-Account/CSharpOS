@@ -7,22 +7,34 @@ namespace OSTests;
 // not yet implement that behavior and can be fixed later.
 public class MissingCoverageTests
 {
-    // Returns Hardware with a process layout loaded at ProgramAddress=100, ProgramSize=4.
-    // The total merged range is [100, 408) — exclusive end.
-    // 100 + 4 (prog) + 112 (kernel) + 64 (mem) + 64 (stack) + 64 (kstack) = 408
+    // Layout of the single process used by BuildWithLayout. Kept as named constants
+    // so the merged-range assertions can be computed from them (plus the kernel-size
+    // constants) and stay correct if any dimension changes.
+    private const int LayoutProgramAddress = 100;
+    private const int LayoutProgramSize = 4;
+    private const int LayoutUserMemory = 64;
+    private const int LayoutUserStack = 64;
+
+    // Returns Hardware with a process layout loaded. The merged process range runs
+    // from LayoutProgramAddress to RangeEnd (exclusive):
+    //   ProgramAddress + ProgramSize + kernel section + user memory + user stack + kernel stack
+    private static int RangeEnd =>
+        LayoutProgramAddress + LayoutProgramSize + Hardware.KernelHeaderSize
+        + LayoutUserMemory + LayoutUserStack + Hardware.KernelStackSize;
+
     private static Hardware BuildWithLayout()
     {
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
-        Process process = new Process("ignored", 64, 64);
-        process.ProgramAddress = 100;
-        process.ProgramSize = 4;
+        Process process = new Process("ignored", LayoutUserMemory, LayoutUserStack);
+        process.ProgramAddress = LayoutProgramAddress;
+        process.ProgramSize = LayoutProgramSize;
         hw.LoadProcessLayout(process);
         return hw;
     }
 
-    private static int ZeroFlag(Hardware hw) => hw.ReadRegister(RegisterName.EFLAGS) & 1;
-    private static int SignFlag(Hardware hw) => (hw.ReadRegister(RegisterName.EFLAGS) & 2) >> 1;
+    private static int ZeroFlag(Hardware hw) => Test.ZeroFlag(hw);
+    private static int SignFlag(Hardware hw) => Test.SignFlag(hw);
 
     // ---- IsAddressInProcessRanges boundary conditions ----------------------
 
@@ -30,31 +42,28 @@ public class MissingCoverageTests
     public void IsAddressInProcessRanges_AtRangeStart_ReturnsTrue()
     {
         Hardware hw = BuildWithLayout();
-        Assert.True(hw.IsAddressInProcessRanges(100));
+        Assert.True(hw.IsAddressInProcessRanges(LayoutProgramAddress));
     }
 
     [Fact]
     public void IsAddressInProcessRanges_BeforeRangeStart_ReturnsFalse()
     {
         Hardware hw = BuildWithLayout();
-        Assert.False(hw.IsAddressInProcessRanges(99));
+        Assert.False(hw.IsAddressInProcessRanges(LayoutProgramAddress - 1));
     }
 
     [Fact]
     public void IsAddressInProcessRanges_OneBeforeRangeEnd_ReturnsTrue()
     {
         Hardware hw = BuildWithLayout();
-        // 100 (ProgramAddress) + 4 (ProgramSize) + KernelHeaderSize + 64 (mem) + 64 (stack) + KernelStackSize
-        int rangeEnd = 100 + 4 + Hardware.KernelHeaderSize + 64 + 64 + Hardware.KernelStackSize;
-        Assert.True(hw.IsAddressInProcessRanges(rangeEnd - 1));
+        Assert.True(hw.IsAddressInProcessRanges(RangeEnd - 1));
     }
 
     [Fact]
     public void IsAddressInProcessRanges_AtRangeEnd_ReturnsFalse()
     {
         Hardware hw = BuildWithLayout();
-        int rangeEnd = 100 + 4 + Hardware.KernelHeaderSize + 64 + 64 + Hardware.KernelStackSize;
-        Assert.False(hw.IsAddressInProcessRanges(rangeEnd));
+        Assert.False(hw.IsAddressInProcessRanges(RangeEnd));
     }
 
     [Fact]
@@ -74,7 +83,7 @@ public class MissingCoverageTests
     {
         // Uses BasicOS so the LOAD trap condition is active.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 100;
         process.ProgramSize = 4;
@@ -100,7 +109,7 @@ public class MissingCoverageTests
         // Uses BasicOS so the STORE trap is defined — but the Condition gates on
         // User mode only, so kernel-mode writes must not fire it.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 100;
         process.ProgramSize = 4;
@@ -355,7 +364,7 @@ public class MissingCoverageTests
         try
         {
             BasicOS os = new BasicOS(new StringWriter());
-            Computer computer = new Computer(os, 8192, Test.AllRegisters(), new List<Process>());
+            Computer computer = new Computer(os, Test.MachineWithHeap(8192), Test.AllRegisters(), new List<Process>());
             computer.LoadProcess(new Process(path, 128, 64));
             Assert.True(os.HasProcesses);
         }
@@ -412,7 +421,7 @@ public class OsEdgeCaseTests : IDisposable
     public void PendingProcess_LoadedAfterRunningProcessTerminates()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (_, e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
 
@@ -450,7 +459,7 @@ public class OsEdgeCaseTests : IDisposable
         // the kernel handler, one process will resume in User mode and IRET will
         // trap, killing the process. Both printing confirms mode was preserved.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (_, e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
 

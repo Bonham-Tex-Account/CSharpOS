@@ -68,6 +68,23 @@ public static class Programs
         return asm.Build();
     }
 
+    // Busy-works for `iterations` loop turns (a countdown), then prints `printValue`
+    // and halts. Non-interactive and self-terminating, so it is ideal for memory-churn
+    // demos: several can coexist (filling the buddy heap) and then drain as they finish.
+    // Both arguments must fit in a byte (0..255).
+    public static byte[] BusyThenHalt(int iterations, int printValue)
+    {
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, iterations);
+        asm.Label("spin");
+        asm.Dec(RegisterName.EAX);
+        asm.Jnz("spin");
+        asm.MovImm(RegisterName.EAX, printValue);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+        return asm.Build();
+    }
+
     // Interactive guessing game. Secret = 42. Reads guesses via IN, prints a hint
     // code (1 = too low, 2 = too high) until the guess is correct, then prints it.
     public static byte[] GuessingGame()

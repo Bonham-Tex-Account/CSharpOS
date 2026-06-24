@@ -169,7 +169,7 @@ public class EventTests : IDisposable
     public void Scheduler_FiresContextSwitched_OnFirstResume_WithNoPriorProcess()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         string path = CreateProgramFile(MovThenHalt());
         os.LoadProcess(new Process(path, 128, 64));
 
@@ -190,7 +190,7 @@ public class EventTests : IDisposable
     public void Scheduler_FiresContextSwitched_WithDistinctProcessesAcrossSwitches()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(16384, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
         // Two long-running processes so the scheduler round-robins between them.
         string firstPath = CreateProgramFile(LoopForever());
         string secondPath = CreateProgramFile(LoopForever());
@@ -218,7 +218,7 @@ public class EventTests : IDisposable
         // A user-mode IRET violates BasicOS's privilege trap; Hardware fires the
         // fault event carrying the trap's reason.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         Assembler asm = new Assembler();
         asm.Iret(); // privileged: traps in user mode
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));

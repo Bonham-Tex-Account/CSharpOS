@@ -6,6 +6,11 @@ internal static class InstructionFunctions
     private const int ZeroFlag = 1;
     private const int SignFlag = 2;
 
+    // Shift instructions operate on 32-bit registers, so only the low 5 bits of the
+    // shift count are significant (a shift of 32+ is undefined / wraps); this masks
+    // the count to the 0..31 range, matching x86 shift-count semantics.
+    private const int ShiftCountMask = 0x1F;
+
     // ---- helper functions ------------------------------------------------
     private static void UpdateFlags(Hardware hw, int result)
     {
@@ -154,7 +159,7 @@ internal static class InstructionFunctions
     // SHL dest, src — logical shift left; shift amount taken from src register.
     internal static void Shl(Hardware hw, byte b1, byte b2, byte b3)
     {
-        int shift = hw.ReadRegisterAt(b2) & 0x1F;
+        int shift = hw.ReadRegisterAt(b2) & ShiftCountMask;
         int result = hw.ReadRegisterAt(b1) << shift;
         hw.WriteRegisterAt(b1, result);
         UpdateFlags(hw, result);
@@ -163,7 +168,7 @@ internal static class InstructionFunctions
     // SHR dest, src — logical shift right; shift amount taken from src register.
     internal static void Shr(Hardware hw, byte b1, byte b2, byte b3)
     {
-        int shift = hw.ReadRegisterAt(b2) & 0x1F;
+        int shift = hw.ReadRegisterAt(b2) & ShiftCountMask;
         int result = (int)((uint)hw.ReadRegisterAt(b1) >> shift);
         hw.WriteRegisterAt(b1, result);
         UpdateFlags(hw, result);

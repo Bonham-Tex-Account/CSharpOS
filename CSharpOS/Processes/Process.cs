@@ -4,7 +4,6 @@ public class Process
 {
     // ---- public fields ---------------------------------------------------
     public int RegisterStateAddress;
-    public int ModeStateAddress;
     public int InstructionPointer;
     public string ProgramFilePath;
     public int ProgramAddress;

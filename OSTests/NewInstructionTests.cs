@@ -12,12 +12,12 @@ public class NewInstructionTests
 
     private static int ZeroFlag(Hardware hw)
     {
-        return hw.ReadRegister(RegisterName.EFLAGS) & 1;
+        return Test.ZeroFlag(hw);
     }
 
     private static int SignFlag(Hardware hw)
     {
-        return (hw.ReadRegister(RegisterName.EFLAGS) & 2) >> 1;
+        return Test.SignFlag(hw);
     }
 
     [Fact]
@@ -335,7 +335,7 @@ public class NewInstructionTests
         // not just the 4 bytes ReadBytes returns. Otherwise processes leak
         // registers into one another across context switches.
         Hardware hw = Build();
-        int registerBytes = Test.AllRegisters().Length * 4;
+        int registerBytes = Test.RegisterFileBytes();
         byte[] pattern = new byte[registerBytes];
         for (int i = 0; i < pattern.Length; i++)
         {

@@ -12,7 +12,8 @@ namespace OSTests;
 /// </summary>
 public class ConsoleVisualizerTests : IDisposable
 {
-    private const int Memory = 16384;
+    // Sized relative to the OS region so growing the OS never outgrows these tests.
+    private static int Memory => Test.MachineWithHeap(16384);
     private readonly List<string> tempFiles = new List<string>();
 
     private string CreateProgramFile(byte[] bytes)
@@ -530,28 +531,69 @@ public class ConsoleVisualizerTests : IDisposable
         Assert.DoesNotContain("free memory:", text);
     }
 
-    // EDGE CASE: After a single allocation splits the root, the right-sibling leaf
-    // bits at every split level are set. After the process halts and BuddyFree merges
-    // all the way back to root, all leaf bits are cleared. The leaf walk reads all
-    // zeros again, so the map returns to "(none)". This verifies the visualizer
-    // correctly renders "(none)" after a full reclaim rather than showing stale bits.
+    // A single small process splits the root and is allocated one block; its free
+    // buddy sits at an INTERNAL tree node (no free leaf bits). The reconstructed-tree
+    // reader therefore reports the large free remainder — where the old leaf-only walk
+    // wrongly reported "(none)". This guards that the free-memory display does not
+    // under-report free space held at internal buddy nodes.
     [Fact]
-    public void RenderFreeMemoryMap_AfterFullReclaim_ReturnsToNone() // EDGE CASE
+    public void RenderFreeMemoryMap_PartiallyAllocated_ReportsFreeRemainderNotNone()
     {
-        // Arrange: run a single process to completion so it halts and BuddyFree
-        // cascades all the way back to the root. After the final context switch
-        // (to idle, no more processes), the leaf walk must see no free leaf bits.
         (Hardware hw, BasicOS os, StringWriter sink, ConsoleVisualizer vis) = NewRun(VisualizerMode.Normal);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(1)), 128, 64));
 
         RunSteps(os, hw, 2000);
 
         string text = sink.ToString();
-        // The map must have been rendered at least once (context switch happened).
         Assert.Contains("free memory:", text);
-        // After full cascade merge, all leaf bits return to 0, so the final
-        // rendered state must be "(none)".
-        Assert.Contains("(none)", text);
+        // The heap is mostly free, so the map must NOT collapse to "(none)".
+        Assert.DoesNotContain("free memory: (none)", text);
+
+        // The reported free run must cover the majority of the heap (the process took a
+        // single power-of-two block), proving free space is not under-reported.
+        int heapSize = Test.ReadWord(hw, OsLayout.BuddyHeapSizeOffset);
+        int largestFree = LargestFreeRunInFirstMap(text);
+        Assert.True(largestFree > heapSize / 2,
+            $"Largest free run {largestFree} should exceed half the heap ({heapSize}).");
+    }
+
+    // Parses the size of the largest "[start+size]" run from the first "free memory:"
+    // line in the captured output.
+    private static int LargestFreeRunInFirstMap(string text)
+    {
+        foreach (string rawLine in text.Split('\n'))
+        {
+            int marker = rawLine.IndexOf("free memory:", StringComparison.Ordinal);
+            if (marker < 0)
+            {
+                continue;
+            }
+            int largest = 0;
+            string line = rawLine;
+            int cursor = 0;
+            while (true)
+            {
+                int open = line.IndexOf('[', cursor);
+                if (open < 0)
+                {
+                    break;
+                }
+                int plus = line.IndexOf('+', open);
+                int close = line.IndexOf(']', open);
+                if (plus < 0 || close < 0 || plus > close)
+                {
+                    break;
+                }
+                string sizeText = line.Substring(plus + 1, close - plus - 1);
+                if (int.TryParse(sizeText, out int size) && size > largest)
+                {
+                    largest = size;
+                }
+                cursor = close + 1;
+            }
+            return largest;
+        }
+        return 0;
     }
 
     // EDGE CASE: With two processes both allocating leaf blocks from a 4-level heap

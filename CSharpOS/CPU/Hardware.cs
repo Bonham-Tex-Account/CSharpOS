@@ -613,7 +613,6 @@ public partial class Hardware
     {
         WriteBytes(process.ProgramAddress, program);
         process.ProgramSize = program.Length;
-        process.ModeStateAddress = process.RegisterStateAddress + registers.Length;
         SetProcessLayout(process.ProgramAddress, program.Length, process.RequiredMemory, process.RequiredStackSize);
         if (os.KernelImage.Length > 0)
         {

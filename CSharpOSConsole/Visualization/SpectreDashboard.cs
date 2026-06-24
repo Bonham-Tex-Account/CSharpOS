@@ -1,0 +1,638 @@
+using CSharpOS;
+using OperatingSystem = CSharpOS.OperatingSystem;
+using Spectre.Console;
+using Spectre.Console.Rendering;
+
+namespace CSharpOSConsole.Visualization;
+
+/// <summary>
+/// A single live "dashboard" window (built on Spectre.Console) showing the whole
+/// OS/hardware visualization at once: split program/kernel instruction streams with
+/// switch indicators, the MLFQ process table and ready-queues, the buddy-allocator
+/// tree, registers with change highlighting, the heap/free map, and run stats. It reads
+/// the <see cref="VisualizerModel"/> (kept current by <see cref="HardwareEventBridge"/>)
+/// and redraws each step; the <see cref="FrameHistory"/> lets the user scrub backward and
+/// forward with the arrow keys. Per-process I/O still lives in the separate terminal
+/// windows.
+/// </summary>
+public sealed class SpectreDashboard
+{
+    private const int StreamWindow = 12;
+    private const int LookBack = 80;
+
+    private readonly Hardware hw;
+    private readonly OperatingSystem os;
+    private readonly VisualizerMode mode;
+    private readonly VisualizerModel model;
+    private readonly FrameHistory frames;
+    private readonly HardwareEventBridge bridge;
+    private readonly InteractionController interaction;
+
+    // Optional staggered process loading: processes are injected mid-run to keep the
+    // memory/scheduler views busy (allocation + termination churn).
+    private readonly Queue<Process> pendingLoads = new Queue<Process>();
+    private int staggerInterval;
+    private int lastLoadStep;
+
+    public SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delayMs,
+        bool showProgramIo = false)
+    {
+        this.hw = hw;
+        this.os = os;
+        this.mode = mode;
+        model = new VisualizerModel { ShowProgramIo = showProgramIo };
+        frames = new FrameHistory();
+        // The dashboard paces itself via the InteractionController, so the bridge's pacer
+        // is inert (non-interactive, no delay).
+        Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
+        bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer);
+        interaction = new InteractionController(frames, true, delayMs, ToggleIo);
+    }
+
+    private void ToggleIo()
+    {
+        model.ShowProgramIo = !model.ShowProgramIo;
+    }
+
+    /// <summary>
+    /// Schedules processes to be loaded one at a time during the run — every
+    /// <paramref name="everyNInstructions"/> instructions (and immediately whenever the
+    /// CPU would otherwise go idle). Drives allocation/termination churn so the buddy
+    /// tree and memory map stay active.
+    /// </summary>
+    public void ScheduleStaggeredLoads(IEnumerable<Process> processes, int everyNInstructions)
+    {
+        foreach (Process process in processes)
+        {
+            pendingLoads.Enqueue(process);
+        }
+        staggerInterval = everyNInstructions;
+    }
+
+    public void Run()
+    {
+        Layout layout = BuildLayout();
+        AnsiConsole.Live(layout)
+            .AutoClear(false)
+            .Start(ctx =>
+            {
+                frames.Capture(model); // seed so the panels have a frame to draw
+                RenderInto(layout);
+                ctx.Refresh();
+
+                while (os.HasProcesses || pendingLoads.Count > 0)
+                {
+                    InjectPendingLoads();
+                    if (!os.HasProcesses)
+                    {
+                        // Idle but more work is queued: load the next one right away so
+                        // the run keeps going (and the heap churns).
+                        if (pendingLoads.Count > 0)
+                        {
+                            LoadNextPending();
+                            RenderInto(layout);
+                            ctx.Refresh();
+                            continue;
+                        }
+                        break;
+                    }
+
+                    StepAction action = interaction.NextAction();
+                    if (action == StepAction.Quit)
+                    {
+                        break;
+                    }
+                    if (action == StepAction.Execute)
+                    {
+                        int before = model.InstructionCount;
+                        hw.Run();
+                        if (model.InstructionCount > before)
+                        {
+                            frames.Capture(model);
+                        }
+                        if (os.HasProcesses && !os.HasRunningProcess)
+                        {
+                            Thread.Sleep(15);
+                        }
+                    }
+                    RenderInto(layout);
+                    ctx.Refresh();
+                }
+
+                RenderInto(layout);
+                ctx.Refresh();
+            });
+
+        RenderSummary(AnsiConsole.Console);
+    }
+
+    private void InjectPendingLoads()
+    {
+        if (pendingLoads.Count == 0 || staggerInterval <= 0)
+        {
+            return;
+        }
+        if (model.InstructionCount - lastLoadStep >= staggerInterval)
+        {
+            LoadNextPending();
+        }
+    }
+
+    private void LoadNextPending()
+    {
+        Process next = pendingLoads.Dequeue();
+        os.LoadProcess(next);
+        lastLoadStep = model.InstructionCount;
+    }
+
+    /// <summary>
+    /// Headless render path for tests/smoke checks: advances the emulator up to
+    /// <paramref name="maxSteps"/> instructions (capturing frames), then renders the
+    /// full dashboard once to the supplied console. Exercises the entire build pipeline
+    /// without a live display or keyboard.
+    /// </summary>
+    public void RenderSnapshot(IAnsiConsole console, int maxSteps)
+    {
+        frames.Capture(model);
+        int steps = 0;
+        while ((os.HasProcesses || pendingLoads.Count > 0) && steps < maxSteps)
+        {
+            InjectPendingLoads();
+            if (!os.HasProcesses)
+            {
+                if (pendingLoads.Count > 0)
+                {
+                    LoadNextPending();
+                    continue;
+                }
+                break;
+            }
+            int before = model.InstructionCount;
+            hw.Run();
+            if (model.InstructionCount > before)
+            {
+                frames.Capture(model);
+                steps++;
+            }
+        }
+        Layout layout = BuildLayout();
+        RenderInto(layout);
+        console.Write(layout);
+    }
+
+    /// <summary>
+    /// Renders the end-of-run summary: aggregate counters plus a per-process breakdown
+    /// of how many instructions each program executed. Written once after the live loop.
+    /// </summary>
+    public void RenderSummary(IAnsiConsole console)
+    {
+        Table totals = new Table();
+        totals.Border = TableBorder.Rounded;
+        totals.Title = new TableTitle("Run summary");
+        totals.AddColumn("metric");
+        totals.AddColumn("value");
+        totals.AddRow("instructions", model.InstructionCount.ToString());
+        totals.AddRow("context switches", model.ContextSwitchCount.ToString());
+        totals.AddRow("privilege transitions", model.Transitions.Count.ToString());
+        totals.AddRow("faults", model.FaultCount.ToString());
+        totals.AddRow("blocks", model.BlockCount.ToString());
+        totals.AddRow("wakes", model.WakeCount.ToString());
+        totals.AddRow("outputs", model.OutputCount.ToString());
+
+        Table perProcess = new Table();
+        perProcess.Border = TableBorder.Rounded;
+        perProcess.Title = new TableTitle("Per-process instructions");
+        perProcess.AddColumn("process");
+        perProcess.AddColumn("instructions");
+        List<KeyValuePair<string, int>> rows = new List<KeyValuePair<string, int>>(model.InstructionsByProcess);
+        rows.Sort((a, b) => b.Value.CompareTo(a.Value));
+        foreach (KeyValuePair<string, int> entry in rows)
+        {
+            perProcess.AddRow(Markup.Escape(entry.Key), entry.Value.ToString());
+        }
+
+        console.Write(new Rows(totals, perProcess));
+    }
+
+    // ---- layout ------------------------------------------------------------
+
+    private static Layout BuildLayout()
+    {
+        return new Layout("root").SplitRows(
+            new Layout("streams").SplitColumns(
+                new Layout("program"),
+                new Layout("kernel")),
+            new Layout("middle").SplitColumns(
+                new Layout("procs"),
+                new Layout("buddy")),
+            new Layout("lower").SplitColumns(
+                new Layout("registers"),
+                new Layout("heap"),
+                new Layout("stats")),
+            new Layout("status").Size(3));
+    }
+
+    private void RenderInto(Layout layout)
+    {
+        Frame? frame = frames.Current;
+        if (frame == null)
+        {
+            return;
+        }
+
+        (IRenderable program, IRenderable kernel) = BuildStreams(frame);
+        layout["program"].Update(Panel("Program (user)", program, ActiveColor(frame, true)));
+        layout["kernel"].Update(Panel("Kernel / OS", kernel, ActiveColor(frame, false)));
+        layout["procs"].Update(Panel("Processes (MLFQ)", BuildProcessAndQueues(frame), Color.Grey));
+        layout["buddy"].Update(Panel("Buddy allocator", BuildBuddyTree(frame), Color.Grey));
+        layout["registers"].Update(Panel("Registers", BuildRegisters(frame), Color.Grey));
+        layout["heap"].Update(Panel("Heap / free memory", BuildHeap(frame), Color.Grey));
+        layout["stats"].Update(Panel("Run stats", BuildStats(frame), Color.Grey));
+        layout["status"].Update(BuildStatus(frame));
+    }
+
+    private static Panel Panel(string title, IRenderable body, Color border)
+    {
+        Panel panel = new Panel(body);
+        panel.Header = new PanelHeader($" {title} ");
+        panel.Border = BoxBorder.Rounded;
+        panel.BorderColor(border);
+        panel.Expand = true;
+        return panel;
+    }
+
+    // Highlights the side that is currently executing.
+    private static Color ActiveColor(Frame frame, bool programSide)
+    {
+        bool programActive = frame.Privilege == PrivilegeLevel.User;
+        if (programActive == programSide)
+        {
+            return Color.Aqua;
+        }
+        return Color.Grey;
+    }
+
+    // ---- instruction streams ----------------------------------------------
+
+    private (IRenderable Program, IRenderable Kernel) BuildStreams(Frame frame)
+    {
+        List<IRenderable> program = new List<IRenderable>();
+        List<IRenderable> kernel = new List<IRenderable>();
+
+        int end = frame.HistoryLength;
+        int start = Math.Max(0, end - LookBack);
+        bool havePrev = false;
+        PrivilegeLevel prev = PrivilegeLevel.User;
+
+        for (int i = start; i < end; i++)
+        {
+            InstructionStep step = model.History[i];
+            bool isProgram = step.IsProgramSide;
+
+            if (havePrev && OnProgramSide(prev) != isProgram)
+            {
+                // Control crossed sides: annotate the side being entered.
+                string desc = HardwareEventBridge.DescribeTransition(prev, step.Privilege);
+                IRenderable marker = new Markup($"[grey39]── {Markup.Escape(desc)} @{step.Address} ──[/]");
+                if (isProgram)
+                {
+                    program.Add(marker);
+                }
+                else
+                {
+                    kernel.Add(marker);
+                }
+            }
+
+            bool isLast = i == end - 1;
+            IRenderable row = new Markup(FormatStep(step, isLast));
+            if (isProgram)
+            {
+                program.Add(row);
+            }
+            else
+            {
+                kernel.Add(row);
+            }
+
+            prev = step.Privilege;
+            havePrev = true;
+        }
+
+        return (TailRows(program), TailRows(kernel));
+    }
+
+    private static bool OnProgramSide(PrivilegeLevel level)
+    {
+        return level == PrivilegeLevel.User;
+    }
+
+    private static string FormatStep(InstructionStep step, bool isLast)
+    {
+        string text = $"{step.Address,5}: {Markup.Escape(step.Mnemonic)}";
+        if (isLast)
+        {
+            return $"[white on grey23]▶ {text}[/]";
+        }
+        return $"[grey85]  {text}[/]";
+    }
+
+    private static IRenderable TailRows(List<IRenderable> rows)
+    {
+        if (rows.Count == 0)
+        {
+            return new Markup("[grey39](idle)[/]");
+        }
+        int skip = Math.Max(0, rows.Count - StreamWindow);
+        return new Rows(rows.GetRange(skip, rows.Count - skip));
+    }
+
+    // ---- process table + scheduler queues ---------------------------------
+
+    private IRenderable BuildProcessAndQueues(Frame frame)
+    {
+        if (!frame.HasOsImage)
+        {
+            return new Markup("[grey39](no OS image)[/]");
+        }
+
+        Table table = new Table();
+        table.Border = TableBorder.Minimal;
+        table.Expand = true;
+        table.AddColumn(new TableColumn("[grey]#[/]"));
+        table.AddColumn(new TableColumn("[grey]name[/]"));
+        table.AddColumn(new TableColumn("[grey]state[/]"));
+        table.AddColumn(new TableColumn("[grey]lvl[/]"));
+        table.AddColumn(new TableColumn("[grey]ticks[/]"));
+
+        foreach (BuddyHeapView.ProcessRow row in frame.ProcessTable)
+        {
+            string marker = " ";
+            if (row.Index == frame.CurrentIndex)
+            {
+                marker = "[aqua]▶[/]";
+            }
+            string name = Markup.Escape(PlainTextRenderer.FriendlyName(row.Path));
+            string state = StateMarkup(row);
+            table.AddRow(
+                new Markup($"{marker}{row.Index}"),
+                new Markup(name),
+                new Markup(state),
+                new Markup(row.Priority.ToString()),
+                new Markup(row.TicksUsed.ToString()));
+        }
+
+        IRenderable queues = BuildQueues(frame);
+        return new Rows(table, new Markup("[grey]ready queues[/]"), queues);
+    }
+
+    private static string StateMarkup(BuddyHeapView.ProcessRow row)
+    {
+        string text = row.State.ToString();
+        if (row.Wait != WaitReason.None)
+        {
+            text = $"{text}/{row.Wait}";
+        }
+        if (row.State == ProcessState.Ready)
+        {
+            return $"[green]{text}[/]";
+        }
+        if (row.State == ProcessState.Blocked)
+        {
+            return $"[yellow]{Markup.Escape(text)}[/]";
+        }
+        if (row.State == ProcessState.Terminated)
+        {
+            return $"[grey39]{text}[/]";
+        }
+        return Markup.Escape(text);
+    }
+
+    private static IRenderable BuildQueues(Frame frame)
+    {
+        List<IRenderable> lines = new List<IRenderable>();
+        for (int level = 0; level < OsLayout.QueueCount; level++)
+        {
+            List<string> names = new List<string>();
+            foreach (BuddyHeapView.ProcessRow row in frame.ProcessTable)
+            {
+                if (row.State == ProcessState.Ready && row.Priority == level)
+                {
+                    names.Add(PlainTextRenderer.FriendlyName(row.Path));
+                }
+            }
+            string joined = "·";
+            if (names.Count > 0)
+            {
+                joined = Markup.Escape(string.Join(", ", names));
+            }
+            lines.Add(new Markup($"[grey]L{level}[/] {joined}"));
+        }
+        return new Rows(lines);
+    }
+
+    // ---- buddy allocator tree ---------------------------------------------
+
+    private IRenderable BuildBuddyTree(Frame frame)
+    {
+        if (frame.BuddyTree == null)
+        {
+            return new Markup("[grey39](heap not configured)[/]");
+        }
+        Tree tree = new Tree(new Markup(BuddyLabel(frame.BuddyTree)));
+        AddBuddyChildren(tree, frame.BuddyTree);
+        return tree;
+    }
+
+    private void AddBuddyChildren(IHasTreeNodes parent, BuddyHeapView.BuddyNode node)
+    {
+        foreach (BuddyHeapView.BuddyNode child in node.Children)
+        {
+            TreeNode added = parent.AddNode(BuddyLabel(child));
+            AddBuddyChildren(added, child);
+        }
+    }
+
+    private static string BuddyLabel(BuddyHeapView.BuddyNode node)
+    {
+        if (node.Kind == BuddyHeapView.BuddyNodeKind.Free)
+        {
+            return $"[green]FREE {node.Base}+{node.Size}[/]";
+        }
+        if (node.Kind == BuddyHeapView.BuddyNodeKind.Allocated)
+        {
+            string owner = PlainTextRenderer.FriendlyName(node.OwnerPath);
+            return $"[red]ALLOC {node.Base}+{node.Size}[/] [grey]{Markup.Escape(owner)}[/]";
+        }
+        return $"[grey]split {node.Base}+{node.Size}[/]";
+    }
+
+    // ---- registers ---------------------------------------------------------
+
+    private static IRenderable BuildRegisters(Frame frame)
+    {
+        if (frame.Registers == null)
+        {
+            return new Markup("[grey39](no registers)[/]");
+        }
+        List<IRenderable> lines = new List<IRenderable>();
+        for (int i = 0; i < RegisterSnapshot.Shown.Length; i++)
+        {
+            string name = RegisterSnapshot.Shown[i].ToString();
+            int value = frame.Registers.Values[i];
+            bool changed = frame.Registers.Changed(frame.PreviousRegisters, i);
+            if (changed)
+            {
+                lines.Add(new Markup($"[yellow]{name}={value}[/]"));
+            }
+            else
+            {
+                lines.Add(new Markup($"[grey85]{name}={value}[/]"));
+            }
+        }
+        string zero = "-";
+        if (frame.Registers.Zero)
+        {
+            zero = "Z";
+        }
+        string sign = "-";
+        if (frame.Registers.Sign)
+        {
+            sign = "S";
+        }
+        lines.Add(new Markup($"[grey]flags[/] [[{zero}{sign}]]"));
+        lines.Add(new Markup($"[grey]mode[/] {frame.Privilege}"));
+        return new Rows(lines);
+    }
+
+    // ---- heap: linear memory map + free summary ---------------------------
+
+    private const int MapWidth = 28;
+    private static readonly string[] OwnerPalette =
+    {
+        "aqua", "fuchsia", "yellow", "orange1", "deepskyblue1", "springgreen3", "mediumpurple", "gold3"
+    };
+
+    private static IRenderable BuildHeap(Frame frame)
+    {
+        if (!frame.HasOsImage)
+        {
+            return new Markup("[grey39](no OS image)[/]");
+        }
+        List<BuddyHeapView.Segment> segments = BuddyHeapView.Flatten(frame.BuddyTree);
+        int heapSize = 0;
+        foreach (BuddyHeapView.Segment s in segments)
+        {
+            heapSize += s.Size;
+        }
+        if (heapSize == 0)
+        {
+            return new Markup("[grey39](heap not configured)[/]");
+        }
+
+        List<IRenderable> lines = new List<IRenderable>();
+        lines.Add(new Markup(BuildMapBar(segments, heapSize)));
+        lines.Add(BuildMapLegend(segments));
+
+        int freeTotal = 0;
+        foreach (BuddyHeapView.FreeBlock block in frame.FreeBlocks)
+        {
+            freeTotal += block.Size;
+        }
+        int usedPercent = (int)Math.Round(100.0 * (heapSize - freeTotal) / heapSize);
+        lines.Add(new Markup($"[grey]free[/] {freeTotal}/{heapSize}  [grey]used[/] {usedPercent}%"));
+        return new Rows(lines);
+    }
+
+    // A proportional, address-ordered bar: each segment occupies a width proportional to
+    // its size, colored green for free and a per-owner color for allocated blocks.
+    private static string BuildMapBar(List<BuddyHeapView.Segment> segments, int heapSize)
+    {
+        List<string> cells = new List<string>();
+        foreach (BuddyHeapView.Segment segment in segments)
+        {
+            int width = (int)Math.Round((double)segment.Size / heapSize * MapWidth);
+            if (width < 1)
+            {
+                width = 1;
+            }
+            string color = "green";
+            if (segment.Kind == BuddyHeapView.BuddyNodeKind.Allocated)
+            {
+                color = OwnerColor(PlainTextRenderer.FriendlyName(segment.OwnerPath));
+            }
+            cells.Add($"[on {color}]{new string(' ', width)}[/]");
+        }
+        return string.Concat(cells);
+    }
+
+    private static IRenderable BuildMapLegend(List<BuddyHeapView.Segment> segments)
+    {
+        List<string> seen = new List<string>();
+        List<string> swatches = new List<string>();
+        swatches.Add("[on green]  [/] free");
+        foreach (BuddyHeapView.Segment segment in segments)
+        {
+            if (segment.Kind != BuddyHeapView.BuddyNodeKind.Allocated)
+            {
+                continue;
+            }
+            string owner = PlainTextRenderer.FriendlyName(segment.OwnerPath);
+            if (seen.Contains(owner))
+            {
+                continue;
+            }
+            seen.Add(owner);
+            swatches.Add($"[on {OwnerColor(owner)}]  [/] {Markup.Escape(owner)}");
+        }
+        return new Markup(string.Join("  ", swatches));
+    }
+
+    private static string OwnerColor(string owner)
+    {
+        int hash = 0;
+        foreach (char c in owner)
+        {
+            hash = (hash * 31 + c) & 0x7FFFFFFF;
+        }
+        return OwnerPalette[hash % OwnerPalette.Length];
+    }
+
+    // ---- run stats ---------------------------------------------------------
+
+    private static IRenderable BuildStats(Frame frame)
+    {
+        List<IRenderable> lines = new List<IRenderable>
+        {
+            new Markup($"[grey]instructions[/] {frame.InstructionCount}"),
+            new Markup($"[grey]ctx switches[/] {frame.ContextSwitchCount}"),
+            new Markup($"[grey]faults[/] {frame.FaultCount}"),
+            new Markup($"[grey]blocks[/] {frame.BlockCount}"),
+            new Markup($"[grey]wakes[/] {frame.WakeCount}"),
+            new Markup($"[grey]outputs[/] {frame.OutputCount}")
+        };
+        return new Rows(lines);
+    }
+
+    // ---- status footer -----------------------------------------------------
+
+    private IRenderable BuildStatus(Frame frame)
+    {
+        string position = $"step {frame.StepNumber}/{model.InstructionCount}";
+        string state = "[green]live[/]";
+        if (!frames.AtLiveEdge)
+        {
+            state = "[yellow]reviewing history[/]";
+        }
+        else if (interaction.Paused)
+        {
+            state = "[aqua]paused[/]";
+        }
+        string keys = "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] back/forward  [grey]o[/] I/O  [grey]q[/] quit";
+        return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]detail[/] {mode}   {keys}"))
+        {
+            Border = BoxBorder.None,
+            Expand = true
+        };
+    }
+}

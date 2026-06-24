@@ -12,7 +12,7 @@ public class InstructionTests
 
     private static int ZeroFlag(Hardware hw)
     {
-        return hw.ReadRegister(RegisterName.EFLAGS) & 1;
+        return Test.ZeroFlag(hw);
     }
 
     [Fact]

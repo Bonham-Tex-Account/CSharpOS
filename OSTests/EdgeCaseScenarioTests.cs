@@ -71,8 +71,7 @@ public class EdgeCaseScenarioTests : IDisposable
 
     private static int ReadWord(Hardware hw, int address)
     {
-        byte[] b = hw.ReadBytes(address);
-        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+        return Test.ReadWord(hw, address);
     }
 
     // ---- process state defaults ------------------------------------------
@@ -93,7 +92,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // IRET in user mode must trap — the privilege check lives in BasicOS's trap
         // table and is evaluated by Hardware.EvaluateTraps before dispatch.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(8192, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 0;
         process.ProgramSize = 4;
@@ -115,7 +114,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // Out-of-bounds STORE in user mode must trap — the memory protection condition
         // lives in BasicOS's trap table and is evaluated by Hardware.EvaluateTraps.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(8192, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), os);
         Process process = new Process("ignored", 16, 16);
         process.ProgramAddress = 0;
         process.ProgramSize = 4;
@@ -222,7 +221,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // Input for device 0 wakes only the first reader; the second stays blocked
         // until input arrives for device 1 — mirroring real per-device interrupts.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64)); // index 0
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64)); // index 1
         List<int> outputs = BootCollecting(os, hw);
@@ -267,7 +266,7 @@ public class EdgeCaseScenarioTests : IDisposable
     public void BlockedProcess_IsSkipped_OthersRunToCompletion()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(Print(1)), 128, 64));               // P1 printer
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64)); // P2 reader (blocks)
         os.LoadProcess(new Process(CreateProgramFile(Print(3)), 128, 64));               // P3 printer
@@ -356,7 +355,7 @@ public class EdgeCaseScenarioTests : IDisposable
         Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
         os.LoadProcess(process);
 
-        int registerFileSize = Test.AllRegisters().Length * 4;
+        int registerFileSize = Test.RegisterFileBytes();
         Assert.True(process.RequiredMemory >= registerFileSize,
             "RequiredMemory must be large enough to hold the saved register state");
     }
@@ -383,8 +382,8 @@ public class EdgeCaseScenarioTests : IDisposable
         hw.WriteBytes(0, Test.Word(Instruction.INC, 0, 0, 0));
         Instruction.Execute(0, hw);
         Assert.Equal(int.MinValue, hw.ReadRegisterAt(0));
-        Assert.Equal(2, hw.ReadRegister(RegisterName.EFLAGS) & 2); // sign flag set
-        Assert.Equal(0, hw.ReadRegister(RegisterName.EFLAGS) & 1); // zero flag clear
+        Assert.Equal(Test.SignFlagMask, hw.ReadRegister(RegisterName.EFLAGS) & Test.SignFlagMask); // sign flag set
+        Assert.Equal(0, hw.ReadRegister(RegisterName.EFLAGS) & Test.ZeroFlagMask); // zero flag clear
     }
 
     [Fact]
@@ -396,7 +395,7 @@ public class EdgeCaseScenarioTests : IDisposable
         hw.WriteBytes(0, Test.Word(Instruction.DEC, 0, 0, 0));
         Instruction.Execute(0, hw);
         Assert.Equal(int.MaxValue, hw.ReadRegisterAt(0));
-        Assert.Equal(0, hw.ReadRegister(RegisterName.EFLAGS) & 2); // sign flag clear
+        Assert.Equal(0, hw.ReadRegister(RegisterName.EFLAGS) & Test.SignFlagMask); // sign flag clear
     }
 
     // ---- assembler origin (Phase A kernel support) -----------------------

@@ -44,7 +44,7 @@ public class EdgeCaseTests : IDisposable
         // With nothing to schedule, the idle Run path asks the scheduler and stays
         // idle rather than crashing.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(8192, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), os);
 
         for (int i = 0; i < 50; i++)
         {
@@ -62,7 +62,7 @@ public class EdgeCaseTests : IDisposable
         // without being scheduled.
         StringWriter log = new StringWriter();
         BasicOS os = new BasicOS(log);
-        Hardware hw = Test.NewHardware(8192, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), os);
         os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 50000, 50000));
 
         Assert.Contains("[LOAD FAILED]", log.ToString());
@@ -79,7 +79,7 @@ public class EdgeCaseTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(8192, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(8192), os);
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 16, 16));
 
         for (int i = 0; i < 100 && !os.HasRunningProcess; i++)
@@ -159,7 +159,7 @@ public class EdgeCaseTests : IDisposable
         // Two independent processes both run under the round-robin scheduler and
         // each produce their output.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = Test.NewHardware(16384, os);
+        Hardware hw = Test.NewHardware(Test.MachineWithHeap(16384), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
         os.LoadProcess(new Process(CreateProgramFile(Print(1)), 128, 64));

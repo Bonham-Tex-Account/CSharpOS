@@ -12,7 +12,8 @@ namespace OSTests;
 /// </summary>
 public class ProcessIoRouterTests : IDisposable
 {
-    private const int Memory = 16384;
+    // Sized relative to the OS region so growing the OS never outgrows these tests.
+    private static int Memory => Test.MachineWithHeap(16384);
     private readonly List<string> tempFiles = new List<string>();
 
     private sealed class FakeTerminal : IProcessTerminal

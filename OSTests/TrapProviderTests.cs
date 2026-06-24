@@ -20,7 +20,7 @@ public class TrapProviderTests
     private static Hardware BuildHardwareWithLayout()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         Process process = new Process("ignored", 64, 64);
         process.ProgramAddress = 200;
         process.ProgramSize = 4;
@@ -443,7 +443,7 @@ public class TrapProviderTests
         BasicOS os = new BasicOS(new StringWriter());
 
         // Hardware can be attached — meaning LoadTraps received a valid list.
-        Hardware hw = new Hardware(8192, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         Assert.NotNull(hw);
     }
 

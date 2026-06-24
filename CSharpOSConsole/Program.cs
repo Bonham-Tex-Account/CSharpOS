@@ -1,5 +1,6 @@
 using CSharpOS;
 using CSharpOSConsole;
+using CSharpOSConsole.Visualization;
 using OperatingSystem = CSharpOS.OperatingSystem;
 
 // When relaunched as a per-process terminal window, run that loop and exit.
@@ -25,7 +26,7 @@ for (int i = 0; i < args.Length - 1; i++)
     }
 }
 
-const int MemorySize = 16384;
+const int MemorySize = 32768;
 const int RequiredMemory = 128;
 const int RequiredStackSize = 64;
 const int StepDelayMs = 250;
@@ -38,6 +39,17 @@ string counterPath = WriteProgram("counter", Programs.CounterToTen());
 string averagePath = WriteProgram("average", Programs.AverageOfList());
 string guessPath = WriteProgram("guess", Programs.GuessingGame());
 
+// Short, non-interactive, self-terminating jobs of varied lifetimes, used by the
+// churn modes to keep the buddy allocator / memory map busy.
+string[] busyPaths =
+{
+    WriteProgram("busy_s", Programs.BusyThenHalt(80, 1)),
+    WriteProgram("busy_m", Programs.BusyThenHalt(160, 2)),
+    WriteProgram("busy_l", Programs.BusyThenHalt(240, 3))
+};
+// Varied request sizes so allocations land on different buddy block sizes.
+int[] churnSizes = { 128, 512, 1024 };
+
 while (true)
 {
     Console.WriteLine();
@@ -48,9 +60,12 @@ while (true)
     Console.WriteLine("  3) Guessing game (interactive, secret = 42)");
     Console.WriteLine("  4) Counter + Average together (round-robin scheduling)");
     Console.WriteLine("  5) All three together");
+    Console.WriteLine("  6) Memory churn (short jobs load & exit continuously — watch the buddy tree & memory map)");
+    Console.WriteLine("  7) Fill & drain the heap (mixed-size jobs fill memory, then drain — watch reclaim/merging)");
+    Console.WriteLine("  8) Scheduler + memory (counter + average run while short jobs churn the heap)");
     Console.WriteLine("  q) Quit");
-    Console.WriteLine("  (during a run: 's' single-step, 'a' resume auto, 'o' toggle program I/O in this window)");
-    Console.WriteLine("  (each process gets its own window for input/output; it closes when the process ends)");
+    Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows step back/forward, 'o' toggle program I/O, 'q' quit run)");
+    Console.WriteLine("  (modes 1-5 give each process its own I/O window; the churn modes 6-8 mirror I/O in the dashboard instead)");
     Console.Write("Select: ");
 
     string? choice = Console.ReadLine();
@@ -58,37 +73,64 @@ while (true)
     {
         return; // end of input (e.g. piped stdin) - quit instead of looping
     }
-    List<string>? programs = null;
-    switch (choice.Trim())
+
+    string trimmed = choice.Trim();
+    if (trimmed == "q" || trimmed == "Q")
+    {
+        return;
+    }
+
+    switch (trimmed)
     {
         case "1":
-            programs = new List<string> { counterPath };
+            RunWindowed(new List<string> { counterPath }, PromptMode());
             break;
         case "2":
-            programs = new List<string> { averagePath };
+            RunWindowed(new List<string> { averagePath }, PromptMode());
             break;
         case "3":
-            programs = new List<string> { guessPath };
+            RunWindowed(new List<string> { guessPath }, PromptMode());
             break;
         case "4":
-            programs = new List<string> { counterPath, averagePath };
+            RunWindowed(new List<string> { counterPath, averagePath }, PromptMode());
             break;
         case "5":
-            programs = new List<string> { counterPath, averagePath, guessPath };
+            RunWindowed(new List<string> { counterPath, averagePath, guessPath }, PromptMode());
             break;
-        case "q":
-        case "Q":
-            return;
+        case "6":
+            Run(Churn(3, 0), Churn(15, 3), 60, false, PromptMode());
+            break;
+        case "7":
+            Run(Churn(8, 0), new List<Process>(), 0, false, PromptMode());
+            break;
+        case "8":
+        {
+            List<Process> initial = new List<Process>
+            {
+                new Process(counterPath, RequiredMemory, RequiredStackSize),
+                new Process(averagePath, RequiredMemory, RequiredStackSize)
+            };
+            Run(initial, Churn(10, 0), 80, false, PromptMode());
+            break;
+        }
         default:
             Console.WriteLine("Unknown option.");
             break;
     }
+}
 
-    if (programs != null)
+// Builds `count` busy churn processes, cycling through the busy programs and request
+// sizes (offset shifts the cycle so successive batches differ).
+List<Process> Churn(int count, int offset)
+{
+    List<Process> list = new List<Process>();
+    for (int i = 0; i < count; i++)
     {
-        VisualizerMode mode = PromptMode();
-        Run(programs, mode);
+        string path = busyPaths[(i + offset) % busyPaths.Length];
+        int mem = churnSizes[(i + offset) % churnSizes.Length];
+        list.Add(new Process(path, mem, RequiredStackSize));
     }
+    return list;
 }
 
 // Asks which detail level to render at; defaults to Normal on blank/unknown input.
@@ -117,45 +159,56 @@ string WriteProgram(string name, byte[] bytes)
     return path;
 }
 
-void Run(List<string> programPaths, VisualizerMode mode)
+// Windowed run: each program gets its own per-process I/O window (modes 1-5).
+void RunWindowed(List<string> programPaths, VisualizerMode mode)
+{
+    List<Process> processes = new List<Process>();
+    foreach (string path in programPaths)
+    {
+        processes.Add(new Process(path, RequiredMemory, RequiredStackSize));
+    }
+    Run(processes, new List<Process>(), 0, true, mode);
+}
+
+// Generalized run. `initial` processes load up front; `staggered` processes load one at
+// a time during the run (every `interval` instructions) for memory/scheduler churn. With
+// `useWindows`, each initial process gets its own I/O window; otherwise program I/O is
+// mirrored into the dashboard.
+void Run(List<Process> initial, List<Process> staggered, int interval, bool useWindows, VisualizerMode mode)
 {
     Console.WriteLine();
     OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
     Hardware hw = new Hardware(MemorySize, registers, os);
 
-    // One terminal window per process, keyed by device id. Processes are loaded in
-    // order, so the i-th process gets process-table index i == device i. Building
-    // the terminals before loading keeps that mapping aligned.
+    // One terminal window per initial process, keyed by device id (== process-table
+    // index). The churn modes pass no windows; their I/O is mirrored in the dashboard.
     Dictionary<int, IProcessTerminal> terminals = new Dictionary<int, IProcessTerminal>();
-    for (int i = 0; i < programPaths.Count; i++)
+    if (useWindows)
     {
-        string title = Path.GetFileNameWithoutExtension(programPaths[i]);
-        terminals[i] = new ConsoleWindowTerminal(title);
-    }
-
-    // The router moves each process's I/O to its own window; this main window shows
-    // only the OS/Hardware activity.
-    ProcessIoRouter router = new ProcessIoRouter(hw, terminals);
-    ConsoleVisualizer visualizer = new ConsoleVisualizer(hw, os, StepDelayMs, mode: mode);
-
-    foreach (string path in programPaths)
-    {
-        os.LoadProcess(new Process(path, RequiredMemory, RequiredStackSize));
-    }
-
-    // The emulator runs continuously and never blocks on input: input arrives
-    // asynchronously from the terminal windows (raising per-device interrupts), so
-    // while one process waits the scheduler keeps running the others. When every
-    // process is blocked the CPU is genuinely idle, so yield briefly to avoid a
-    // busy-spin until a window delivers input.
-    while (os.HasProcesses)
-    {
-        hw.Run();
-        if (os.HasProcesses && !os.HasRunningProcess)
+        for (int i = 0; i < initial.Count; i++)
         {
-            Thread.Sleep(15);
+            string title = Path.GetFileNameWithoutExtension(initial[i].ProgramFilePath);
+            terminals[i] = new ConsoleWindowTerminal(title);
         }
     }
+
+    ProcessIoRouter router = new ProcessIoRouter(hw, terminals);
+    SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, showProgramIo: !useWindows);
+
+    foreach (Process process in initial)
+    {
+        os.LoadProcess(process);
+    }
+    if (staggered.Count > 0)
+    {
+        dashboard.ScheduleStaggeredLoads(staggered, interval);
+    }
+
+    // The dashboard owns the run loop: it steps the emulator (which never blocks on
+    // input — that arrives asynchronously from the per-process terminal windows),
+    // redraws every step, and lets the user pace/scrub with the keyboard until every
+    // process has finished.
+    dashboard.Run();
 
     foreach (IProcessTerminal terminal in terminals.Values)
     {
@@ -163,5 +216,5 @@ void Run(List<string> programPaths, VisualizerMode mode)
     }
 
     Console.WriteLine();
-    Console.WriteLine("--- all processes finished ---");
+    Console.WriteLine("--- run finished ---");
 }
