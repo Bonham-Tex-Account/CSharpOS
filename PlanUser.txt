@@ -39,14 +39,6 @@ Running timeline:
 
 
 Future fixes
--fix hardcode errors in unit tests
+-refactor tests and make sure all tests DO NOT USE MAGIC NUMBERS IN TESTS
 -process that can spawn a process (spawner using id or fork clone method)
--dynamically add OS with reflection
--better memory management (split method where we have blocks that will split in half over and over to better fit smaller and larger processes without bad reclaimation)
---buddy allocator
-full space lets say 64k
-start at 0
-lets say we allocate 5k
-we take a chunk of each section and mark the first byte on the way down (3 markers: 0 open space, 1 space availible , 2:lower space availible (since 8 bytes maybe would be faster to store layers that are free))
-will mark on the way down and allocate the space
-external structure perhaps 1 bit or more will decide
+-better memory management (add freelist allocator in buddy alocator)

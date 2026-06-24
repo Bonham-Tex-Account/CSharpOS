@@ -114,6 +114,15 @@ internal sealed class KernelImageOS : BasicOS
 
 internal static class Test
 {
+    // Minimum machine size that allows the OS to boot and run simple test processes.
+    // TotalSize covers the OS image; the extra gives a heap large enough for basic scenarios.
+    // Use this instead of hard-coding 4096 so tests survive layout growth.
+    public static int MinMachineSize => OsLayout.TotalSize + 4096;
+
+    // Machine size that gives exactly MaxProcesses leaf nodes (one leaf per process-table slot).
+    // Useful for "fill the heap then fail" tests where leafCount must not exceed MaxProcesses.
+    public static int FullHeapMachineSize => OsLayout.TotalSize + OsLayout.BuddyDefaultMinBlock * OsLayout.MaxProcesses;
+
     /// <summary>
     /// Builds a Hardware instance with the full register set declared in RegisterName.
     /// </summary>

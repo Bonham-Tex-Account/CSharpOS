@@ -150,7 +150,7 @@ public class EdgeCaseScenarioTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
         Step(os, hw, 2000);
@@ -166,7 +166,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // A spurious output-complete interrupt with no process loaded must drain
         // through the wake routine without faulting and leave the CPU idle.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         hw.RaiseOutputComplete();
         hw.RaiseOutputComplete();
         for (int i = 0; i < 200; i++)
@@ -181,7 +181,7 @@ public class EdgeCaseScenarioTests : IDisposable
     public void InputArrivingBeforeRead_IsBufferedAndConsumedWithoutBlocking()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         hw.RaiseInputInterrupt(13); // arrives before the process even runs
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
@@ -195,7 +195,7 @@ public class EdgeCaseScenarioTests : IDisposable
     public void OutputComplete_DoesNotWakeAProcessBlockedOnInput()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
         Step(os, hw, 8000); // blocks on input
@@ -249,7 +249,7 @@ public class EdgeCaseScenarioTests : IDisposable
     public void AllProcessesBlocked_CpuIdles_AndExecutesNothing()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         int executed = 0;
         hw.InstructionExecuted += (object? sender, InstructionExecutedArgs e) => { executed++; };
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EAX)), 128, 64));
@@ -290,7 +290,7 @@ public class EdgeCaseScenarioTests : IDisposable
     public void Input_IsDeliveredToTheRequestedNonEaxRegister()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(ReadInto(RegisterName.EDX)), 128, 64));
         List<int> outputs = BootCollecting(os, hw);
         Step(os, hw, 8000);
@@ -312,7 +312,7 @@ public class EdgeCaseScenarioTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         hw.RaiseInputInterrupt(5);
         hw.RaiseInputInterrupt(6);
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
@@ -352,7 +352,7 @@ public class EdgeCaseScenarioTests : IDisposable
         // process's memory region. If RequiredMemory is smaller than the register
         // file, the saved state overflows into the user stack and corrupts it.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         Process process = new Process(CreateProgramFile(new byte[] { 0, 0, 0, 0 }), 16, 16);
         os.LoadProcess(process);
 

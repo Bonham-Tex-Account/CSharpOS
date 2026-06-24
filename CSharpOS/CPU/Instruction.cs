@@ -18,6 +18,12 @@ public static class Instruction
     public const byte CMP         = 0x14;
     public const byte INC         = 0x15;
     public const byte DEC         = 0x16;
+    public const byte AND         = 0x17;
+    public const byte OR          = 0x18;
+    public const byte XOR         = 0x19;
+    public const byte NOT         = 0x1A;
+    public const byte SHL         = 0x1B;
+    public const byte SHR         = 0x1C;
     public const byte JMP         = 0x20;
     public const byte JZ          = 0x21;
     public const byte JNZ         = 0x22;
@@ -57,6 +63,12 @@ public static class Instruction
         opcodeTable[CMP]         = InstructionFunctions.Cmp;
         opcodeTable[INC]         = InstructionFunctions.Inc;
         opcodeTable[DEC]         = InstructionFunctions.Dec;
+        opcodeTable[AND]         = InstructionFunctions.And;
+        opcodeTable[OR]          = InstructionFunctions.Or;
+        opcodeTable[XOR]         = InstructionFunctions.Xor;
+        opcodeTable[NOT]         = InstructionFunctions.Not;
+        opcodeTable[SHL]         = InstructionFunctions.Shl;
+        opcodeTable[SHR]         = InstructionFunctions.Shr;
         opcodeTable[JMP]         = InstructionFunctions.Jmp;
         opcodeTable[JZ]          = InstructionFunctions.Jz;
         opcodeTable[JNZ]         = InstructionFunctions.Jnz;

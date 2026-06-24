@@ -51,21 +51,60 @@ public abstract class OperatingSystem : IOperatingSystem
         }
     }
 
-    // Initialises the OS data structures: no current process, an empty process
-    // table, and a single free range covering all memory above the OS region.
+    // Initialises the OS data structures: no current process, empty process table,
+    // and a buddy allocator bitmap covering the largest power-of-2 region above the
+    // OS image. The root node (bit 0 of the first bitmap word) is set to 1 (free);
+    // all other bits are 0. The ISA allocator reads BuddyHeapStart, BuddyHeapSize,
+    // BuddyMinBlock, and BuddyLevels from the data section on every call.
     private void SeedOsData(Hardware hw)
     {
+        int available = hw.GetMemorySize() - OsMemorySize;
+        int heapSize = LargestPowerOfTwoFitting(available);
+        int heapStart = OsMemorySize;
+        int minBlock = OsLayout.BuddyDefaultMinBlock;
+        int levels = Log2(heapSize / minBlock);
+
         WriteWord(hw, OsLayout.ProcessCountOffset, 0);
         WriteWord(hw, OsLayout.CurrentIndexOffset, -1);
-        WriteWord(hw, OsLayout.PendingCountOffset, 0);
-        WriteWord(hw, OsLayout.FreeRangeCountOffset, 1);
-        WriteWord(hw, OsLayout.FreeRangeTableOffset, OsMemorySize);
-        WriteWord(hw, OsLayout.FreeRangeTableOffset + 4, hw.GetMemorySize() - OsMemorySize);
+        WriteWord(hw, OsLayout.BuddyHeapStartOffset, heapStart);
+        WriteWord(hw, OsLayout.BuddyHeapSizeOffset, heapSize);
         WriteWord(hw, OsLayout.BoostTimerOffset, OsLayout.BoostInterval);
         WriteWord(hw, OsLayout.QuantumTableOffset + 0,  1);
         WriteWord(hw, OsLayout.QuantumTableOffset + 4,  2);
         WriteWord(hw, OsLayout.QuantumTableOffset + 8,  4);
         WriteWord(hw, OsLayout.QuantumTableOffset + 12, 255);
+        WriteWord(hw, OsLayout.BuddyMinBlockOffset, minBlock);
+        WriteWord(hw, OsLayout.BuddyLevelsOffset, levels);
+
+        // Zero the bitmap then set the root node free (bit 0 of the first word).
+        for (int w = 0; w < OsLayout.BuddyBitmapWords; w++)
+        {
+            WriteWord(hw, OsLayout.BuddyBitmapOffset + w * 4, 0);
+        }
+        WriteWord(hw, OsLayout.BuddyBitmapOffset, 1); // root = free
+    }
+
+    // Returns the largest power of 2 that is <= n. Assumes n > 0.
+    private static int LargestPowerOfTwoFitting(int n)
+    {
+        int p = 1;
+        while (p * 2 <= n)
+        {
+            p *= 2;
+        }
+        return p;
+    }
+
+    // Returns floor(log2(n)). Assumes n is a positive power of 2.
+    private static int Log2(int n)
+    {
+        int k = 0;
+        while (n > 1)
+        {
+            n >>= 1;
+            k++;
+        }
+        return k;
     }
 
     // ---- process loading -------------------------------------------------

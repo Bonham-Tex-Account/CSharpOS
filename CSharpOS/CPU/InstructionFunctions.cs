@@ -122,6 +122,53 @@ internal static class InstructionFunctions
         UpdateFlags(hw, result);
     }
 
+    internal static void And(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        int result = hw.ReadRegisterAt(b1) & hw.ReadRegisterAt(b2);
+        hw.WriteRegisterAt(b1, result);
+        UpdateFlags(hw, result);
+    }
+
+    internal static void Or(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        int result = hw.ReadRegisterAt(b1) | hw.ReadRegisterAt(b2);
+        hw.WriteRegisterAt(b1, result);
+        UpdateFlags(hw, result);
+    }
+
+    internal static void Xor(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        int result = hw.ReadRegisterAt(b1) ^ hw.ReadRegisterAt(b2);
+        hw.WriteRegisterAt(b1, result);
+        UpdateFlags(hw, result);
+    }
+
+    // NOT dest — bitwise complement. Flags updated on the result.
+    internal static void Not(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        int result = ~hw.ReadRegisterAt(b1);
+        hw.WriteRegisterAt(b1, result);
+        UpdateFlags(hw, result);
+    }
+
+    // SHL dest, src — logical shift left; shift amount taken from src register.
+    internal static void Shl(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        int shift = hw.ReadRegisterAt(b2) & 0x1F;
+        int result = hw.ReadRegisterAt(b1) << shift;
+        hw.WriteRegisterAt(b1, result);
+        UpdateFlags(hw, result);
+    }
+
+    // SHR dest, src — logical shift right; shift amount taken from src register.
+    internal static void Shr(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        int shift = hw.ReadRegisterAt(b2) & 0x1F;
+        int result = (int)((uint)hw.ReadRegisterAt(b1) >> shift);
+        hw.WriteRegisterAt(b1, result);
+        UpdateFlags(hw, result);
+    }
+
     internal static void Jmp(Hardware hw, byte b1, byte b2, byte b3)
     {
         hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));

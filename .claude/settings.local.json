@@ -4,7 +4,8 @@
       "Bash(dotnet new *)",
       "Bash(dotnet build *)",
       "PowerShell(dotnet build *)",
-      "PowerShell(dotnet test *)"
+      "PowerShell(dotnet test *)",
+      "Bash(dotnet test *)"
     ]
   }
 }

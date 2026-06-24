@@ -431,7 +431,7 @@ public class OsEdgeCaseTests : IDisposable
     public void AllProcessesBlockedOnInput_SystemIsIdle()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         Assembler asm = new Assembler();
         asm.In(RegisterName.EAX); // immediately blocks — no input queued
         asm.Hlt();

@@ -113,6 +113,37 @@ public sealed partial class Assembler
         Emit(Instruction.DEC, (byte)reg, 0, 0);
     }
 
+    public void And(RegisterName dest, RegisterName src)
+    {
+        Emit(Instruction.AND, (byte)dest, (byte)src, 0);
+    }
+
+    public void Or(RegisterName dest, RegisterName src)
+    {
+        Emit(Instruction.OR, (byte)dest, (byte)src, 0);
+    }
+
+    public void Xor(RegisterName dest, RegisterName src)
+    {
+        Emit(Instruction.XOR, (byte)dest, (byte)src, 0);
+    }
+
+    public void Not(RegisterName dest)
+    {
+        Emit(Instruction.NOT, (byte)dest, 0, 0);
+    }
+
+    // Shift amount is taken from a register at runtime.
+    public void Shl(RegisterName dest, RegisterName shiftAmount)
+    {
+        Emit(Instruction.SHL, (byte)dest, (byte)shiftAmount, 0);
+    }
+
+    public void Shr(RegisterName dest, RegisterName shiftAmount)
+    {
+        Emit(Instruction.SHR, (byte)dest, (byte)shiftAmount, 0);
+    }
+
     public void Jmp(string label) { AddJump(Instruction.JMP, label); }
     public void Jz(string label)  { AddJump(Instruction.JZ,  label); }
     public void Jnz(string label) { AddJump(Instruction.JNZ, label); }

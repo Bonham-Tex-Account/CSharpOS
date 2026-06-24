@@ -30,7 +30,7 @@ public class OsPluginLoaderTests
         File.WriteAllBytes(programPath, asm.Build(0));
 
         OperatingSystem os = OsPluginLoader.Load(PluginPath(), TextWriter.Null);
-        Hardware hw = new Hardware(4096, Enum.GetValues<RegisterName>(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Enum.GetValues<RegisterName>(), os);
         os.LoadProcess(new Process(programPath, 128, 64));
 
         int maxSteps = 10000;

@@ -242,20 +242,63 @@ public sealed class ConsoleVisualizer
         {
             return;
         }
-        int count = ReadOsWord(OsLayout.FreeRangeCountOffset);
+
+        int heapStart  = ReadOsWord(OsLayout.BuddyHeapStartOffset);
+        int heapSize   = ReadOsWord(OsLayout.BuddyHeapSizeOffset);
+        int levels     = ReadOsWord(OsLayout.BuddyLevelsOffset);
+        int minBlock   = ReadOsWord(OsLayout.BuddyMinBlockOffset);
+
+        if (heapSize == 0 || levels == 0 || minBlock == 0)
+        {
+            return;
+        }
+
+        // Walk the leaf level (level == levels) and report contiguous free runs.
+        // Each leaf corresponds to one minimum block.
+        int leafCount = 1 << levels;
+        int leafSize  = heapSize >> levels;
+
         List<string> blocks = new List<string>();
-        for (int i = 0; i < count; i++)
+        int runStart = -1;
+        int runSize  = 0;
+
+        for (int j = 0; j < leafCount; j++)
         {
-            int slot = OsLayout.FreeRangeTableOffset + i * OsLayout.FreeRangeSize;
-            int start = ReadOsWord(slot);
-            int size = ReadOsWord(slot + 4);
-            blocks.Add($"[{start}+{size}]");
+            int node    = leafCount + j;           // 1-indexed tree node
+            int bitPos  = node - 1;
+            int wordIdx = bitPos / 32;
+            int bitInW  = bitPos % 32;
+            int word    = ReadOsWord(OsLayout.BuddyBitmapOffset + wordIdx * 4);
+            bool isFree = ((word >> bitInW) & 1) != 0;
+
+            if (isFree)
+            {
+                if (runStart < 0)
+                {
+                    runStart = heapStart + j * leafSize;
+                    runSize  = leafSize;
+                }
+                else
+                {
+                    runSize += leafSize;
+                }
+            }
+            else
+            {
+                if (runStart >= 0)
+                {
+                    blocks.Add($"[{runStart}+{runSize}]");
+                    runStart = -1;
+                    runSize  = 0;
+                }
+            }
         }
-        string map = "(none)";
-        if (blocks.Count != 0)
+        if (runStart >= 0)
         {
-            map = string.Join(" ", blocks);
+            blocks.Add($"[{runStart}+{runSize}]");
         }
+
+        string map = blocks.Count == 0 ? "(none)" : string.Join(" ", blocks);
         if (map == lastFreeMap)
         {
             return;

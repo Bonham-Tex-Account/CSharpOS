@@ -10,7 +10,7 @@ namespace OSTests;
 /// </summary>
 public class OperatingSystemTests : IDisposable
 {
-    private const int Memory = 8192;
+    private static int Memory => Test.MinMachineSize;
     private readonly List<string> tempFiles = new List<string>();
 
     private string CreateProgramFile(byte[] bytes)
@@ -81,7 +81,12 @@ public class OperatingSystemTests : IDisposable
         int perProcess = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length)
             + first.RequiredMemory + first.RequiredStackSize + Hardware.KernelStackSize;
         Assert.Equal(os.OsMemorySize, first.ProgramAddress);
-        Assert.Equal(os.OsMemorySize + perProcess, second.ProgramAddress);
+        // The buddy allocator rounds up to the next power-of-2 block size, so the second
+        // process lands at first + blockSize (>= perProcess), not first + perProcess exactly.
+        Assert.True(second.ProgramAddress >= first.ProgramAddress + perProcess,
+            "Second process must not overlap first");
+        Assert.True(second.ProgramAddress < first.ProgramAddress + 2 * perProcess * 4,
+            "Second process must be allocated near the heap start, not arbitrarily far away");
     }
 
     [Fact]

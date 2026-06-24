@@ -205,7 +205,7 @@ public class SyscallTests : IDisposable
     public void OutSyscall_PrintsValueThroughKernel_ThenProcessExits()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(7)), 128, 64));
 
         List<int> outputs = RunToCompletion(os, hw, 2000);
@@ -224,7 +224,7 @@ public class SyscallTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         hw.RaiseInputInterrupt(55); // input available before the read, so it doesn't block
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
@@ -244,7 +244,7 @@ public class SyscallTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
         List<int> outputs = RunToCompletion(os, hw, 2000);
@@ -260,7 +260,7 @@ public class SyscallTests : IDisposable
 
         StringWriter log = new StringWriter();
         BasicOS os = new BasicOS(log);
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
 
         RunToCompletion(os, hw, 2000);
@@ -273,7 +273,7 @@ public class SyscallTests : IDisposable
     {
         // 0xFF is not a known opcode; it faults and terminates the process.
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         InvalidInstructionArgs? captured = null;
         hw.InvalidInstruction += (object? sender, InvalidInstructionArgs e) => { captured = e; };
         os.LoadProcess(new Process(CreateProgramFile(new byte[] { 0xFF, 0, 0, 0 }), 128, 64));
@@ -316,7 +316,7 @@ public class SyscallTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));
@@ -377,7 +377,7 @@ public class SyscallTests : IDisposable
         asm.Hlt();
 
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(4096, Test.AllRegisters(), os);
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
         List<int> outputs = new List<int>();
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); }; // no auto-complete
         os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 128, 64));

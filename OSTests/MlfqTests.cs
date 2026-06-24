@@ -361,20 +361,22 @@ public class MlfqTests
     // EDGE CASE: The boost loop uses Js (fires when count - i < 0, i.e. i > count)
     // to exit, which means it executes the body for i = 0 through count inclusive —
     // one iteration past the last valid index. When count = MaxProcesses = 8, the
-    // "ghost" entry at index 8 lives at FreeRangeTableOffset. ProcessEntryPriority
-    // (offset 128) and ProcessEntryTicksUsed (offset 132) within that ghost entry
-    // land at FreeRangeTableOffset+128 = PendingQueueOffset, corrupting the pending
-    // queue. This test pre-seeds sentinels at those exact addresses and verifies
-    // they are not overwritten.
+    // "ghost" entry at index 8 starts at BuddyBitmapOffset. Its Priority field
+    // (offset 128) and TicksUsed field (offset 132) land beyond the OS region into
+    // process heap memory. This test pre-seeds sentinels at those exact addresses and
+    // verifies they are not overwritten by the boost loop.
     [Fact]
     public void ContextSwitch_PeriodicBoost_DoesNotWriteBeyondProcessTable()
     {
         // POTENTIAL DYSFUNCTION: boost loop iterates i = 0..count rather than
         // 0..count-1 due to Js rather than (Jz + Js) exit condition. With a full
-        // table (count = MaxProcesses) the out-of-bounds write falls on the pending
-        // queue at PendingQueueOffset (= FreeRangeTableOffset + MaxFreeRanges*8).
+        // table (count = MaxProcesses) the ghost entry at index 8 starts at
+        // BuddyBitmapOffset; its Priority/TicksUsed fields are 128/132 bytes further.
+        // Hardware must be large enough that those addresses are valid memory.
 
-        Hardware hw = NewSeededHardware();
+        Hardware hw = Test.NewHardware(16384, new FakeOS());
+        hw.ReserveOsMemory(OsLayout.TotalSize);
+        hw.WriteBytes(0, OsRoutines.BuildOsImage());
         SeedMlfqDefaults(hw);
         WriteWord(hw, OsLayout.BoostTimerOffset, 1); // force boost on this switch
 
@@ -387,11 +389,10 @@ public class MlfqTests
                 priority: 3, ticksUsed: 10, programAddress: 4096 + i * 512);
         }
 
-        // The "ghost" entry's Priority and TicksUsed fields land at:
-        //   FreeRangeTableOffset + ProcessEntryPriority  (= PendingQueueOffset + 0)
-        //   FreeRangeTableOffset + ProcessEntryTicksUsed (= PendingQueueOffset + 4)
-        int ghostPriorityAddr  = OsLayout.FreeRangeTableOffset + Hardware.ProcessEntryPriority;
-        int ghostTicksAddr     = OsLayout.FreeRangeTableOffset + Hardware.ProcessEntryTicksUsed;
+        // Ghost entry at index 8 starts at BuddyBitmapOffset; its Priority and
+        // TicksUsed fields (offsets 128 and 132) fall into process heap memory.
+        int ghostPriorityAddr = OsLayout.BuddyBitmapOffset + Hardware.ProcessEntryPriority;
+        int ghostTicksAddr    = OsLayout.BuddyBitmapOffset + Hardware.ProcessEntryTicksUsed;
         WriteWord(hw, ghostPriorityAddr, 0xAB);  // sentinel: must not become 0
         WriteWord(hw, ghostTicksAddr,    0xCD);
 
@@ -714,13 +715,16 @@ public class MlfqTests
     }
 
     // EDGE CASE: ProcessTableOffset must leave enough room after the header fields
-    // (ProcessCount, CurrentIndex, FreeRangeCount, PendingCount, BoostTimer,
-    // QuantumTable) without aliasing any of them.
+    // (ProcessCount, CurrentIndex, BuddyHeapStart, BuddyHeapSize, BoostTimer,
+    // QuantumTable, BuddyMinBlock, BuddyLevels) without aliasing any of them.
     [Fact]
     public void OsLayout_ProcessTableOffset_IsAfterAllHeaderFields()
     {
         int quantumTableEnd = OsLayout.QuantumTableOffset + OsLayout.QueueCount * 4;
-        Assert.Equal(OsLayout.ProcessTableOffset, quantumTableEnd);
+        // Two buddy fields (BuddyMinBlock + BuddyLevels, 4 bytes each) follow the
+        // quantum table before the process table starts.
+        int buddyFieldsEnd = quantumTableEnd + 8;
+        Assert.Equal(OsLayout.ProcessTableOffset, buddyFieldsEnd);
     }
 
     // ---- LoadProcess MLFQ field seeding ----------------------------------
