@@ -118,6 +118,7 @@ public sealed class VisualizerModel
     public List<BuddyHeapView.FreeBlock> FreeBlocks { get; set; } = new List<BuddyHeapView.FreeBlock>();
     public BuddyHeapView.BuddyNode? BuddyTree { get; set; }
 
+    public const int MaxHistoryLength = 80;
     public List<InstructionStep> History { get; } = new List<InstructionStep>();
     public List<PrivilegeTransition> Transitions { get; } = new List<PrivilegeTransition>();
     public RegisterSnapshot? Registers { get; set; }
@@ -137,6 +138,10 @@ public sealed class VisualizerModel
         PreviousRegisters = Registers;
         Registers = step.Registers;
         History.Add(step);
+        if (History.Count > MaxHistoryLength)
+        {
+            History.RemoveAt(0);
+        }
         InstructionCount++;
         if (InstructionsByProcess.TryGetValue(step.Process, out int n))
         {

@@ -158,6 +158,46 @@ public class BuddyHeapViewTests
     }
 
     [Fact]
+    public void Flatten_NullRoot_ReturnsEmptyList()
+    {
+        List<BuddyHeapView.Segment> segments = BuddyHeapView.Flatten(null);
+        Assert.Empty(segments);
+    }
+
+    [Fact]
+    public void Flatten_SingleFreeRoot_ReturnsOneSegment()
+    {
+        Hardware hw = NewHeapHardware();
+        SetNodeFree(hw, 1); // root is free
+
+        BuddyHeapView.BuddyNode? root = BuddyHeapView.ReadTree(hw, _ => null);
+        List<BuddyHeapView.Segment> segments = BuddyHeapView.Flatten(root);
+
+        Assert.Single(segments);
+        Assert.Equal(BuddyHeapView.BuddyNodeKind.Free, segments[0].Kind);
+        Assert.Equal(HeapStart, segments[0].Base);
+        Assert.Equal(HeapSize, segments[0].Size);
+    }
+
+    [Fact]
+    public void Flatten_SingleAllocatedRoot_ReturnsOneAllocatedSegment()
+    {
+        // All nodes have bit=0 (not free) and a process covers the whole heap —
+        // so the root is Allocated (base=HeapStart, size=HeapSize).
+        Hardware hw = NewHeapHardware();
+        SeedProcess(hw, 0, HeapStart, HeapSize);
+
+        BuddyHeapView.BuddyNode? root = BuddyHeapView.ReadTree(hw, addr => "big.bin");
+        List<BuddyHeapView.Segment> segments = BuddyHeapView.Flatten(root);
+
+        Assert.Single(segments);
+        Assert.Equal(BuddyHeapView.BuddyNodeKind.Allocated, segments[0].Kind);
+        Assert.Equal(HeapStart, segments[0].Base);
+        Assert.Equal(HeapSize, segments[0].Size);
+        Assert.Equal("big.bin", segments[0].OwnerPath);
+    }
+
+    [Fact]
     public void NoOsRegion_ReturnsNull()
     {
         Hardware hw = Test.NewHardware(512, new FakeOS()); // no OS reserved

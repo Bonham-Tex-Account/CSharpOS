@@ -19,3 +19,20 @@ public enum VisualizerMode
     // process resume).
     Verbose = 2
 }
+
+/// <summary>
+/// Controls how often the dashboard redraws and how much data is captured per
+/// instruction. Lower tiers reduce CPU overhead at the cost of display fidelity;
+/// higher tiers show the most detail but are slower.
+/// </summary>
+public enum DetailLevel
+{
+    // Render every 10 steps; skip register capture and disassembly entirely.
+    Low    = 0,
+
+    // Render every 3 steps; capture registers but skip disassembly.
+    Medium = 1,
+
+    // Render every step; full register capture and disassembly (current behavior).
+    High   = 2
+}

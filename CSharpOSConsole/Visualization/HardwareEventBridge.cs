@@ -16,15 +16,17 @@ public sealed class HardwareEventBridge
     private readonly VisualizerModel model;
     private readonly IVisualizerRenderer renderer;
     private readonly Pacer pacer;
+    private readonly DetailLevel detail;
 
     public HardwareEventBridge(Hardware hw, OperatingSystem os, VisualizerModel model,
-        IVisualizerRenderer renderer, Pacer pacer)
+        IVisualizerRenderer renderer, Pacer pacer, DetailLevel detail = DetailLevel.High)
     {
         this.hw = hw;
         this.os = os;
         this.model = model;
         this.renderer = renderer;
         this.pacer = pacer;
+        this.detail = detail;
 
         hw.InstructionExecuted += OnInstructionExecuted;
         hw.MemoryWritten += OnMemoryWritten;
@@ -59,13 +61,20 @@ public sealed class HardwareEventBridge
 
     private void OnInstructionExecuted(object? sender, InstructionExecutedArgs e)
     {
+        // Decode is a single switch lookup — always do it regardless of detail level.
+        string mnemonic = Disassembler.Decode(e.Opcode, e.B1, e.B2, e.B3);
+        RegisterSnapshot? registers = null;
+        if (detail != DetailLevel.Low)
+        {
+            registers = RegisterSnapshot.Capture(hw);
+        }
         InstructionStep step = new InstructionStep
         {
             Address = e.Address,
-            Mnemonic = Disassembler.Decode(e.Opcode, e.B1, e.B2, e.B3),
+            Mnemonic = mnemonic,
             Privilege = hw.GetPrivilegeLevel(),
             Process = model.CurrentProcess,
-            Registers = RegisterSnapshot.Capture(hw)
+            Registers = registers!
         };
         model.CurrentPrivilege = step.Privilege;
         model.RecordInstruction(step);

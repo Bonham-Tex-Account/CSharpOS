@@ -23,6 +23,8 @@ public sealed class SpectreDashboard
     private readonly Hardware hw;
     private readonly OperatingSystem os;
     private readonly VisualizerMode mode;
+    private readonly DetailLevel detail;
+    private readonly int renderStride;
     private readonly VisualizerModel model;
     private readonly FrameHistory frames;
     private readonly HardwareEventBridge bridge;
@@ -35,17 +37,30 @@ public sealed class SpectreDashboard
     private int lastLoadStep;
 
     public SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delayMs,
-        bool showProgramIo = false)
+        DetailLevel detail = DetailLevel.High, bool showProgramIo = false)
     {
         this.hw = hw;
         this.os = os;
         this.mode = mode;
+        this.detail = detail;
+        if (detail == DetailLevel.Low)
+        {
+            renderStride = 10;
+        }
+        else if (detail == DetailLevel.Medium)
+        {
+            renderStride = 3;
+        }
+        else
+        {
+            renderStride = 1;
+        }
         model = new VisualizerModel { ShowProgramIo = showProgramIo };
         frames = new FrameHistory();
         // The dashboard paces itself via the InteractionController, so the bridge's pacer
         // is inert (non-interactive, no delay).
         Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
-        bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer);
+        bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer, detail);
         interaction = new InteractionController(frames, true, delayMs, ToggleIo);
     }
 
@@ -104,19 +119,43 @@ public sealed class SpectreDashboard
                     }
                     if (action == StepAction.Execute)
                     {
-                        int before = model.InstructionCount;
-                        hw.Run();
-                        if (model.InstructionCount > before)
+                        // Only user/kernel instructions count toward the stride; OS
+                        // (Privileged-mode) instructions run at full speed in the inner loop.
+                        // Without this, a 70-instruction context-switch routine would charge
+                        // the 100ms NextAction delay 70 times = ~7-second freeze per switch.
+                        // osGuard caps the spin when all processes are blocked on I/O.
+                        int stepsToRun = interaction.Paused ? 1 : renderStride;
+                        int userSteps = 0;
+                        int osGuard = 0;
+                        while (userSteps < stepsToRun && os.HasProcesses && osGuard < 10000)
                         {
-                            frames.Capture(model);
+                            int before = model.InstructionCount;
+                            hw.Run();
+                            if (model.InstructionCount > before)
+                            {
+                                frames.Capture(model);
+                                userSteps++;
+                                osGuard = 0;
+                            }
+                            else
+                            {
+                                osGuard++;
+                            }
                         }
+                        // Yield at the render boundary (not per OS step) when idle.
                         if (os.HasProcesses && !os.HasRunningProcess)
                         {
                             Thread.Sleep(15);
                         }
+                        RenderInto(layout);
+                        ctx.Refresh();
                     }
-                    RenderInto(layout);
-                    ctx.Refresh();
+                    else
+                    {
+                        // Redraw: time-travel or key state change — always render immediately.
+                        RenderInto(layout);
+                        ctx.Refresh();
+                    }
                 }
 
                 RenderInto(layout);
@@ -279,7 +318,9 @@ public sealed class SpectreDashboard
         List<IRenderable> program = new List<IRenderable>();
         List<IRenderable> kernel = new List<IRenderable>();
 
-        int end = frame.HistoryLength;
+        // Use the live tail of History; HistoryLength is capped at MaxHistoryLength so
+        // absolute indices would shift as old entries are evicted from the front.
+        int end = model.History.Count;
         int start = Math.Max(0, end - LookBack);
         bool havePrev = false;
         PrivilegeLevel prev = PrivilegeLevel.User;
@@ -432,39 +473,37 @@ public sealed class SpectreDashboard
     }
 
     // ---- buddy allocator tree ---------------------------------------------
+    // Shows only the leaf nodes (Free and Allocated blocks) in address order as a
+    // flat list. The recursive Spectre Tree widget overflows the panel for deep trees
+    // (6 levels = 63 nodes); this always fits regardless of tree depth.
 
-    private IRenderable BuildBuddyTree(Frame frame)
+    private static IRenderable BuildBuddyTree(Frame frame)
     {
         if (frame.BuddyTree == null)
         {
             return new Markup("[grey39](heap not configured)[/]");
         }
-        Tree tree = new Tree(new Markup(BuddyLabel(frame.BuddyTree)));
-        AddBuddyChildren(tree, frame.BuddyTree);
-        return tree;
+        List<BuddyHeapView.Segment> segments = BuddyHeapView.Flatten(frame.BuddyTree);
+        if (segments.Count == 0)
+        {
+            return new Markup("[grey39](empty)[/]");
+        }
+        List<IRenderable> lines = new List<IRenderable>();
+        foreach (BuddyHeapView.Segment segment in segments)
+        {
+            lines.Add(new Markup(SegmentLabel(segment)));
+        }
+        return new Rows(lines);
     }
 
-    private void AddBuddyChildren(IHasTreeNodes parent, BuddyHeapView.BuddyNode node)
+    private static string SegmentLabel(BuddyHeapView.Segment segment)
     {
-        foreach (BuddyHeapView.BuddyNode child in node.Children)
+        if (segment.Kind == BuddyHeapView.BuddyNodeKind.Free)
         {
-            TreeNode added = parent.AddNode(BuddyLabel(child));
-            AddBuddyChildren(added, child);
+            return $"[green]FREE  {segment.Base}+{segment.Size}[/]";
         }
-    }
-
-    private static string BuddyLabel(BuddyHeapView.BuddyNode node)
-    {
-        if (node.Kind == BuddyHeapView.BuddyNodeKind.Free)
-        {
-            return $"[green]FREE {node.Base}+{node.Size}[/]";
-        }
-        if (node.Kind == BuddyHeapView.BuddyNodeKind.Allocated)
-        {
-            string owner = PlainTextRenderer.FriendlyName(node.OwnerPath);
-            return $"[red]ALLOC {node.Base}+{node.Size}[/] [grey]{Markup.Escape(owner)}[/]";
-        }
-        return $"[grey]split {node.Base}+{node.Size}[/]";
+        string owner = PlainTextRenderer.FriendlyName(segment.OwnerPath);
+        return $"[red]ALLOC {segment.Base}+{segment.Size}[/] [grey]{Markup.Escape(owner)}[/]";
     }
 
     // ---- registers ---------------------------------------------------------
@@ -629,7 +668,7 @@ public sealed class SpectreDashboard
             state = "[aqua]paused[/]";
         }
         string keys = "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] back/forward  [grey]o[/] I/O  [grey]q[/] quit";
-        return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]detail[/] {mode}   {keys}"))
+        return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]perf[/] {detail}   {keys}"))
         {
             Border = BoxBorder.None,
             Expand = true

@@ -29,7 +29,7 @@ for (int i = 0; i < args.Length - 1; i++)
 const int MemorySize = 32768;
 const int RequiredMemory = 128;
 const int RequiredStackSize = 64;
-const int StepDelayMs = 250;
+const int StepDelayMs = 100;
 
 RegisterName[] registers = Enum.GetValues<RegisterName>();
 string programDir = Path.Combine(Path.GetTempPath(), "CSharpOSPrograms");
@@ -83,34 +83,64 @@ while (true)
     switch (trimmed)
     {
         case "1":
-            RunWindowed(new List<string> { counterPath }, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunWindowed(new List<string> { counterPath }, mode, detail);
             break;
+        }
         case "2":
-            RunWindowed(new List<string> { averagePath }, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunWindowed(new List<string> { averagePath }, mode, detail);
             break;
+        }
         case "3":
-            RunWindowed(new List<string> { guessPath }, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunWindowed(new List<string> { guessPath }, mode, detail);
             break;
+        }
         case "4":
-            RunWindowed(new List<string> { counterPath, averagePath }, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunWindowed(new List<string> { counterPath, averagePath }, mode, detail);
             break;
+        }
         case "5":
-            RunWindowed(new List<string> { counterPath, averagePath, guessPath }, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunWindowed(new List<string> { counterPath, averagePath, guessPath }, mode, detail);
             break;
+        }
         case "6":
-            Run(Churn(3, 0), Churn(15, 3), 60, false, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            Run(Churn(3, 0), Churn(15, 3), 60, false, mode, detail);
             break;
+        }
         case "7":
-            Run(Churn(8, 0), new List<Process>(), 0, false, PromptMode());
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            Run(Churn(8, 0), new List<Process>(), 0, false, mode, detail);
             break;
+        }
         case "8":
         {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
             List<Process> initial = new List<Process>
             {
                 new Process(counterPath, RequiredMemory, RequiredStackSize),
                 new Process(averagePath, RequiredMemory, RequiredStackSize)
             };
-            Run(initial, Churn(10, 0), 80, false, PromptMode());
+            Run(initial, Churn(10, 0), 80, false, mode, detail);
             break;
         }
         default:
@@ -133,7 +163,7 @@ List<Process> Churn(int count, int offset)
     return list;
 }
 
-// Asks which detail level to render at; defaults to Normal on blank/unknown input.
+// Asks which visualizer verbosity mode to use; defaults to Normal on blank/unknown input.
 VisualizerMode PromptMode()
 {
     Console.WriteLine("  Detail: 1) minimal  2) normal  3) verbose");
@@ -152,6 +182,25 @@ VisualizerMode PromptMode()
     return VisualizerMode.Normal;
 }
 
+// Asks which performance level to use; defaults to High on blank/unknown input.
+DetailLevel PromptDetail()
+{
+    Console.WriteLine("  Performance: 1) low (fast)  2) medium  3) high (full detail)");
+    Console.Write("  Select [3]: ");
+    string? line = Console.ReadLine();
+    if (line != null)
+    {
+        switch (line.Trim())
+        {
+            case "1":
+                return DetailLevel.Low;
+            case "2":
+                return DetailLevel.Medium;
+        }
+    }
+    return DetailLevel.High;
+}
+
 string WriteProgram(string name, byte[] bytes)
 {
     string path = Path.Combine(programDir, name + ".bin");
@@ -160,21 +209,21 @@ string WriteProgram(string name, byte[] bytes)
 }
 
 // Windowed run: each program gets its own per-process I/O window (modes 1-5).
-void RunWindowed(List<string> programPaths, VisualizerMode mode)
+void RunWindowed(List<string> programPaths, VisualizerMode mode, DetailLevel detail)
 {
     List<Process> processes = new List<Process>();
     foreach (string path in programPaths)
     {
         processes.Add(new Process(path, RequiredMemory, RequiredStackSize));
     }
-    Run(processes, new List<Process>(), 0, true, mode);
+    Run(processes, new List<Process>(), 0, true, mode, detail);
 }
 
 // Generalized run. `initial` processes load up front; `staggered` processes load one at
 // a time during the run (every `interval` instructions) for memory/scheduler churn. With
 // `useWindows`, each initial process gets its own I/O window; otherwise program I/O is
 // mirrored into the dashboard.
-void Run(List<Process> initial, List<Process> staggered, int interval, bool useWindows, VisualizerMode mode)
+void Run(List<Process> initial, List<Process> staggered, int interval, bool useWindows, VisualizerMode mode, DetailLevel detail)
 {
     Console.WriteLine();
     OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
@@ -193,7 +242,7 @@ void Run(List<Process> initial, List<Process> staggered, int interval, bool useW
     }
 
     ProcessIoRouter router = new ProcessIoRouter(hw, terminals);
-    SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, showProgramIo: !useWindows);
+    SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail, showProgramIo: !useWindows);
 
     foreach (Process process in initial)
     {

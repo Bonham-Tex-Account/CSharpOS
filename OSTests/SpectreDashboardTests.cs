@@ -121,6 +121,42 @@ public class SpectreDashboardTests : IDisposable
     }
 
     [Fact]
+    public void RendersAllPanels_WithDetailLevelLow_WithoutThrowing()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
+
+        SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0, DetailLevel.Low);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
+
+        StringWriter sink = new StringWriter();
+        dashboard.RenderSnapshot(PlainConsole(sink), 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("Program", text);
+        Assert.Contains("Buddy allocator", text);
+    }
+
+    [Fact]
+    public void RendersAllPanels_WithDetailLevelMedium_WithoutThrowing()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
+
+        SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0, DetailLevel.Medium);
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
+
+        StringWriter sink = new StringWriter();
+        dashboard.RenderSnapshot(PlainConsole(sink), 2000);
+
+        string text = sink.ToString();
+        Assert.Contains("Program", text);
+        Assert.Contains("Buddy allocator", text);
+    }
+
+    [Fact]
     public void StaggeredLoads_DriveMemoryChurn_AcrossManyProcesses()
     {
         BasicOS os = new BasicOS(new StringWriter());
