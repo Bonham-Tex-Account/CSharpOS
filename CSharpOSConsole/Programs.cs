@@ -85,6 +85,29 @@ public static class Programs
         return asm.Build();
     }
 
+    // A tiny shell: read a command id (a disk slot) via IN, fork, have the child EXEC
+    // that program while the parent focuses the child and waits for it, then loop. This
+    // exercises the whole spawning family (FORK / EXEC / SETFOCUS / WAIT) end to end.
+    public static byte[] Shell()
+    {
+        Assembler asm = new Assembler();
+        asm.Label("loop");
+        asm.In(RegisterName.EAX);                       // read a command id (disk slot)
+        asm.Mov(RegisterName.ECX, RegisterName.EAX);    // save it (FORK clears the child's EAX)
+        asm.Fork();
+        asm.MovImm(RegisterName.EBX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jnz("parent");
+        // Child (EAX == 0): become the requested program.
+        asm.Exec(RegisterName.ECX);
+        // Parent (EAX == child PID): focus the child, wait for it, then prompt again.
+        asm.Label("parent");
+        asm.SetFocus(RegisterName.EAX);
+        asm.Wait(RegisterName.EAX);
+        asm.Jmp("loop");
+        return asm.Build();
+    }
+
     // Interactive guessing game. Secret = 42. Reads guesses via IN, prints a hint
     // code (1 = too low, 2 = too high) until the guess is correct, then prints it.
     public static byte[] GuessingGame()

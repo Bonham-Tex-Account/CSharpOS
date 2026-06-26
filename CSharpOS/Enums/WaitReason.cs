@@ -7,5 +7,7 @@ public enum WaitReason
 {
     None,
     Input,
-    Output
+    Output,
+    // Blocked in wait(pid), waiting for a child process to terminate.
+    ChildProcess
 }

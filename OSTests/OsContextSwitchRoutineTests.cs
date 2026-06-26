@@ -68,7 +68,7 @@ public class OsContextSwitchRoutineTests
         // Switched to process 1.
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));        // process 1's registers live
-        Assert.Equal(0x222, hw.GetInstructionPointer());    // resumed at process 1's IP
+        Assert.Equal(300 + 0x222, hw.GetInstructionPointer()); // resumed at process 1's base + saved EIP offset
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
 
         // Process 0's interrupted context was persisted to its entry.
@@ -98,7 +98,7 @@ public class OsContextSwitchRoutineTests
         // Index 1 is Blocked, so the scan skips it and lands on index 2.
         Assert.Equal(2, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(3000, hw.ReadRegisterAt((byte)RegisterName.EAX));
-        Assert.Equal(0x333, hw.GetInstructionPointer());
+        Assert.Equal(500 + 0x333, hw.GetInstructionPointer()); // base + saved EIP offset
     }
 
     [Fact]
@@ -159,7 +159,7 @@ public class OsContextSwitchRoutineTests
         // Index 1 is Terminated — the scan skips it and lands on index 2.
         Assert.Equal(2, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(3000, hw.ReadRegisterAt((byte)RegisterName.EAX));
-        Assert.Equal(0x333, hw.GetInstructionPointer());
+        Assert.Equal(500 + 0x333, hw.GetInstructionPointer()); // base + saved EIP offset
     }
 
     [Fact]

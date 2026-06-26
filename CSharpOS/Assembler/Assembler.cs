@@ -210,6 +210,43 @@ public sealed partial class Assembler
         Emit(Instruction.DWRITE, (byte)slot, (byte)src, (byte)length);
     }
 
+    // Disk slot content length into lengthOut (privileged; used by EXEC).
+    public void DLen(RegisterName slot, RegisterName lengthOut)
+    {
+        Emit(Instruction.DLEN, (byte)slot, (byte)lengthOut, 0);
+    }
+
+    // Process control: fork the running process (parent gets the child PID in EAX,
+    // child gets 0).
+    public void Fork()
+    {
+        Emit(Instruction.FORK, 0, 0, 0);
+    }
+
+    // Replace the running process's image with the program in disk slot reg[programSlot].
+    public void Exec(RegisterName programSlot)
+    {
+        Emit(Instruction.EXEC, (byte)programSlot, 0, 0);
+    }
+
+    // Block until child PID reg[childPid] exits; its status is delivered in EAX.
+    public void Wait(RegisterName childPid)
+    {
+        Emit(Instruction.WAIT, (byte)childPid, 0, 0);
+    }
+
+    // Terminate the running process with status reg[status].
+    public void Exit(RegisterName status)
+    {
+        Emit(Instruction.EXIT, (byte)status, 0, 0);
+    }
+
+    // Make the process with PID reg[pid] the foreground (focused) process.
+    public void SetFocus(RegisterName pid)
+    {
+        Emit(Instruction.SETFOCUS, (byte)pid, 0, 0);
+    }
+
     // Reserves a 4-byte zero-initialized slot in the data section.
     public void DataInt(string name)
     {

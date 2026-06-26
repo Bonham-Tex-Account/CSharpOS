@@ -62,7 +62,7 @@ public class OsSchedulingRoutineTests
 
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
-        Assert.Equal(0x222, hw.GetInstructionPointer());
+        Assert.Equal(300 + 0x222, hw.GetInstructionPointer()); // base + saved EIP offset
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public class OsSchedulingRoutineTests
         Assert.Equal((int)WaitReason.None, ReadWord(hw, entry1 + Hardware.ProcessEntryWaitReason));
         Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));   // still process 0
         Assert.Equal(555, hw.ReadRegisterAt((byte)RegisterName.EAX));                    // its registers restored
-        Assert.Equal(0x50, hw.GetInstructionPointer());               // and its IP
+        Assert.Equal(100 + 0x50, hw.GetInstructionPointer()); // base + saved EIP offset               // and its IP
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
 
@@ -250,7 +250,7 @@ public class OsSchedulingRoutineTests
         // Index 0 is Terminated — Schedule skips it and picks index 1.
         Assert.Equal(1, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(2000, hw.ReadRegisterAt((byte)RegisterName.EAX));
-        Assert.Equal(0x222, hw.GetInstructionPointer());
+        Assert.Equal(300 + 0x222, hw.GetInstructionPointer()); // base + saved EIP offset
     }
 
     [Fact]
@@ -273,7 +273,7 @@ public class OsSchedulingRoutineTests
         Assert.Equal((int)ProcessState.Ready, ReadWord(hw, entry1 + Hardware.ProcessEntryState));
         Assert.Equal(0, ReadWord(hw, OsLayout.CurrentIndexOffset));
         Assert.Equal(999, hw.ReadRegisterAt((byte)RegisterName.EAX));
-        Assert.Equal(0x50, hw.GetInstructionPointer());
+        Assert.Equal(100 + 0x50, hw.GetInstructionPointer()); // base + saved EIP offset
     }
 
     [Fact]

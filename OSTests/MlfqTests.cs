@@ -715,9 +715,12 @@ public class MlfqTests
     {
         int quantumTableEnd = OsLayout.QuantumTableOffset + OsLayout.QueueCount * 4;
         // Two buddy fields (BuddyMinBlock + BuddyLevels, 4 bytes each) follow the
-        // quantum table before the process table starts.
+        // quantum table, then the NextPid counter and the kernel-image disk slot
+        // (4 bytes each), before the process table starts.
         int buddyFieldsEnd = quantumTableEnd + 8;
-        Assert.Equal(OsLayout.ProcessTableOffset, buddyFieldsEnd);
+        Assert.Equal(OsLayout.NextPidOffset, buddyFieldsEnd);
+        Assert.Equal(OsLayout.KernelImageSlotOffset, OsLayout.NextPidOffset + 4);
+        Assert.Equal(OsLayout.ProcessTableOffset, OsLayout.KernelImageSlotOffset + 4);
     }
 
     // ---- LoadProcess MLFQ field seeding ----------------------------------

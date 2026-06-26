@@ -30,6 +30,12 @@ public partial class Hardware
     public const int ProcessEntryTotalSize         = 124;
     public const int ProcessEntryPriority           = 128;  // MLFQ queue level (0 = highest)
     public const int ProcessEntryTicksUsed          = 132;  // hardware ticks used in current level
+    // Process identity (the spawning effort): Pid is a monotonic id decoupled from the
+    // slot index; ParentPid/WaitTarget/ExitStatus support fork/wait/zombie reaping.
+    public const int ProcessEntryPid                = 136;
+    public const int ProcessEntryParentPid          = 140;
+    public const int ProcessEntryWaitTarget         = 144;  // PID being waited on, else -1
+    public const int ProcessEntryExitStatus         = 148;
     // Disk slot holding this process's program image; the load routine DREADs it into
     // RAM at the allocated ProgramAddress. Sits at 152 so 136-148 stay free for the
     // spawning effort's PID group, and 156 stays spare.
@@ -72,7 +78,12 @@ public partial class Hardware
     // the allocated RAM. LoadProcess dispatches them in sequence.
     public const int IvtAllocate           = 8;
     public const int IvtDiskLoad           = 9;
-    public const int IvtSlotCount          = 10;
+    // Process-spawning routines (fork/exec/wait runtime creation, spawn boot creation).
+    public const int IvtFork               = 10;
+    public const int IvtExec               = 11;
+    public const int IvtWait               = 12;
+    public const int IvtSpawn              = 13;
+    public const int IvtSlotCount          = 14;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // ---- public events ---------------------------------------------------
@@ -272,6 +283,10 @@ public partial class Hardware
             case IvtSchedule:           return "Schedule";
             case IvtAllocate:           return "Allocate";
             case IvtDiskLoad:           return "DiskLoad";
+            case IvtFork:               return "Fork";
+            case IvtExec:               return "Exec";
+            case IvtWait:               return "Wait";
+            case IvtSpawn:              return "Spawn";
             default:                    return $"slot {slot}";
         }
     }
@@ -327,11 +342,19 @@ public partial class Hardware
     // the OS region and any process's memory.
     public int GetProgramBase()
     {
-        if (level == PrivilegeLevel.Privileged)
+        return GetProgramBaseFor(level);
+    }
+
+    // The program base for a specific privilege level (independent of the live level),
+    // so OsReturn can resolve a relative saved EIP for the level it is returning to
+    // before that level becomes current.
+    private int GetProgramBaseFor(PrivilegeLevel forLevel)
+    {
+        if (forLevel == PrivilegeLevel.Privileged)
         {
             return 0;
         }
-        if (level == PrivilegeLevel.User)
+        if (forLevel == PrivilegeLevel.User)
         {
             return currentProcessInstructionStart;
         }
@@ -545,6 +568,13 @@ public partial class Hardware
         Disk.Store(slot, buffer);
     }
 
+    // The byte length stored in a disk slot. Backs the DLEN instruction, which EXEC
+    // uses to size the new image's allocation before reading it.
+    public int DiskLength(int slot)
+    {
+        return Disk.GetLength(slot);
+    }
+
     // Resolves the running process's file descriptor to a device id. Falls back to
     // CurrentDeviceId() (the process index) with no OS image or no running process,
     // so the bare-hardware harness and the idle state behave exactly as before.
@@ -683,14 +713,15 @@ public partial class Hardware
     }
 
     // Seeds ESP to the top of the user stack into the process's saved register
-    // state; the first context switch loads it into the live ESP register.
+    // state; the first context switch loads it into the live ESP register. ESP is
+    // stored as an offset from the program base (position-independent model).
     private void InitializeStackPointer(Process process)
     {
         if (!registerIndex.ContainsKey(RegisterName.ESP))
         {
             return;
         }
-        int userStackTop = currentProcessStackStart + currentProcessStackSize;
+        int userStackTop = (currentProcessStackStart + currentProcessStackSize) - currentProcessInstructionStart;
         int offset = registerIndex[RegisterName.ESP];
         WriteBytes(process.RegisterStateAddress + offset, new byte[]
         {
@@ -806,9 +837,11 @@ public partial class Hardware
         WriteBytes(kernelBase + KernelSaveAreaOffset, (byte[])registers.Clone());
         WriteWord(kernelBase + KernelTrapInfoOffset,     opcode);
         WriteWord(kernelBase + KernelTrapInfoOffset + 4, operandByteOffset);
-        WriteWord(kernelBase + KernelTrapInfoOffset + 8, instructionPointer);
+        // Return IP stored relative to the user program base (position-independent).
+        WriteWord(kernelBase + KernelTrapInfoOffset + 8, instructionPointer - currentProcessInstructionStart);
         SetLevel(PrivilegeLevel.Kernel);
-        WriteRegister(RegisterName.ESP, currentProcessKernelStackStart + currentProcessKernelStackSize);
+        // ESP stored as an offset from the kernel section base.
+        WriteRegister(RegisterName.ESP, (currentProcessKernelStackStart + currentProcessKernelStackSize) - kernelBase);
         instructionPointer = kernelBase + KernelHeaderSize;
         trapTaken = true;
     }
@@ -818,10 +851,10 @@ public partial class Hardware
     public void Iret()
     {
         int kernelBase = currentProcessKernelSectionStart;
-        int returnIp = ReadWord(kernelBase + KernelTrapInfoOffset + 8);
+        int returnOffset = ReadWord(kernelBase + KernelTrapInfoOffset + 8); // user-relative
         WriteRegisters(ReadRegisterState(kernelBase + KernelSaveAreaOffset));
         SetLevel(PrivilegeLevel.User);
-        instructionPointer = returnIp;
+        instructionPointer = currentProcessInstructionStart + returnOffset;
     }
 
     // Snapshots the live register file (folding the live IP into the EIP slot) and
@@ -833,7 +866,9 @@ public partial class Hardware
         trapFrame = (byte[])registers.Clone();
         if (registerIndex.TryGetValue(RegisterName.EIP, out int eipOffset))
         {
-            WriteWordInto(trapFrame, eipOffset, instructionPointer);
+            // Fold the live IP into the EIP slot relative to the program base of the
+            // interrupted level, so a saved/forked context is position-independent.
+            WriteWordInto(trapFrame, eipOffset, instructionPointer - GetProgramBase());
         }
         interruptedLevel = level;
     }
@@ -887,7 +922,10 @@ public partial class Hardware
             WriteRegisters(pendingContext);
             if (registerIndex.TryGetValue(RegisterName.EIP, out int eipOffset))
             {
-                instructionPointer = ReadWordFrom(pendingContext, eipOffset);
+                // The saved EIP is relative to the resumed process's program base for
+                // the level it is returning to; resolve it against that base.
+                int savedEipOffset = ReadWordFrom(pendingContext, eipOffset);
+                instructionPointer = GetProgramBaseFor((PrivilegeLevel)privilegeLevel) + savedEipOffset;
             }
             pendingContext = null;
 
@@ -940,18 +978,96 @@ public partial class Hardware
         processRunning = savedRunning;
     }
 
-    // HLT is a request to terminate: the OS Halt routine frees the process and
-    // schedules the next. Without an OS image, just stop (raise to Privileged).
+    // HLT is a request to terminate with status 0: the OS Halt routine frees the
+    // process's memory, reaps it or hands its status to a waiting parent, and schedules
+    // the next. Without an OS image, just stop (raise to Privileged).
     public void Halt()
+    {
+        Terminate(0);
+    }
+
+    // EXIT: terminate with an explicit status (delivered to a waiting parent). Same OS
+    // routine as HLT, with the status passed in.
+    public void Exit(int status)
+    {
+        Terminate(status);
+    }
+
+    private void Terminate(int status)
     {
         instructionCount = 0;
         if (OsManaged)
         {
             ProcessTerminated?.Invoke(this, new ProcessTerminatedArgs { Device = CurrentDeviceId() });
-            DispatchOsRoutine(IvtHalt);
+            DispatchOsRoutine(IvtHalt, status);
             return;
         }
         SetLevel(PrivilegeLevel.Privileged);
+        trapTaken = true;
+    }
+
+    // WAIT: block until the child with the given PID terminates and collect its exit
+    // status. Dispatches the privileged wait routine (which returns immediately if the
+    // child is already a zombie). Without an OS image it is a no-op trap.
+    public void Wait(int childPid)
+    {
+        if (OsManaged)
+        {
+            DispatchOsRoutine(IvtWait, childPid);
+            return;
+        }
+        trapTaken = true;
+    }
+
+    // SETFOCUS: make the process with the given PID the foreground process. Maps PID to
+    // its process-table slot (reading the table) and points the focus there, so the live
+    // keyboard and screen follow it. A no-op if the PID is not a live process.
+    public void SetFocus(int pid)
+    {
+        if (!OsManaged)
+        {
+            return;
+        }
+        int count = ReadWord(osMemoryBase + OsLayout.ProcessCountOffset);
+        for (int i = 0; i < count; i++)
+        {
+            int entry = osMemoryBase + OsLayout.ProcessEntryAddress(i);
+            int state = ReadWord(entry + ProcessEntryState);
+            if (state == (int)ProcessState.Terminated)
+            {
+                continue;
+            }
+            if (ReadWord(entry + ProcessEntryPid) == pid)
+            {
+                SetActiveProcess(i);
+                return;
+            }
+        }
+    }
+
+    // FORK: duplicate the running process. Dispatches the privileged fork routine, which
+    // creates the child by copying this process's memory and register file, assigns it a
+    // PID, and resumes the scheduler. Without an OS image it is a no-op trap.
+    public void Fork()
+    {
+        if (OsManaged)
+        {
+            DispatchOsRoutine(IvtFork);
+            return;
+        }
+        trapTaken = true;
+    }
+
+    // EXEC: replace the running process's image with the program in the given disk slot.
+    // Dispatches the privileged exec routine (the slot arrives in the routine's EAX),
+    // which reallocates, loads the new image, and resets the process to run it.
+    public void Exec(int programSlot)
+    {
+        if (OsManaged)
+        {
+            DispatchOsRoutine(IvtExec, programSlot);
+            return;
+        }
         trapTaken = true;
     }
 

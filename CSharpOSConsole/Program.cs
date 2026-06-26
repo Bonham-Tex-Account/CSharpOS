@@ -53,6 +53,7 @@ while (true)
     Console.WriteLine("  6) Memory churn (short jobs load & exit continuously — watch the buddy tree & memory map)");
     Console.WriteLine("  7) Fill & drain the heap (mixed-size jobs fill memory, then drain — watch reclaim/merging)");
     Console.WriteLine("  8) Scheduler + memory (counter + average run while short jobs churn the heap)");
+    Console.WriteLine("  9) Shell (interactive: type a command id to fork/exec a program — fork/exec/wait/setfocus)");
     Console.WriteLine("  q) Quit");
     Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows scrub history, 'o' toggle program I/O, 'q' quit run)");
     Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, digits + Enter send it a number)");
@@ -129,6 +130,13 @@ while (true)
             Run(initial, Churn(10, 0), 80, mode, detail);
             break;
         }
+        case "9":
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunShell(mode, detail);
+            break;
+        }
         default:
             Console.WriteLine("Unknown option.");
             break;
@@ -191,6 +199,35 @@ DetailLevel PromptDetail()
 void RunShared(List<StagedProgram> programs, VisualizerMode mode, DetailLevel detail)
 {
     Run(programs, new List<StagedProgram>(), 0, mode, detail);
+}
+
+// Shell run (mode 9): stage the demo programs to disk as commands, boot the shell as the
+// only initial process, and let the user type a command id to fork/exec it. Exercises
+// FORK / EXEC / SETFOCUS / WAIT live in the dashboard.
+void RunShell(VisualizerMode mode, DetailLevel detail)
+{
+    Console.WriteLine();
+    OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
+    Hardware hw = new Hardware(MemorySize, registers, os);
+
+    // Demo programs live on disk as shell commands (not loaded as processes). The shell
+    // reads a disk-slot number and forks/execs it.
+    int counterCmd = hw.Disk.Store(Programs.CounterToTen());
+    int averageCmd = hw.Disk.Store(Programs.AverageOfList());
+    int guessCmd = hw.Disk.Store(Programs.GuessingGame());
+    int shellSlot = hw.Disk.Store(Programs.Shell());
+
+    Console.WriteLine("  Shell: focus it (Tab), type a command id then Enter to run it:");
+    Console.WriteLine($"    {counterCmd} = counter,  {averageCmd} = average,  {guessCmd} = guessing game (secret 42)");
+    Console.WriteLine();
+
+    SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail);
+    // The shell needs enough memory for the largest program it execs into.
+    os.LoadProcess(new Process(shellSlot, 512, RequiredStackSize));
+    dashboard.Run();
+
+    Console.WriteLine();
+    Console.WriteLine("--- run finished ---");
 }
 
 // Generalized run. `initial` programs load up front; `staggered` programs load one at a

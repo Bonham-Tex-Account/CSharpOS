@@ -17,6 +17,10 @@ public class Process
     // over the single load-from-disk pipeline).
     public int ProgramSlot = -1;
 
+    // Monotonic process id assigned by the OS at load time (0 until loaded). The slot
+    // index is internal; PID is the stable identity used by wait/exec/focus.
+    public int Pid;
+
     // ---- constructor -----------------------------------------------------
     public Process(string programFilePath, int requiredMemory, int requiredStackSize)
     {
