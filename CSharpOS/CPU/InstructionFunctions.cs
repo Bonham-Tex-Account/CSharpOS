@@ -297,4 +297,35 @@ internal static class InstructionFunctions
     {
         hw.OsReturn(hw.ReadRegisterAt(b1));
     }
+
+    // DREAD dest, slot, lenOut — copies disk slot reg[slot] into RAM at the absolute
+    // address reg[dest], writing the byte count into reg[lenOut]. The disk is an
+    // OS/kernel boundary, so this traps as invalid if executed in user mode.
+    internal static void DRead(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.TrapInvalidInstruction(Instruction.DREAD, b1, b2, b3);
+            return;
+        }
+        int destAddress = hw.ReadRegisterAt(b1);
+        int slot = hw.ReadRegisterAt(b2);
+        int length = hw.DiskRead(destAddress, slot);
+        hw.WriteRegisterAt(b3, length);
+    }
+
+    // DWRITE slot, src, len — copies reg[len] bytes of RAM from the absolute address
+    // reg[src] into disk slot reg[slot]. Privileged-only (traps in user mode).
+    internal static void DWrite(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.TrapInvalidInstruction(Instruction.DWRITE, b1, b2, b3);
+            return;
+        }
+        int slot = hw.ReadRegisterAt(b1);
+        int srcAddress = hw.ReadRegisterAt(b2);
+        int length = hw.ReadRegisterAt(b3);
+        hw.DiskWrite(slot, srcAddress, length);
+    }
 }

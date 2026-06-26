@@ -45,6 +45,12 @@ public static class Instruction
     public const byte SETLAYOUT   = 0x42;
     public const byte OSRET       = 0x43;
 
+    // ---- privileged disk opcodes ------------------------------------------
+    // Block transfers between the disk and RAM, run by the OS load path in
+    // Privileged mode (absolute addresses); they trap as invalid in user mode.
+    public const byte DREAD       = 0x44;
+    public const byte DWRITE      = 0x45;
+
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
@@ -84,6 +90,8 @@ public static class Instruction
         opcodeTable[LOADREGS]    = InstructionFunctions.LoadRegs;
         opcodeTable[SETLAYOUT]   = InstructionFunctions.SetLayout;
         opcodeTable[OSRET]       = InstructionFunctions.OsRet;
+        opcodeTable[DREAD]       = InstructionFunctions.DRead;
+        opcodeTable[DWRITE]      = InstructionFunctions.DWrite;
     }
 
     // ---- integral functions ----------------------------------------------

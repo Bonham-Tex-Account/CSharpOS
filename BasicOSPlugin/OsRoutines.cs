@@ -54,7 +54,8 @@ public static class OsRoutines
         EmitWakeBody(asm);
         int halt          = OsLayout.CodeBase + asm.CodeLength; EmitHalt(asm);
         int invalid       = OsLayout.CodeBase + asm.CodeLength; EmitInvalidInstruction(asm);
-        int loadProcess   = OsLayout.CodeBase + asm.CodeLength; EmitBuddyAlloc(asm);
+        int allocate      = OsLayout.CodeBase + asm.CodeLength; EmitBuddyAlloc(asm);
+        int diskLoad      = OsLayout.CodeBase + asm.CodeLength; EmitDiskLoad(asm);
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
@@ -76,7 +77,8 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtWakeOutput * 4,         wakeOutput);
         WriteWord(image, Hardware.IvtHalt * 4,               halt);
         WriteWord(image, Hardware.IvtInvalidInstruction * 4, invalid);
-        WriteWord(image, Hardware.IvtLoadProcess * 4,        loadProcess);
+        WriteWord(image, Hardware.IvtAllocate * 4,           allocate);
+        WriteWord(image, Hardware.IvtDiskLoad * 4,           diskLoad);
         return image;
     }
 
@@ -356,6 +358,21 @@ public static class OsRoutines
         asm.Store(R(EBP), R(R11));
 
         asm.Label("ba_done");
+        asm.MovImm(R(EAX), User);
+        asm.OsRet(R(EAX));
+    }
+
+    // DiskLoad: copy a process's program image from its disk slot into the RAM the
+    // allocator reserved for it. Entered (via IvtDiskLoad) with the process-table
+    // entry address in EAX, after a successful IvtAllocate set ProgramAddress. Keeps
+    // the disk concern out of the allocator, which stays a pure, reusable primitive.
+    //   EBX = entry, R9 = ProgramAddress (dest), R10 = disk slot, R11 = byte count out
+    private static void EmitDiskLoad(Assembler asm)
+    {
+        asm.Mov(R(EBX), R(EAX));                                       // EBX = entry
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R9); // R9 = dest RAM address
+        LoadField(asm, EBX, Hardware.ProcessEntryDiskSlot, R10);       // R10 = disk slot
+        asm.DRead(R(R9), R(R10), R(R11));                             // DREAD ProgramAddress, slot, lenOut
         asm.MovImm(R(EAX), User);
         asm.OsRet(R(EAX));
     }

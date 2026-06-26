@@ -30,6 +30,10 @@ public partial class Hardware
     public const int ProcessEntryTotalSize         = 124;
     public const int ProcessEntryPriority           = 128;  // MLFQ queue level (0 = highest)
     public const int ProcessEntryTicksUsed          = 132;  // hardware ticks used in current level
+    // Disk slot holding this process's program image; the load routine DREADs it into
+    // RAM at the allocated ProgramAddress. Sits at 152 so 136-148 stay free for the
+    // spawning effort's PID group, and 156 stays spare.
+    public const int ProcessEntryDiskSlot           = 152;
     // Per-process file-descriptor table: FdCount handles (0 = stdin, 1 = stdout, ...),
     // each a 4-byte device id. IN/OUT resolve the fd's device rather than assuming
     // device == process index. Bytes 136-159 stay free for later efforts (disk slot,
@@ -45,6 +49,11 @@ public partial class Hardware
     // device == process-index shim, until the focus effort rebinds them). Block
     // devices live above that range; the disk effort registers one at DiskDeviceId.
     public const int DiskDeviceId = 256;
+    // Default disk geometry when no Bin is supplied to the constructor: 64 slots of
+    // 1 KiB each — generous enough that the many load sites and multi-load tests
+    // never exhaust slots.
+    public const int DefaultDiskSlots    = 64;
+    public const int DefaultDiskSlotSize = 1024;
 
     // ---- interrupt vector table -----------------------------------------
     // One 4-byte slot per OS routine at the front of the OS region. Hardware reads
@@ -58,8 +67,12 @@ public partial class Hardware
     public const int IvtBlockInput         = 5;
     public const int IvtBlockOutput        = 6;
     public const int IvtSchedule           = 7;
-    public const int IvtLoadProcess        = 8;
-    public const int IvtSlotCount          = 9;
+    // Process loading is two routines: IvtAllocate reserves a memory block (pure,
+    // disk-free), and IvtDiskLoad copies the program image from its disk slot into
+    // the allocated RAM. LoadProcess dispatches them in sequence.
+    public const int IvtAllocate           = 8;
+    public const int IvtDiskLoad           = 9;
+    public const int IvtSlotCount          = 10;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // ---- public events ---------------------------------------------------
@@ -155,7 +168,13 @@ public partial class Hardware
     private readonly ConcurrentQueue<Interrupt> pendingInterrupts = new ConcurrentQueue<Interrupt>();
 
     // ---- constructor -----------------------------------------------------
+    // Convenience constructor: gives the machine a default-sized disk.
     public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os)
+        : this(memorySize, registerNames, os, new Bin(DefaultDiskSlots, DefaultDiskSlotSize))
+    {
+    }
+
+    public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os, Bin disk)
     {
         memory = new byte[memorySize];
         registers = new byte[registerNames.Length * 4];
@@ -166,6 +185,9 @@ public partial class Hardware
         }
         this.os = os;
         instructionCount = 0;
+        // Register the disk as a block device before the OS attaches, so the load
+        // path (which runs during AttachHardware-driven seeding) can reach it.
+        RegisterDevice(new Device(DiskDeviceId, disk));
         os.AttachHardware(this);
     }
 
@@ -237,7 +259,8 @@ public partial class Hardware
             case IvtBlockInput:         return "Block (input)";
             case IvtBlockOutput:        return "Block (output)";
             case IvtSchedule:           return "Schedule";
-            case IvtLoadProcess:        return "LoadProcess";
+            case IvtAllocate:           return "Allocate";
+            case IvtDiskLoad:           return "DiskLoad";
             default:                    return $"slot {slot}";
         }
     }
@@ -474,6 +497,41 @@ public partial class Hardware
     public Device GetDevice(int id)
     {
         return DeviceFor(id);
+    }
+
+    // The disk's backing store: the Bin behind the block device at DiskDeviceId.
+    public Bin Disk
+    {
+        get
+        {
+            Device device = DeviceFor(DiskDeviceId);
+            if (device.Block == null)
+            {
+                throw new InvalidOperationException("No disk is registered at DiskDeviceId.");
+            }
+            return device.Block;
+        }
+    }
+
+    // Block-device transfer: copies disk slot's contents into RAM at destAddr
+    // (absolute) and returns the byte count. Backs the DREAD instruction.
+    public int DiskRead(int destAddr, int slot)
+    {
+        byte[] data = Disk.Load(slot);
+        WriteBytes(destAddr, data);
+        return data.Length;
+    }
+
+    // Block-device transfer: copies len bytes of RAM from srcAddr (absolute) into a
+    // disk slot. Backs the DWRITE instruction.
+    public void DiskWrite(int slot, int srcAddr, int len)
+    {
+        byte[] buffer = new byte[len];
+        for (int i = 0; i < len; i++)
+        {
+            buffer[i] = memory[srcAddr + i];
+        }
+        Disk.Store(slot, buffer);
     }
 
     // Resolves the running process's file descriptor to a device id. Falls back to

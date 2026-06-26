@@ -32,20 +32,22 @@ const int RequiredStackSize = 64;
 const int StepDelayMs = 100;
 
 RegisterName[] registers = Enum.GetValues<RegisterName>();
-string programDir = Path.Combine(Path.GetTempPath(), "CSharpOSPrograms");
-Directory.CreateDirectory(programDir);
 
-string counterPath = WriteProgram("counter", Programs.CounterToTen());
-string averagePath = WriteProgram("average", Programs.AverageOfList());
-string guessPath = WriteProgram("guess", Programs.GuessingGame());
+// Program images, built once. Each run stages the ones it needs onto its own
+// machine's disk (Hardware.Disk) and references them by slot — there are no program
+// files; the disk is the program store.
+StagedProgram counter = new StagedProgram("counter", Programs.CounterToTen(), RequiredMemory, RequiredStackSize);
+StagedProgram average = new StagedProgram("average", Programs.AverageOfList(), RequiredMemory, RequiredStackSize);
+StagedProgram guess = new StagedProgram("guess", Programs.GuessingGame(), RequiredMemory, RequiredStackSize);
 
 // Short, non-interactive, self-terminating jobs of varied lifetimes, used by the
-// churn modes to keep the buddy allocator / memory map busy.
-string[] busyPaths =
+// churn modes to keep the buddy allocator / memory map busy. The churn loop assigns
+// each a request size, so these carry only their image and a name.
+(string Name, byte[] Bytes)[] busyPrograms =
 {
-    WriteProgram("busy_s", Programs.BusyThenHalt(80, 1)),
-    WriteProgram("busy_m", Programs.BusyThenHalt(160, 2)),
-    WriteProgram("busy_l", Programs.BusyThenHalt(240, 3))
+    ("busy_s", Programs.BusyThenHalt(80, 1)),
+    ("busy_m", Programs.BusyThenHalt(160, 2)),
+    ("busy_l", Programs.BusyThenHalt(240, 3))
 };
 // Varied request sizes so allocations land on different buddy block sizes.
 int[] churnSizes = { 128, 512, 1024 };
@@ -86,35 +88,35 @@ while (true)
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<string> { counterPath }, mode, detail);
+            RunWindowed(new List<StagedProgram> { counter }, mode, detail);
             break;
         }
         case "2":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<string> { averagePath }, mode, detail);
+            RunWindowed(new List<StagedProgram> { average }, mode, detail);
             break;
         }
         case "3":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<string> { guessPath }, mode, detail);
+            RunWindowed(new List<StagedProgram> { guess }, mode, detail);
             break;
         }
         case "4":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<string> { counterPath, averagePath }, mode, detail);
+            RunWindowed(new List<StagedProgram> { counter, average }, mode, detail);
             break;
         }
         case "5":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<string> { counterPath, averagePath, guessPath }, mode, detail);
+            RunWindowed(new List<StagedProgram> { counter, average, guess }, mode, detail);
             break;
         }
         case "6":
@@ -128,18 +130,14 @@ while (true)
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            Run(Churn(8, 0), new List<Process>(), 0, false, mode, detail);
+            Run(Churn(8, 0), new List<StagedProgram>(), 0, false, mode, detail);
             break;
         }
         case "8":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            List<Process> initial = new List<Process>
-            {
-                new Process(counterPath, RequiredMemory, RequiredStackSize),
-                new Process(averagePath, RequiredMemory, RequiredStackSize)
-            };
+            List<StagedProgram> initial = new List<StagedProgram> { counter, average };
             Run(initial, Churn(10, 0), 80, false, mode, detail);
             break;
         }
@@ -149,16 +147,16 @@ while (true)
     }
 }
 
-// Builds `count` busy churn processes, cycling through the busy programs and request
+// Builds `count` busy churn requests, cycling through the busy programs and request
 // sizes (offset shifts the cycle so successive batches differ).
-List<Process> Churn(int count, int offset)
+List<StagedProgram> Churn(int count, int offset)
 {
-    List<Process> list = new List<Process>();
+    List<StagedProgram> list = new List<StagedProgram>();
     for (int i = 0; i < count; i++)
     {
-        string path = busyPaths[(i + offset) % busyPaths.Length];
+        (string name, byte[] bytes) = busyPrograms[(i + offset) % busyPrograms.Length];
         int mem = churnSizes[(i + offset) % churnSizes.Length];
-        list.Add(new Process(path, mem, RequiredStackSize));
+        list.Add(new StagedProgram(name, bytes, mem, RequiredStackSize));
     }
     return list;
 }
@@ -201,33 +199,27 @@ DetailLevel PromptDetail()
     return DetailLevel.High;
 }
 
-string WriteProgram(string name, byte[] bytes)
-{
-    string path = Path.Combine(programDir, name + ".bin");
-    File.WriteAllBytes(path, bytes);
-    return path;
-}
-
 // Windowed run: each program gets its own per-process I/O window (modes 1-5).
-void RunWindowed(List<string> programPaths, VisualizerMode mode, DetailLevel detail)
+void RunWindowed(List<StagedProgram> programs, VisualizerMode mode, DetailLevel detail)
 {
-    List<Process> processes = new List<Process>();
-    foreach (string path in programPaths)
-    {
-        processes.Add(new Process(path, RequiredMemory, RequiredStackSize));
-    }
-    Run(processes, new List<Process>(), 0, true, mode, detail);
+    Run(programs, new List<StagedProgram>(), 0, true, mode, detail);
 }
 
-// Generalized run. `initial` processes load up front; `staggered` processes load one at
-// a time during the run (every `interval` instructions) for memory/scheduler churn. With
+// Generalized run. `initial` programs load up front; `staggered` programs load one at
+// a time during the run (every `interval` instructions) for memory/scheduler churn.
+// Every program is first staged onto this machine's disk and referenced by slot. With
 // `useWindows`, each initial process gets its own I/O window; otherwise program I/O is
 // mirrored into the dashboard.
-void Run(List<Process> initial, List<Process> staggered, int interval, bool useWindows, VisualizerMode mode, DetailLevel detail)
+void Run(List<StagedProgram> initial, List<StagedProgram> staggered, int interval, bool useWindows, VisualizerMode mode, DetailLevel detail)
 {
     Console.WriteLine();
     OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
     Hardware hw = new Hardware(MemorySize, registers, os);
+
+    // Stage every image onto the disk up front, so each Process references a real slot
+    // before it is loaded (the staggered ones load later, during the run).
+    List<Process> initialProcesses = StageAll(hw, initial);
+    List<Process> staggeredProcesses = StageAll(hw, staggered);
 
     // One terminal window per initial process, keyed by device id (== process-table
     // index). The churn modes pass no windows; their I/O is mirrored in the dashboard.
@@ -236,21 +228,20 @@ void Run(List<Process> initial, List<Process> staggered, int interval, bool useW
     {
         for (int i = 0; i < initial.Count; i++)
         {
-            string title = Path.GetFileNameWithoutExtension(initial[i].ProgramFilePath);
-            terminals[i] = new ConsoleWindowTerminal(title);
+            terminals[i] = new ConsoleWindowTerminal(initial[i].Name);
         }
     }
 
     ProcessIoRouter router = new ProcessIoRouter(hw, terminals);
     SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail, showProgramIo: !useWindows);
 
-    foreach (Process process in initial)
+    foreach (Process process in initialProcesses)
     {
         os.LoadProcess(process);
     }
-    if (staggered.Count > 0)
+    if (staggeredProcesses.Count > 0)
     {
-        dashboard.ScheduleStaggeredLoads(staggered, interval);
+        dashboard.ScheduleStaggeredLoads(staggeredProcesses, interval);
     }
 
     // The dashboard owns the run loop: it steps the emulator (which never blocks on
@@ -266,4 +257,34 @@ void Run(List<Process> initial, List<Process> staggered, int interval, bool useW
 
     Console.WriteLine();
     Console.WriteLine("--- run finished ---");
+}
+
+// Stores each program's image on the machine's disk and returns slot-based processes.
+List<Process> StageAll(Hardware hw, List<StagedProgram> programs)
+{
+    List<Process> processes = new List<Process>();
+    foreach (StagedProgram program in programs)
+    {
+        int slot = hw.Disk.Store(program.Bytes);
+        processes.Add(new Process(slot, program.Memory, program.Stack));
+    }
+    return processes;
+}
+
+// A program image plus the memory/stack a process needs to run it. Staged onto a
+// machine's disk inside Run, then referenced by slot.
+class StagedProgram
+{
+    public string Name;
+    public byte[] Bytes;
+    public int Memory;
+    public int Stack;
+
+    public StagedProgram(string name, byte[] bytes, int memory, int stack)
+    {
+        Name = name;
+        Bytes = bytes;
+        Memory = memory;
+        Stack = stack;
+    }
 }
