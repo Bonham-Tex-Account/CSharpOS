@@ -108,7 +108,8 @@ public class FrameHistoryTests
         FrameHistory frames = new FrameHistory();
         frames.Capture(ModelAtStep(1));
         frames.Capture(ModelAtStep(2));
-        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0, () => { });
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { });
         return (controller, frames);
     }
 
@@ -175,11 +176,91 @@ public class FrameHistoryTests
         frames.Capture(ModelAtStep(1));
         int toggles = 0;
         InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
-            () => { toggles++; });
+            () => { toggles++; }, () => { }, value => { });
 
         StepAction action = controller.HandleKey(Char('o'));
 
         Assert.Equal(StepAction.Redraw, action);
         Assert.Equal(1, toggles);
+    }
+
+    // ---- focus + process input (shared screen) -----------------------------
+
+    [Fact]
+    public void Digits_AccumulateIntoTheInputLine()
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        List<int> submitted = new List<int>();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { submitted.Add(value); });
+
+        controller.HandleKey(Char('4'));
+        controller.HandleKey(Char('2'));
+
+        Assert.Equal("42", controller.InputLine);
+        Assert.Empty(submitted); // not submitted until Enter
+    }
+
+    [Fact]
+    public void Enter_SubmitsTheTypedNumber_AndClearsTheLine()
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        List<int> submitted = new List<int>();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { submitted.Add(value); });
+
+        controller.HandleKey(Char('4'));
+        controller.HandleKey(Char('2'));
+        StepAction action = controller.HandleKey(Key(ConsoleKey.Enter));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.Equal(new List<int> { 42 }, submitted);
+        Assert.Equal("", controller.InputLine);
+    }
+
+    [Fact]
+    public void Enter_WithNoTypedNumber_SubmitsNothing()
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        List<int> submitted = new List<int>();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { submitted.Add(value); });
+
+        controller.HandleKey(Key(ConsoleKey.Enter));
+
+        Assert.Empty(submitted);
+    }
+
+    [Fact]
+    public void Backspace_RemovesTheLastDigit()
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { });
+
+        controller.HandleKey(Char('4'));
+        controller.HandleKey(Char('2'));
+        controller.HandleKey(Key(ConsoleKey.Backspace));
+
+        Assert.Equal("4", controller.InputLine);
+    }
+
+    [Fact]
+    public void Tab_InvokesTheCycleFocusCallback()
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        int cycles = 0;
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { cycles++; }, value => { });
+
+        StepAction action = controller.HandleKey(Key(ConsoleKey.Tab));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.Equal(1, cycles);
     }
 }

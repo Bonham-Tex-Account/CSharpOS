@@ -12,8 +12,8 @@ namespace CSharpOSConsole.Visualization;
 /// tree, registers with change highlighting, the heap/free map, and run stats. It reads
 /// the <see cref="VisualizerModel"/> (kept current by <see cref="HardwareEventBridge"/>)
 /// and redraws each step; the <see cref="FrameHistory"/> lets the user scrub backward and
-/// forward with the arrow keys. Per-process I/O still lives in the separate terminal
-/// windows.
+/// forward with the arrow keys. A single shared "Screen" panel shows the focused
+/// (foreground) process's I/O; Tab switches focus and digits + Enter send it a number.
 /// </summary>
 public sealed class SpectreDashboard
 {
@@ -61,12 +61,76 @@ public sealed class SpectreDashboard
         // is inert (non-interactive, no delay).
         Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
         bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer, detail);
-        interaction = new InteractionController(frames, true, delayMs, ToggleIo);
+        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput);
+
+        // The dashboard owns the single shared screen, so it also drives output
+        // completion: the console transfers instantly, so each OUT is acknowledged at
+        // once, letting the producing process continue (or unblock if it was waiting on
+        // a busy output device). This replaces the retired per-process I/O router.
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => hw.RaiseOutputComplete(e.Device);
     }
 
     private void ToggleIo()
     {
         model.ShowProgramIo = !model.ShowProgramIo;
+    }
+
+    // ---- focus (foreground process) ---------------------------------------
+
+    // Submits a typed number to the focused process's stdin (via the live keyboard
+    // path, which RaiseInputInterrupt routes to the focused process's device).
+    private void SubmitInput(int value)
+    {
+        hw.RaiseInputInterrupt(value);
+    }
+
+    // Tab: move focus to the next live process (wrapping).
+    private void CycleFocus()
+    {
+        List<int> live = LiveProcessIndices();
+        if (live.Count == 0)
+        {
+            SetFocus(-1);
+            return;
+        }
+        int position = live.IndexOf(model.FocusedProcess);
+        int next = (position + 1) % live.Count;
+        SetFocus(live[next]);
+    }
+
+    // Keeps focus on a live process: if nothing is focused, or the focused process has
+    // terminated, focus the lowest-index live process (or none when all are gone).
+    private void EnsureFocus()
+    {
+        List<int> live = LiveProcessIndices();
+        if (live.Count == 0)
+        {
+            SetFocus(-1);
+            return;
+        }
+        if (!live.Contains(model.FocusedProcess))
+        {
+            SetFocus(live[0]);
+        }
+    }
+
+    private void SetFocus(int index)
+    {
+        model.FocusedProcess = index;
+        hw.SetActiveProcess(index);
+    }
+
+    private List<int> LiveProcessIndices()
+    {
+        List<int> live = new List<int>();
+        foreach (BuddyHeapView.ProcessRow row in model.ProcessTable)
+        {
+            if (row.State != ProcessState.Terminated)
+            {
+                live.Add(row.Index);
+            }
+        }
+        return live;
     }
 
     /// <summary>
@@ -263,7 +327,8 @@ public sealed class SpectreDashboard
                 new Layout("kernel")),
             new Layout("middle").SplitColumns(
                 new Layout("procs"),
-                new Layout("buddy")),
+                new Layout("buddy"),
+                new Layout("screen")),
             new Layout("lower").SplitColumns(
                 new Layout("registers"),
                 new Layout("heap"),
@@ -279,11 +344,15 @@ public sealed class SpectreDashboard
             return;
         }
 
+        // Keep focus pointed at a live process (auto-advances when the focused one ends).
+        EnsureFocus();
+
         (IRenderable program, IRenderable kernel) = BuildStreams(frame);
         layout["program"].Update(Panel("Program (user)", program, ActiveColor(frame, true)));
         layout["kernel"].Update(Panel("Kernel / OS", kernel, ActiveColor(frame, false)));
         layout["procs"].Update(Panel("Processes (MLFQ)", BuildProcessAndQueues(frame), Color.Grey));
         layout["buddy"].Update(Panel("Buddy allocator", BuildBuddyTree(frame), Color.Grey));
+        layout["screen"].Update(Panel("Screen (focused I/O)", BuildScreen(), Color.Grey));
         layout["registers"].Update(Panel("Registers", BuildRegisters(frame), Color.Grey));
         layout["heap"].Update(Panel("Heap / free memory", BuildHeap(frame), Color.Grey));
         layout["stats"].Update(Panel("Run stats", BuildStats(frame), Color.Grey));
@@ -653,6 +722,57 @@ public sealed class SpectreDashboard
         return new Rows(lines);
     }
 
+    // ---- shared screen (focused process I/O) ------------------------------
+    // One screen bound to the focused (foreground) process: it shows that process's
+    // own output and the number being typed to it. Tab switches which process is shown.
+
+    private const int ScreenLines = 8;
+
+    private IRenderable BuildScreen()
+    {
+        List<IRenderable> lines = new List<IRenderable>();
+        if (model.FocusedProcess < 0)
+        {
+            lines.Add(new Markup("[grey39](no focused process)[/]"));
+        }
+        else
+        {
+            string name = Markup.Escape(FocusedName());
+            lines.Add(new Markup($"[aqua]▶ P{model.FocusedProcess}[/] [grey]{name}[/]  [grey](Tab switches)[/]"));
+        }
+
+        IReadOnlyList<int> outputs = model.FocusedOutput();
+        if (outputs.Count == 0)
+        {
+            lines.Add(new Markup("[grey39](no output yet)[/]"));
+        }
+        else
+        {
+            int skip = Math.Max(0, outputs.Count - ScreenLines);
+            List<string> shown = new List<string>();
+            for (int i = skip; i < outputs.Count; i++)
+            {
+                shown.Add(outputs[i].ToString());
+            }
+            lines.Add(new Markup("[grey85]" + Markup.Escape(string.Join("  ", shown)) + "[/]"));
+        }
+
+        lines.Add(new Markup($"[grey]>[/] {Markup.Escape(interaction.InputLine)}"));
+        return new Rows(lines);
+    }
+
+    private string FocusedName()
+    {
+        foreach (BuddyHeapView.ProcessRow row in model.ProcessTable)
+        {
+            if (row.Index == model.FocusedProcess)
+            {
+                return PlainTextRenderer.FriendlyName(row.Path);
+            }
+        }
+        return "?";
+    }
+
     // ---- status footer -----------------------------------------------------
 
     private IRenderable BuildStatus(Frame frame)
@@ -667,7 +787,7 @@ public sealed class SpectreDashboard
         {
             state = "[aqua]paused[/]";
         }
-        string keys = "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] back/forward  [grey]o[/] I/O  [grey]q[/] quit";
+        string keys = "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]q[/] quit";
         return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]perf[/] {detail}   {keys}"))
         {
             Border = BoxBorder.None,

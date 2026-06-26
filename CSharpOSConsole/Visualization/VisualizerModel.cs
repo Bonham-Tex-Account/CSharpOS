@@ -112,6 +112,35 @@ public sealed class VisualizerModel
     public PrivilegeLevel CurrentPrivilege { get; set; } = PrivilegeLevel.User;
     public bool ShowProgramIo { get; set; }
 
+    // ---- foreground / shared screen --------------------------------------
+    // The focused (foreground) process index — the one whose screen is shown and whose
+    // stdin the live keyboard feeds. Kept in sync with Hardware.SetActiveProcess.
+    public int FocusedProcess { get; set; } = -1;
+    // Each process's screen output (values it emitted via OUT), keyed by its process
+    // index. The shared screen renders only the focused process's buffer.
+    public Dictionary<int, List<int>> OutputBuffers { get; } = new Dictionary<int, List<int>>();
+
+    // Appends a value to a process's own screen buffer.
+    public void RecordOutput(int sourceProcess, int value)
+    {
+        if (!OutputBuffers.TryGetValue(sourceProcess, out List<int>? buffer))
+        {
+            buffer = new List<int>();
+            OutputBuffers[sourceProcess] = buffer;
+        }
+        buffer.Add(value);
+    }
+
+    // The focused process's screen buffer, or an empty list when none.
+    public IReadOnlyList<int> FocusedOutput()
+    {
+        if (FocusedProcess >= 0 && OutputBuffers.TryGetValue(FocusedProcess, out List<int>? buffer))
+        {
+            return buffer;
+        }
+        return Array.Empty<int>();
+    }
+
     public bool HasOsImage { get; set; }
     public int CurrentIndex { get; set; } = -1;
     public List<BuddyHeapView.ProcessRow> ProcessTable { get; set; } = new List<BuddyHeapView.ProcessRow>();

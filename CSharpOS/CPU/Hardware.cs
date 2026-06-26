@@ -137,6 +137,12 @@ public partial class Hardware
     // only when the resumed process actually changes.
     private int lastContextBase = -1;
 
+    // The foreground (focused) process: the one bound to the live keyboard and screen.
+    // Keyboard input (RaiseInputInterrupt with no device) goes to this process's stdin
+    // device; the host switches focus with Tab. -1 means no process is focused, in
+    // which case keyboard input falls back to device 0 (the bare-harness default).
+    private int activeProcess = -1;
+
     // Set once the first process layout is loaded; guards the user-mode bounds
     // check in IsAddressInProcessRanges so plain unit tests that never call
     // LoadProcessLayout are not rejected.
@@ -199,6 +205,11 @@ public partial class Hardware
     public void SetInstructionPointer(int address) { instructionPointer = address; }
     public PrivilegeLevel GetPrivilegeLevel() { return level; }
     public void SetPrivilegeLevel(PrivilegeLevel value) { level = value; }
+
+    // The foreground process, which owns the live keyboard and screen. The host sets
+    // this (e.g. Tab to cycle focus); -1 means none.
+    public void SetActiveProcess(int index) { activeProcess = index; }
+    public int GetActiveProcess() { return activeProcess; }
 
     // Changes the privilege level, firing PrivilegeChanged on a real transition.
     // Used by the execution-time transition points (dispatch, syscall, return) so
@@ -455,7 +466,7 @@ public partial class Hardware
 
     public void Output(int value, int device)
     {
-        ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = value, Device = device });
+        ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = value, Device = device, SourceProcess = CurrentDeviceId() });
     }
 
     // The device id of the running process: its process-table index, since each
@@ -552,6 +563,19 @@ public partial class Hardware
         return ReadWord(entry + ProcessEntryFdTable + fd * 4);
     }
 
+    // The stdin device of the focused (foreground) process, where live keyboard input
+    // is delivered. Falls back to device 0 when nothing is focused or there is no OS
+    // image, matching the previous single-device behaviour.
+    private int FocusedInputDevice()
+    {
+        if (!OsManaged || activeProcess < 0)
+        {
+            return 0;
+        }
+        int entry = osMemoryBase + OsLayout.ProcessEntryAddress(activeProcess);
+        return ReadWord(entry + ProcessEntryFdTable + StdIn * 4);
+    }
+
     // Records a process index as waiting on a device's input (no duplicates).
     private static void AddInputWaiter(Device device, int processIndex)
     {
@@ -561,18 +585,13 @@ public partial class Hardware
         }
     }
 
-    // The next process to wake for this device's input: the first registered waiter
-    // (removed from the queue), or the device id itself when none is registered —
-    // the device == process-index shim, identical to the previous wake behaviour.
-    private static int NextInputWaiter(Device device, int fallbackProcess)
+    // Removes and returns the first process waiting on this device's input. The caller
+    // must ensure there is a waiter (device.Waiters is non-empty).
+    private static int NextInputWaiter(Device device)
     {
-        if (device.Waiters.Count > 0)
-        {
-            int processIndex = device.Waiters[0];
-            device.Waiters.RemoveAt(0);
-            return processIndex;
-        }
-        return fallbackProcess;
+        int processIndex = device.Waiters[0];
+        device.Waiters.RemoveAt(0);
+        return processIndex;
     }
 
     private int ReadWord(int address)
@@ -621,10 +640,14 @@ public partial class Hardware
         {
             device.Input.Enqueue(interrupt.Value);
             ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Input, Value = interrupt.Value, Device = interrupt.Device });
-            // Wake the first process blocked on this device's input (or the device's
-            // owner under the shim). Wake routines take the target process index in EAX.
-            int target = NextInputWaiter(device, interrupt.Device);
-            DispatchOsRoutine(IvtWakeInput, target);
+            // Wake the first process actually blocked on this device's input. With no
+            // registered waiter the value just stays buffered until a process reads it —
+            // there is no device-as-process fallback. Wake routines take the target
+            // process index in EAX.
+            if (device.Waiters.Count > 0)
+            {
+                DispatchOsRoutine(IvtWakeInput, NextInputWaiter(device));
+            }
         }
         else
         {
@@ -991,10 +1014,11 @@ public partial class Hardware
         device.OutputBusy = true;
     }
 
-    // Raises an input interrupt for device 0 (the default single device).
+    // Raises an input interrupt from the live keyboard: delivered to the focused
+    // (foreground) process's stdin device, or device 0 when nothing is focused.
     public void RaiseInputInterrupt(int value)
     {
-        RaiseInputInterrupt(value, 0);
+        RaiseInputInterrupt(value, FocusedInputDevice());
     }
 
     // Raises an input interrupt for a specific device (== owning process index).
