@@ -54,6 +54,12 @@ public static class Disassembler
             case Instruction.OSRET:         return $"OSRET {Reg(b1)}";
             case Instruction.DREAD:         return $"DREAD [{Reg(b1)}], {Reg(b2)}, {Reg(b3)}";
             case Instruction.DWRITE:        return $"DWRITE {Reg(b1)}, [{Reg(b2)}], {Reg(b3)}";
+            case Instruction.DLEN:          return $"DLEN {Reg(b1)}, {Reg(b2)}";
+            case Instruction.FORK:          return "FORK";
+            case Instruction.EXEC:          return $"EXEC {Reg(b1)}";
+            case Instruction.WAIT:          return $"WAIT {Reg(b1)}";
+            case Instruction.EXIT:          return $"EXIT {Reg(b1)}";
+            case Instruction.SETFOCUS:      return $"SETFOCUS {Reg(b1)}";
             default:                        return $"??? {opcode:X2}";
         }
     }

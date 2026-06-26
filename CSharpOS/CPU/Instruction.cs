@@ -36,6 +36,15 @@ public static class Instruction
     public const byte HLT         = 0x32;
     public const byte IRET        = 0x33;
 
+    // ---- process control (spawning) ---------------------------------------
+    // User-mode instructions that trap into a privileged OS routine (like HLT) to
+    // create/replace/await processes and switch the foreground process.
+    public const byte FORK        = 0x34;
+    public const byte EXEC        = 0x35;
+    public const byte WAIT        = 0x36;
+    public const byte EXIT        = 0x37;
+    public const byte SETFOCUS    = 0x38;
+
     // ---- privileged OS-support opcodes ------------------------------------
     // Used by OS ISA code running in Privileged mode to save/restore a process's
     // full register file, refresh the hardware memory layout from a process-table
@@ -50,6 +59,8 @@ public static class Instruction
     // Privileged mode (absolute addresses); they trap as invalid in user mode.
     public const byte DREAD       = 0x44;
     public const byte DWRITE      = 0x45;
+    // Disk slot content length (used by EXEC to size the new image's allocation).
+    public const byte DLEN        = 0x46;
 
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
@@ -92,6 +103,12 @@ public static class Instruction
         opcodeTable[OSRET]       = InstructionFunctions.OsRet;
         opcodeTable[DREAD]       = InstructionFunctions.DRead;
         opcodeTable[DWRITE]      = InstructionFunctions.DWrite;
+        opcodeTable[DLEN]        = InstructionFunctions.DLen;
+        opcodeTable[FORK]        = InstructionFunctions.Fork;
+        opcodeTable[EXEC]        = InstructionFunctions.Exec;
+        opcodeTable[WAIT]        = InstructionFunctions.Wait;
+        opcodeTable[EXIT]        = InstructionFunctions.Exit;
+        opcodeTable[SETFOCUS]    = InstructionFunctions.SetFocus;
     }
 
     // ---- integral functions ----------------------------------------------

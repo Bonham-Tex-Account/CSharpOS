@@ -25,6 +25,7 @@ public static class OsRoutines
     private const byte EDX = (byte)RegisterName.EDX;
     private const byte ESI = (byte)RegisterName.ESI;
     private const byte EDI = (byte)RegisterName.EDI;
+    private const byte ESP = (byte)RegisterName.ESP;
     private const byte EBP = (byte)RegisterName.EBP;
     private const byte R8  = (byte)RegisterName.R8;
     private const byte R9  = (byte)RegisterName.R9;
@@ -38,9 +39,17 @@ public static class OsRoutines
     private const int Ready      = (int)ProcessState.Ready;
     private const int Blocked    = (int)ProcessState.Blocked;
     private const int Terminated = (int)ProcessState.Terminated;
+    private const int Zombie     = (int)ProcessState.Zombie;
     private const int WaitNone   = (int)WaitReason.None;
+    private const int WaitChild  = (int)WaitReason.ChildProcess;
     private const int User       = (int)PrivilegeLevel.User;
     private const int EntrySize  = Hardware.ProcessEntrySize;
+
+    // Byte offset of the EAX / EIP / ESP slots within an entry's saved register file
+    // (the register file mirrors the live registers: slot = register index * 4).
+    private const int EaxSlot    = (int)RegisterName.EAX * 4;
+    private const int EipSlot    = (int)RegisterName.EIP * 4;
+    private const int EspSlot    = (int)RegisterName.ESP * 4;
 
     public static byte[] BuildOsImage()
     {
@@ -56,6 +65,12 @@ public static class OsRoutines
         int invalid       = OsLayout.CodeBase + asm.CodeLength; EmitInvalidInstruction(asm);
         int allocate      = OsLayout.CodeBase + asm.CodeLength; EmitBuddyAlloc(asm);
         int diskLoad      = OsLayout.CodeBase + asm.CodeLength; EmitDiskLoad(asm);
+        int spawn         = OsLayout.CodeBase + asm.CodeLength; EmitSpawn(asm);
+        int fork          = OsLayout.CodeBase + asm.CodeLength; EmitFork(asm);
+        int exec          = OsLayout.CodeBase + asm.CodeLength; EmitExec(asm);
+        int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
+        EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
+        EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
@@ -79,6 +94,10 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtInvalidInstruction * 4, invalid);
         WriteWord(image, Hardware.IvtAllocate * 4,           allocate);
         WriteWord(image, Hardware.IvtDiskLoad * 4,           diskLoad);
+        WriteWord(image, Hardware.IvtSpawn * 4,              spawn);
+        WriteWord(image, Hardware.IvtFork * 4,               fork);
+        WriteWord(image, Hardware.IvtExec * 4,               exec);
+        WriteWord(image, Hardware.IvtWait * 4,               wait);
         return image;
     }
 
@@ -186,16 +205,18 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
-    // Halt and InvalidInstruction mark the process Terminated then jump to the
-    // shared buddy-free routine which returns its memory and falls through to
-    // resume_mlfq.
+    // Halt (HLT / EXIT) and InvalidInstruction both terminate the running process via the
+    // shared exit_body: free its memory, then either hand its exit status to a parent
+    // waiting in wait(), keep it as a Zombie until the parent waits, or reap it outright
+    // (orphan). HLT/EXIT carry an exit status in EAX; a fault uses status -1.
     private static void EmitHalt(Assembler asm)
     {
+        asm.Mov(R(R8), R(EAX));                    // R8 = exit status (dispatch arg)
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EAX));
         EntryAddress(asm, ECX, EBX);
-        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
-        asm.Jmp("buddy_free_entry");
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryExitStatus, R8);
+        asm.Jmp("exit_body");
     }
 
     private static void EmitInvalidInstruction(Assembler asm)
@@ -203,8 +224,176 @@ public static class OsRoutines
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EAX));
         EntryAddress(asm, ECX, EBX);
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryExitStatus); // fault status = -1
+        asm.Jmp("exit_body");
+    }
+
+    // exit_body: tear down the running process (entry in EBX, ExitStatus already set).
+    // Frees its memory, then resolves who collects its status:
+    //   - a parent currently blocked in wait() on this PID -> deliver status, wake it,
+    //     and reap this entry;
+    //   - else if the parent is still alive -> keep this entry as a Zombie;
+    //   - else (no/dead parent) -> reap this entry now.
+    private static void EmitExitBody(Assembler asm)
+    {
+        asm.Label("exit_body");
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated); // hide from scans
+        SetupPrivilegedStack(asm);
+        asm.Call("free_sub");
+
+        // Scan for a parent blocked in wait() on this PID.
+        LoadField(asm, EBX, Hardware.ProcessEntryPid, R8);   // R8 = my Pid
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));
+        asm.MovImm(R(ESI), 0);
+
+        asm.Label("xb_scan");
+        asm.Mov(R(R9), R(ESI));
+        asm.Cmp(R(R9), R(EDI));
+        asm.Jns("xb_no_waiter");
+        EntryAddress(asm, ESI, R10);
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Blocked);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("xb_next");
+        LoadField(asm, R10, Hardware.ProcessEntryWaitReason, R11);
+        asm.MovImm(R(R12), WaitChild);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("xb_next");
+        LoadField(asm, R10, Hardware.ProcessEntryWaitTarget, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jnz("xb_next");
+        // Found the waiting parent: deliver status (into its EAX), wake it, reap myself.
+        LoadField(asm, EBX, Hardware.ProcessEntryExitStatus, R11);
+        StoreFieldReg(asm, R10, EaxSlot, R11);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryWaitReason, WaitNone);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryTicksUsed, 0);
+        StoreFieldMinusOne(asm, R10, Hardware.ProcessEntryWaitTarget);
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
-        asm.Jmp("buddy_free_entry");
+        asm.Jmp("xb_done");
+
+        asm.Label("xb_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("xb_scan");
+
+        asm.Label("xb_no_waiter");
+        // No waiter: Zombie if the parent is still alive, else reap (orphan).
+        LoadField(asm, EBX, Hardware.ProcessEntryParentPid, R8); // R8 = ParentPid
+        asm.MovImm(R(EAX), 1);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Js("xb_reap");                                       // ParentPid < 1: no parent
+
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));
+        asm.MovImm(R(ESI), 0);
+        asm.Label("xb_pscan");
+        asm.Mov(R(R9), R(ESI));
+        asm.Cmp(R(R9), R(EDI));
+        asm.Jns("xb_reap");                                      // parent not found: orphan
+        EntryAddress(asm, ESI, R10);
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Terminated);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jz("xb_pnext");
+        asm.MovImm(R(R12), Zombie);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jz("xb_pnext");
+        LoadField(asm, R10, Hardware.ProcessEntryPid, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jz("xb_zombie");                                     // a live parent exists
+        asm.Label("xb_pnext");
+        asm.Inc(R(ESI));
+        asm.Jmp("xb_pscan");
+
+        asm.Label("xb_zombie");
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Zombie);
+        asm.Jmp("xb_done");
+
+        asm.Label("xb_reap");
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
+
+        asm.Label("xb_done");
+        // Reap any of my own zombie children: now that I am gone, no one will wait()
+        // for them, so they would otherwise leak. (A child still running becomes an
+        // orphan and is reaped when it later exits.)
+        LoadField(asm, EBX, Hardware.ProcessEntryPid, R8);   // R8 = my Pid
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));
+        asm.MovImm(R(ESI), 0);
+        asm.Label("xb_orphan_scan");
+        asm.Mov(R(R9), R(ESI));
+        asm.Cmp(R(R9), R(EDI));
+        asm.Jns("xb_orphan_done");
+        EntryAddress(asm, ESI, R10);
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Zombie);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("xb_orphan_next");
+        LoadField(asm, R10, Hardware.ProcessEntryParentPid, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jnz("xb_orphan_next");
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryState, Terminated);
+        asm.Label("xb_orphan_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("xb_orphan_scan");
+        asm.Label("xb_orphan_done");
+
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        asm.Jmp("resume_mlfq");
+    }
+
+    // IvtWait: block the caller until child PID (in EAX) terminates. If that child is
+    // already a zombie, reap it and return its status immediately; otherwise mark the
+    // caller Blocked on ChildProcess and switch away — exit_body wakes it later.
+    //   EBX = caller entry, R8 = target child PID
+    private static void EmitWait(Assembler asm)
+    {
+        asm.Mov(R(R8), R(EAX));                    // R8 = target child PID
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        EntryAddress(asm, ECX, EBX);               // EBX = caller (parent) entry
+
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));
+        asm.MovImm(R(ESI), 0);
+
+        asm.Label("wt_scan");
+        asm.Mov(R(R9), R(ESI));
+        asm.Cmp(R(R9), R(EDI));
+        asm.Jns("wt_block");
+        EntryAddress(asm, ESI, R10);
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Zombie);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("wt_next");
+        LoadField(asm, R10, Hardware.ProcessEntryPid, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jnz("wt_next");
+        // Found the zombie child: reap it and resume the caller with its status in EAX.
+        LoadField(asm, R10, Hardware.ProcessEntryExitStatus, R11);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryState, Terminated);
+        asm.SaveRegs(R(EBX));
+        StoreFieldReg(asm, EBX, EaxSlot, R11);
+        asm.LoadRegs(R(EBX));
+        asm.SetLayout(R(EBX));
+        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+
+        asm.Label("wt_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("wt_scan");
+
+        asm.Label("wt_block");
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Blocked);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitChild);
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryWaitTarget, R8);
+        asm.SaveRegs(R(EBX));
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        asm.Jmp("resume_mlfq");
     }
 
     // ---- buddy allocator ---------------------------------------------------
@@ -222,9 +411,24 @@ public static class OsRoutines
     //   R10 = current scan node (inner loop) or leftChild (split loop)
     //   R11, R12, R13 = scratch within split/merge steps
     //   EAX, EBP, R14, R15 = dedicated scratch for bit operations
+    // IvtAllocate: allocate memory for the staged entry (address in EAX). Delegates to
+    // the shared alloc_sub subroutine, then returns to a process via OSRET (no switch).
     private static void EmitBuddyAlloc(Assembler asm)
     {
         asm.Mov(R(EBX), R(EAX));                          // EBX = entry
+        SetupPrivilegedStack(asm);
+        asm.Call("alloc_sub");                            // sets entry.ProgramAddress or -1
+        asm.MovImm(R(EAX), User);
+        asm.OsRet(R(EAX));
+    }
+
+    // alloc_sub: the buddy allocator as a CALL/RET subroutine. Expects EBX = entry;
+    // finds the smallest free block fitting entry.TotalSize, splits ancestors as
+    // needed, and records the base in entry.ProgramAddress (or -1 if none fits).
+    // Reused by IvtAllocate, IvtSpawn, fork, and exec.
+    private static void EmitAllocSub(Assembler asm)
+    {
+        asm.Label("alloc_sub");
 
         LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, ECX); // ECX = needed
 
@@ -358,8 +562,7 @@ public static class OsRoutines
         asm.Store(R(EBP), R(R11));
 
         asm.Label("ba_done");
-        asm.MovImm(R(EAX), User);
-        asm.OsRet(R(EAX));
+        asm.Ret();
     }
 
     // DiskLoad: copy a process's program image from its disk slot into the RAM the
@@ -377,6 +580,322 @@ public static class OsRoutines
         asm.OsRet(R(EAX));
     }
 
+    // IvtSpawn: create a process from scratch (boot creation). Entered with the
+    // process-table entry address in EAX; the host pre-seeds ProgramSize,
+    // RequiredMemory, RequiredStackSize, TotalSize and DiskSlot. Allocates the region,
+    // DREADs the image from disk, and seeds the saved register file, scheduling state,
+    // and a fresh PID — all in ISA. The kernel-section image and fd table are seeded by
+    // the host after this returns.
+    //   EBX = entry, R9 = programAddress, R10 = disk slot, R11 = scratch,
+    //   R12 = ESP offset, R13 = NextPid
+    private static void EmitSpawn(Assembler asm)
+    {
+        asm.Mov(R(EBX), R(EAX));                   // EBX = entry
+        SetupPrivilegedStack(asm);
+        asm.Call("alloc_sub");                     // sets entry.ProgramAddress or -1
+
+        // Bail out (no seeding) if allocation failed.
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R9); // R9 = programAddress
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R9), R(EAX));
+        asm.Js("sp_done");
+
+        // Copy the program image from disk into the allocated RAM.
+        LoadField(asm, EBX, Hardware.ProcessEntryDiskSlot, R10);
+        asm.DRead(R(R9), R(R10), R(R11));          // DREAD programAddress, slot, lenOut
+
+        // Saved registers: EIP offset = 0 (program start); ESP offset = top of the user
+        // stack = TotalSize - KernelStackSize (the kernel stack sits above it).
+        StoreFieldImm(asm, EBX, EipSlot, 0);
+        LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R12);
+        asm.MovImm(R(EAX), Hardware.KernelStackSize);
+        asm.Sub(R(R12), R(EAX));                   // R12 = ESP offset
+        StoreFieldReg(asm, EBX, EspSlot, R12);
+
+        // Scheduling + identity state.
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryLevel, User);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryTicksUsed, 0);
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryParentPid);
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryWaitTarget);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryExitStatus, 0);
+
+        // PID = NextPid++.
+        Imm16(asm, EAX, OsLayout.NextPidOffset);
+        asm.Load(R(R13), R(EAX));
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryPid, R13);
+        asm.Inc(R(R13));
+        Imm16(asm, EAX, OsLayout.NextPidOffset);
+        asm.Store(R(EAX), R(R13));
+
+        asm.Label("sp_done");
+        asm.MovImm(R(EAX), User);
+        asm.OsRet(R(EAX));
+    }
+
+    // IvtFork: duplicate the running (parent) process. Entered via a user FORK trap.
+    // Creates a child in a free slot: copies the parent's sizing fields, buddy-allocs
+    // the child's region, ISA-memcpys the parent's RAM into it, copies the parent's
+    // saved register file (position-independent, so no relocation), assigns a fresh PID
+    // and parentage, then delivers the child PID to the parent (EAX) and 0 to the child
+    // and re-enters the scheduler. On no free slot / no memory, the parent gets -1.
+    //   ECX = parent index, R8 = parent entry, ESI = child index, R9 = child entry,
+    //   EBX = child entry (across alloc_sub), EDX = child PID
+    private static void EmitFork(Assembler asm)
+    {
+        // Parent index + entry, then persist the parent's current frame to its entry.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                  // ECX = parent index
+        EntryAddress(asm, ECX, R8);                // R8 = parent entry
+        asm.SaveRegs(R(R8));                        // parent entry now holds current regs/EIP/level
+
+        // Find a free child slot: a Terminated slot in [0, count), else a fresh slot if
+        // the table is not full; otherwise fork fails.
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));                  // EDI = count
+        asm.MovImm(R(ESI), 0);                     // ESI = i
+
+        asm.Label("fk_scan");
+        asm.Mov(R(R10), R(ESI));
+        asm.Cmp(R(R10), R(EDI));
+        asm.Jns("fk_fresh");                       // i >= count: no recycled slot
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryState, R10);
+        asm.MovImm(R(R11), Terminated);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jz("fk_got");                          // reusable slot found
+        asm.Inc(R(ESI));
+        asm.Jmp("fk_scan");
+
+        asm.Label("fk_fresh");
+        asm.MovImm(R(R10), OsLayout.MaxProcesses);
+        asm.Cmp(R(ESI), R(R10));
+        asm.Jns("fk_fail");                        // table full
+        asm.Mov(R(R11), R(ESI));
+        asm.Inc(R(R11));
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Store(R(EAX), R(R11));                 // bump count for the fresh slot
+
+        asm.Label("fk_got");
+        EntryAddress(asm, ESI, R9);                // R9 = child entry
+
+        // Copy the parent's sizing fields to the child (ProgramAddress is set by alloc).
+        ForkCopyField(asm, R8, R9, Hardware.ProcessEntryProgramSize);
+        ForkCopyField(asm, R8, R9, Hardware.ProcessEntryRequiredMemory);
+        ForkCopyField(asm, R8, R9, Hardware.ProcessEntryRequiredStackSize);
+        ForkCopyField(asm, R8, R9, Hardware.ProcessEntryTotalSize);
+        ForkCopyField(asm, R8, R9, Hardware.ProcessEntryDiskSlot);
+
+        // Allocate the child's region (clobbers all registers except EBX = child entry).
+        asm.Mov(R(EBX), R(R9));
+        SetupPrivilegedStack(asm);
+        asm.Call("alloc_sub");                     // sets child.ProgramAddress or -1
+
+        // Reload the parent entry (alloc clobbered R8) from the unchanged current index.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        EntryAddress(asm, ECX, R8);                // R8 = parent entry
+
+        // If the child allocation failed, free the slot and return -1 to the parent.
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jns("fk_alloc_ok");                    // ProgramAddress >= 0
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
+        StoreFieldMinusOne(asm, R8, EaxSlot);      // parent EAX = -1
+        asm.Jmp("fk_resume");
+
+        asm.Label("fk_alloc_ok");
+        // memcpy the parent's RAM region [parentBase, +TotalSize) into the child region.
+        LoadField(asm, R8, Hardware.ProcessEntryProgramAddress, R10);  // R10 = parent base
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R11); // R11 = child base
+        LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R12);      // R12 = total
+        asm.MovImm(R(R13), 0);                     // R13 = offset
+
+        asm.Label("fk_copy");
+        asm.Cmp(R(R13), R(R12));
+        asm.Jns("fk_copy_done");                   // offset >= total
+        asm.Mov(R(R14), R(R10));
+        asm.Add(R(R14), R(R13));
+        asm.Load(R(R15), R(R14));                  // R15 = *(parentBase + offset)
+        asm.Mov(R(R14), R(R11));
+        asm.Add(R(R14), R(R13));
+        asm.Store(R(R14), R(R15));                 // *(childBase + offset) = R15
+        asm.MovImm(R(EAX), 4);
+        asm.Add(R(R13), R(EAX));                   // offset += 4
+        asm.Jmp("fk_copy");
+        asm.Label("fk_copy_done");
+
+        // Copy the parent's saved register file (entry bytes 0..95) to the child. ESP
+        // and the saved EIP are base-relative, so the copy needs no relocation.
+        asm.MovImm(R(R13), 0);
+        asm.Label("fk_regs");
+        asm.MovImm(R(EAX), 96);
+        asm.Cmp(R(R13), R(EAX));
+        asm.Jns("fk_regs_done");
+        asm.Mov(R(R14), R(R8));
+        asm.Add(R(R14), R(R13));
+        asm.Load(R(R15), R(R14));                  // R15 = parentEntry[offset]
+        asm.Mov(R(R14), R(EBX));
+        asm.Add(R(R14), R(R13));
+        asm.Store(R(R14), R(R15));                 // childEntry[offset] = R15
+        asm.MovImm(R(EAX), 4);
+        asm.Add(R(R13), R(EAX));
+        asm.Jmp("fk_regs");
+        asm.Label("fk_regs_done");
+
+        // Child scheduling + identity state.
+        LoadField(asm, R8, Hardware.ProcessEntryLevel, R10);
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryLevel, R10);      // inherit parent level
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryTicksUsed, 0);
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryWaitTarget);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryExitStatus, 0);
+        LoadField(asm, R8, Hardware.ProcessEntryPid, R10);
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryParentPid, R10);  // ParentPid = parent.Pid
+
+        // Child PID = NextPid++ (keep the child PID in EDX to deliver to the parent).
+        Imm16(asm, EAX, OsLayout.NextPidOffset);
+        asm.Load(R(EDX), R(EAX));
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryPid, EDX);
+        asm.Mov(R(R10), R(EDX));
+        asm.Inc(R(R10));
+        Imm16(asm, EAX, OsLayout.NextPidOffset);
+        asm.Store(R(EAX), R(R10));
+
+        // The child owns its own I/O device (device == slot index shim): fds = child idx.
+        asm.Mov(R(R11), R(EBX));
+        asm.MovImm16(R(EAX), OsLayout.ProcessTableOffset);
+        asm.Sub(R(R11), R(EAX));
+        asm.MovImm(R(EAX), EntrySize);
+        asm.Div(R(R11), R(EAX));                   // R11 = child index
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryFdTable + StdIn * 4, R11);
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryFdTable + StdOut * 4, R11);
+
+        // Deliver results: child sees 0, parent sees the child PID (in their EAX slots).
+        StoreFieldImm(asm, EBX, EaxSlot, 0);
+        StoreFieldReg(asm, R8, EaxSlot, EDX);
+
+        asm.Label("fk_resume");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                  // ECX = current (parent) index for round-robin
+        asm.Jmp("resume_mlfq");
+
+        asm.Label("fk_fail");
+        // Table full: nothing allocated; the parent gets -1.
+        StoreFieldMinusOne(asm, R8, EaxSlot);
+        asm.Jmp("fk_resume");
+    }
+
+    // IvtExec: replace the running process's image with the program in the disk slot
+    // delivered in EAX. Frees the old region, reallocates for the new program's size,
+    // DREADs the new image plus the (disk-staged) kernel image, resets the register file
+    // (keeping the PID/parentage), and resumes the process running the new program. On
+    // out-of-memory the process is terminated.
+    //   EBX = entry (kept across free_sub/alloc_sub), R8..R15 = scratch
+    private static void EmitExec(Assembler asm)
+    {
+        asm.Mov(R(R8), R(EAX));                    // R8 = new program slot
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        EntryAddress(asm, ECX, EBX);               // EBX = current entry
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryDiskSlot, R8); // entry.DiskSlot = new slot
+
+        // Free the OLD region first — the entry still holds the old ProgramAddress and
+        // TotalSize that free_sub reads (DiskSlot, which we changed, is not read by it).
+        SetupPrivilegedStack(asm);
+        asm.Call("free_sub");
+
+        // Recompute sizing from the entry (still holds old ProgramSize/TotalSize; the new
+        // slot is in DiskSlot): newLen via DLEN, newTotal = oldTotal - oldProgramSize + newLen.
+        LoadField(asm, EBX, Hardware.ProcessEntryDiskSlot, R8);
+        asm.DLen(R(R8), R(R9));                    // R9 = newLen
+        LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);   // R10 = oldTotal
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramSize, R11); // R11 = oldProgramSize
+        asm.Mov(R(R12), R(R10));
+        asm.Sub(R(R12), R(R11));
+        asm.Add(R(R12), R(R9));                    // R12 = newTotal
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryProgramSize, R9);
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryTotalSize, R12);
+
+        // Allocate the new region (reads entry.TotalSize = newTotal).
+        SetupPrivilegedStack(asm);
+        asm.Call("alloc_sub");                     // sets entry.ProgramAddress or -1
+
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R9);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R9), R(EAX));
+        asm.Jns("ex_ok");
+        // Out of memory: the old image is already gone, so terminate the process.
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        asm.Jmp("resume_mlfq");
+
+        asm.Label("ex_ok");
+        // DREAD the new program image into the allocated region (R9 = ProgramAddress).
+        LoadField(asm, EBX, Hardware.ProcessEntryDiskSlot, R10);
+        asm.DRead(R(R9), R(R10), R(R11));
+
+        // DREAD the kernel image into the kernel section: ProgramAddress + newLen + header.
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramSize, R11); // newLen
+        asm.Mov(R(R12), R(R9));
+        asm.Add(R(R12), R(R11));
+        asm.MovImm(R(EAX), Hardware.KernelHeaderSize);
+        asm.Add(R(R12), R(EAX));                   // R12 = kernel image destination
+        Imm16(asm, EAX, OsLayout.KernelImageSlotOffset);
+        asm.Load(R(R13), R(EAX));
+        asm.DRead(R(R12), R(R13), R(R14));
+
+        // Reset the register file to zero (24 words), so the new program starts fresh.
+        asm.MovImm(R(R13), 0);
+        asm.Label("ex_clear");
+        asm.MovImm(R(EAX), 96);
+        asm.Cmp(R(R13), R(EAX));
+        asm.Jns("ex_clear_done");
+        asm.Mov(R(R14), R(EBX));
+        asm.Add(R(R14), R(R13));
+        asm.MovImm(R(R15), 0);
+        asm.Store(R(R14), R(R15));
+        asm.MovImm(R(EAX), 4);
+        asm.Add(R(R13), R(EAX));
+        asm.Jmp("ex_clear");
+        asm.Label("ex_clear_done");
+
+        // ESP = top of the user stack = newTotal - KernelStackSize (EIP stays 0).
+        LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);
+        asm.MovImm(R(EAX), Hardware.KernelStackSize);
+        asm.Sub(R(R10), R(EAX));
+        StoreFieldReg(asm, EBX, EspSlot, R10);
+
+        // Scheduling state (keep Pid/ParentPid — exec preserves identity).
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryLevel, User);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryTicksUsed, 0);
+
+        // Resume the process running its new image (it is still the current process).
+        asm.LoadRegs(R(EBX));
+        asm.SetLayout(R(EBX));
+        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+    }
+
+    private const int StdIn  = Hardware.StdIn;
+    private const int StdOut = Hardware.StdOut;
+
+    // Copies one 4-byte field from the source entry to the destination entry.
+    private static void ForkCopyField(Assembler asm, byte srcEntry, byte dstEntry, int fieldOffset)
+    {
+        LoadField(asm, srcEntry, fieldOffset, R10);
+        StoreFieldReg(asm, dstEntry, fieldOffset, R10);
+    }
+
     // BuddyFree: mark the terminated process's memory block as free in the buddy tree
     // and merge with its buddy recursively while the buddy is also free. Expects
     // EBX = process-table entry (already marked Terminated). Ends with Jmp("resume_mlfq").
@@ -390,7 +909,7 @@ public static class OsRoutines
     //   EAX, EBP, R14, R15 = bit-op scratch
     private static void EmitBuddyFree(Assembler asm)
     {
-        asm.Label("buddy_free_entry");
+        asm.Label("free_sub");
 
         LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R9);  // R9 = programAddress
         LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);       // R10 = totalSize
@@ -479,7 +998,7 @@ public static class OsRoutines
         asm.Jmp("bf_merge");
 
         asm.Label("bf_done");
-        asm.Jmp("resume_mlfq");
+        asm.Ret();
     }
 
     // ---- bit operation helpers ---------------------------------------------
@@ -694,6 +1213,25 @@ public static class OsRoutines
         asm.Add(R(EBP), R(EAX));
         asm.MovImm(R(EAX), value);
         asm.Store(R(EBP), R(EAX));
+    }
+
+    // Stores -1 into a field (MovImm is 8-bit, so build -1 as 0 then decrement).
+    private static void StoreFieldMinusOne(Assembler asm, byte entry, int fieldOffset)
+    {
+        asm.Mov(R(EBP), R(entry));
+        asm.MovImm(R(EAX), fieldOffset);
+        asm.Add(R(EBP), R(EAX));
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Store(R(EBP), R(EAX));
+    }
+
+    // Points the live ESP at the privileged scratch stack so a routine can CALL/RET
+    // shared subroutines. Safe to clobber: an OS routine treats the live registers as
+    // scratch (the interrupted process's real ESP is held in its saved frame).
+    private static void SetupPrivilegedStack(Assembler asm)
+    {
+        Imm16(asm, ESP, OsLayout.PrivilegedStackTop);
     }
 
     private static void WriteWord(byte[] buffer, int offset, int value)

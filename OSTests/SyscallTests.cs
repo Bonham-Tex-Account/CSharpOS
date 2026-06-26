@@ -126,9 +126,10 @@ public class SyscallTests : IDisposable
         Assert.Equal(4, ReadWord(hw, section + Hardware.KernelTrapInfoOffset + 8));
         // user EAX saved into the kernel-section save area
         Assert.Equal(99, ReadWord(hw, section + Hardware.KernelSaveAreaOffset));
-        // running on the process's kernel stack
+        // running on the process's kernel stack; ESP is an offset from the kernel
+        // section base (position-independent model), so subtract that base (section).
         int kernelStackTop = section + Hardware.KernelHeaderSize + LayoutUserMemory + LayoutUserStack + Hardware.KernelStackSize;
-        Assert.Equal(kernelStackTop, hw.ReadRegister(RegisterName.ESP));
+        Assert.Equal(kernelStackTop - section, hw.ReadRegister(RegisterName.ESP));
     }
 
     [Fact]

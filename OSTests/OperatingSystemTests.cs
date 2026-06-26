@@ -113,7 +113,8 @@ public class OperatingSystemTests : IDisposable
         int expectedTop = process.ProgramAddress + program.Length + kernelSection
             + process.RequiredMemory + process.RequiredStackSize;
         int entry = OsLayout.ProcessEntryAddress(0);
-        Assert.Equal(expectedTop, ReadWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP)));
+        // ESP is stored as an offset from the program base (position-independent model).
+        Assert.Equal(expectedTop - process.ProgramAddress, ReadWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP)));
     }
 
     [Fact]
@@ -164,6 +165,55 @@ public class OperatingSystemTests : IDisposable
         }
 
         Assert.False(os.HasProcesses);
+    }
+
+    [Fact]
+    public void LoadProcess_AssignsMonotonicUniquePids_StartingAtOne()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        byte[] program = new byte[] { 0, 0, 0, 0 };
+
+        Process first = new Process(CreateProgramFile(program), 16, 16);
+        Process second = new Process(CreateProgramFile(program), 16, 16);
+        Process third = new Process(CreateProgramFile(program), 16, 16);
+        os.LoadProcess(first);
+        os.LoadProcess(second);
+        os.LoadProcess(third);
+
+        Assert.Equal(1, first.Pid);
+        Assert.Equal(2, second.Pid);
+        Assert.Equal(3, third.Pid);
+
+        // The PID is also recorded in the process-table entry, with no parent / wait target.
+        int entry0 = OsLayout.ProcessEntryAddress(0);
+        Assert.Equal(1, ReadWord(hw, entry0 + Hardware.ProcessEntryPid));
+        Assert.Equal(-1, ReadWord(hw, entry0 + Hardware.ProcessEntryParentPid));
+        Assert.Equal(-1, ReadWord(hw, entry0 + Hardware.ProcessEntryWaitTarget));
+    }
+
+    [Fact]
+    public void Spawn_SeedsRegistersStateAndPid_InIsa()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        byte[] program = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }; // 8-byte image
+        Process process = new Process(CreateProgramFile(program), 64, 64);
+        os.LoadProcess(process);
+
+        // IvtSpawn seeds the saved register file: EIP offset 0 (program start) and ESP
+        // offset = TotalSize - KernelStackSize (top of the user stack, base-relative).
+        int entry = OsLayout.ProcessEntryAddress(0);
+        int total = ReadWord(hw, entry + Hardware.ProcessEntryTotalSize);
+        Assert.Equal(0, ReadWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP)));
+        Assert.Equal(total - Hardware.KernelStackSize, ReadWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP)));
+
+        // ...and the scheduling/identity state.
+        Assert.Equal((int)ProcessState.Ready, ReadWord(hw, entry + Hardware.ProcessEntryState));
+        Assert.Equal((int)PrivilegeLevel.User, ReadWord(hw, entry + Hardware.ProcessEntryLevel));
+        Assert.Equal(0, ReadWord(hw, entry + Hardware.ProcessEntryPriority));
+        Assert.Equal(1, ReadWord(hw, entry + Hardware.ProcessEntryPid));
+        Assert.Equal(-1, ReadWord(hw, entry + Hardware.ProcessEntryParentPid));
     }
 
     [Fact]

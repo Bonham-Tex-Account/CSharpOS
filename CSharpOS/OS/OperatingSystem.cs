@@ -69,6 +69,13 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, OsLayout.BuddyHeapStartOffset, heapStart);
         WriteWord(hw, OsLayout.BuddyHeapSizeOffset, heapSize);
         WriteWord(hw, OsLayout.BoostTimerOffset, OsLayout.BoostInterval);
+        WriteWord(hw, OsLayout.NextPidOffset, 1); // PIDs start at 1 (0 = "no process")
+
+        // Stage the syscall (kernel) image to a disk slot so the ISA EXEC routine can
+        // re-load it into a re-execed process's kernel section (boot creation still
+        // writes it from C#). The slot id lives in OS data for the routine to read.
+        int kernelImageSlot = hw.Disk.Store(KernelImage);
+        WriteWord(hw, OsLayout.KernelImageSlotOffset, kernelImageSlot);
         WriteWord(hw, OsLayout.QuantumTableOffset + 0,  1);
         WriteWord(hw, OsLayout.QuantumTableOffset + 4,  2);
         WriteWord(hw, OsLayout.QuantumTableOffset + 8,  4);
@@ -163,8 +170,11 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, entry + Hardware.ProcessEntryDiskSlot, diskSlot);
         WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Terminated); // placeholder until allocated
 
-        // First-fit allocation runs as ISA code; it sets ProgramAddress or -1 on failure.
-        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
+        // Create the process in ISA: IvtSpawn allocates the region, DREADs the image
+        // from disk, and seeds the saved register file (EIP/ESP offsets), scheduling
+        // state, and a fresh monotonic PID. It sets ProgramAddress = -1 if no memory
+        // was available.
+        hw.RunOsRoutineSynchronously(Hardware.IvtSpawn, entry);
         int programAddress = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
         if (programAddress < 0)
         {
@@ -172,25 +182,14 @@ public abstract class OperatingSystem : IOperatingSystem
             return;
         }
 
-        // Copy the program image from its disk slot into the allocated RAM (ISA DREAD).
-        hw.RunOsRoutineSynchronously(Hardware.IvtDiskLoad, entry);
-
         // The program image is now in RAM; place the per-process kernel section after it.
         if (KernelImage.Length > 0)
         {
             hw.WriteBytes(programAddress + programLength + Hardware.KernelHeaderSize, KernelImage);
         }
 
-        // Seed the saved register file: start at the program, with ESP at the top of
-        // the user stack, in User mode and Ready to run.
-        int userStackTop = programAddress + programLength + kernelSection + process.RequiredMemory + process.RequiredStackSize;
-        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), programAddress);
-        WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP), userStackTop);
-        WriteWord(hw, entry + Hardware.ProcessEntryLevel, (int)PrivilegeLevel.User);
-        WriteWord(hw, entry + Hardware.ProcessEntryWaitReason, (int)WaitReason.None);
-        WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Ready);
-        WriteWord(hw, entry + Hardware.ProcessEntryPriority, 0);
-        WriteWord(hw, entry + Hardware.ProcessEntryTicksUsed, 0);
+        // Read back the PID the spawn routine assigned.
+        process.Pid = ReadWord(hw, entry + Hardware.ProcessEntryPid);
 
         // Seed file descriptors: stdin (0) and stdout (1) point at the process's own
         // device (device id == slot index, the behavior-preserving shim). The focus

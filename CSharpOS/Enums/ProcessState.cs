@@ -10,5 +10,8 @@ public enum ProcessState
 {
     Ready,
     Blocked,
-    Terminated
+    Terminated,
+    // Terminated but not yet reaped: the entry is retained (holding Pid/ParentPid/
+    // ExitStatus) until the parent's wait collects the exit status.
+    Zombie
 }
