@@ -108,9 +108,9 @@ public abstract class OperatingSystem : IOperatingSystem
     }
 
     // ---- process loading -------------------------------------------------
-    // Reads the program, runs the ISA allocator to reserve memory, then seeds a
-    // process-table entry (image bytes, kernel section, initial registers) and marks
-    // it Ready for the scheduler.
+    // Resolves the program's disk slot (auto-staging a file-path process on first
+    // load), runs the ISA allocator — which now also DREADs the image from disk into
+    // RAM — then seeds the process-table entry and marks it Ready for the scheduler.
     public void LoadProcess(Process process)
     {
         if (hardware == null)
@@ -119,7 +119,23 @@ public abstract class OperatingSystem : IOperatingSystem
         }
         Hardware hw = hardware;
 
-        byte[] program = File.ReadAllBytes(process.ProgramFilePath);
+        // Resolve the program's disk slot. A file-path process auto-stages its bytes
+        // to a slot the first time it loads, so the image always originates on disk;
+        // a slot-based process already references one.
+        int diskSlot = process.ProgramSlot;
+        if (diskSlot < 0)
+        {
+            byte[] fileBytes = File.ReadAllBytes(process.ProgramFilePath);
+            diskSlot = hw.Disk.Store(fileBytes);
+            if (diskSlot < 0)
+            {
+                log.WriteLine($"[LOAD FAILED] Disk full: {process.ProgramFilePath}");
+                return;
+            }
+            process.ProgramSlot = diskSlot;
+        }
+
+        int programLength = hw.Disk.GetLength(diskSlot);
 
         // The memory region must hold the register-file save block plus the mode slot.
         int minMemory = hw.GetRegisterFileSize() + 4;
@@ -129,42 +145,45 @@ public abstract class OperatingSystem : IOperatingSystem
         }
 
         int kernelSection = Hardware.KernelHeaderSize + KernelImage.Length;
-        int total = program.Length + kernelSection + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
+        int total = programLength + kernelSection + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
         int slot = FindFreeSlot(hw);
         if (slot < 0)
         {
-            log.WriteLine($"[LOAD FAILED] Process table full: {process.ProgramFilePath}");
+            log.WriteLine($"[LOAD FAILED] Process table full: {ProcessName(process, diskSlot)}");
             return;
         }
 
         int entry = OsLayout.ProcessEntryAddress(slot);
         ClearEntry(hw, entry);
-        WriteWord(hw, entry + Hardware.ProcessEntryProgramSize, program.Length);
+        WriteWord(hw, entry + Hardware.ProcessEntryProgramSize, programLength);
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredMemory, process.RequiredMemory);
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredStackSize, process.RequiredStackSize);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, total);
+        WriteWord(hw, entry + Hardware.ProcessEntryDiskSlot, diskSlot);
         WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Terminated); // placeholder until allocated
 
         // First-fit allocation runs as ISA code; it sets ProgramAddress or -1 on failure.
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
         int programAddress = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
         if (programAddress < 0)
         {
-            log.WriteLine($"[LOAD FAILED] Not enough memory for process: {process.ProgramFilePath}");
+            log.WriteLine($"[LOAD FAILED] Not enough memory for process: {ProcessName(process, diskSlot)}");
             return;
         }
 
-        // Place the program image and the per-process kernel section.
-        hw.WriteBytes(programAddress, program);
+        // Copy the program image from its disk slot into the allocated RAM (ISA DREAD).
+        hw.RunOsRoutineSynchronously(Hardware.IvtDiskLoad, entry);
+
+        // The program image is now in RAM; place the per-process kernel section after it.
         if (KernelImage.Length > 0)
         {
-            hw.WriteBytes(programAddress + program.Length + Hardware.KernelHeaderSize, KernelImage);
+            hw.WriteBytes(programAddress + programLength + Hardware.KernelHeaderSize, KernelImage);
         }
 
         // Seed the saved register file: start at the program, with ESP at the top of
         // the user stack, in User mode and Ready to run.
-        int userStackTop = programAddress + program.Length + kernelSection + process.RequiredMemory + process.RequiredStackSize;
+        int userStackTop = programAddress + programLength + kernelSection + process.RequiredMemory + process.RequiredStackSize;
         WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), programAddress);
         WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP), userStackTop);
         WriteWord(hw, entry + Hardware.ProcessEntryLevel, (int)PrivilegeLevel.User);
@@ -188,10 +207,21 @@ public abstract class OperatingSystem : IOperatingSystem
 
         // Keep the C# descriptor and the name map in sync for callers/observers.
         process.ProgramAddress = programAddress;
-        process.ProgramSize = program.Length;
-        process.RegisterStateAddress = programAddress + program.Length + kernelSection;
+        process.ProgramSize = programLength;
+        process.RegisterStateAddress = programAddress + programLength + kernelSection;
         process.InstructionPointer = programAddress;
-        namesByBase[programAddress] = process.ProgramFilePath;
+        namesByBase[programAddress] = ProcessName(process, diskSlot);
+    }
+
+    // A display name for a process: its program file path, or a disk-slot label when
+    // it was created slot-based (no file path).
+    private static string ProcessName(Process process, int diskSlot)
+    {
+        if (string.IsNullOrEmpty(process.ProgramFilePath))
+        {
+            return $"slot {diskSlot}";
+        }
+        return process.ProgramFilePath;
     }
 
     // Resolves the program name for a context-switch event's program base.

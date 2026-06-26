@@ -395,24 +395,26 @@ public class OsSeedDataTests
 
     // ---- IVT entries seeded by BuildOsImage ---------------------------------
 
-    // EDGE CASE: The IVT entry for IvtLoadProcess must point into the code region
-    // [CodeBase, DataBase) so that RunOsRoutineSynchronously can dispatch it.
-    // If it points to 0 or outside the code region, every allocation returns -1.
-    [Fact]
-    public void BuildOsImage_IvtLoadProcessEntry_PointsIntoCodeRegion() // EDGE CASE
+    // EDGE CASE: The IVT entries for IvtAllocate and IvtDiskLoad must point into the
+    // code region [CodeBase, DataBase) so that RunOsRoutineSynchronously can dispatch
+    // them. If either points to 0 or outside the code region, loading is broken.
+    [Theory]
+    [InlineData(Hardware.IvtAllocate)]
+    [InlineData(Hardware.IvtDiskLoad)]
+    public void BuildOsImage_LoadRoutineEntry_PointsIntoCodeRegion(int vector) // EDGE CASE
     {
         // Arrange
         byte[] image = OsRoutines.BuildOsImage();
 
-        // Act: read the IVT entry for IvtLoadProcess (4-byte little-endian word).
-        int offset = Hardware.IvtLoadProcess * 4;
+        // Act: read the IVT entry (4-byte little-endian word).
+        int offset = vector * 4;
         int entryAddress = image[offset] | (image[offset + 1] << 8) | (image[offset + 2] << 16) | (image[offset + 3] << 24);
 
         // Assert: must point into the code region.
         Assert.True(entryAddress >= OsLayout.CodeBase,
-            $"IvtLoadProcess entry ({entryAddress}) is below CodeBase ({OsLayout.CodeBase}).");
+            $"IVT vector {vector} entry ({entryAddress}) is below CodeBase ({OsLayout.CodeBase}).");
         Assert.True(entryAddress < OsLayout.DataBase,
-            $"IvtLoadProcess entry ({entryAddress}) is at or above DataBase ({OsLayout.DataBase}).");
+            $"IVT vector {vector} entry ({entryAddress}) is at or above DataBase ({OsLayout.DataBase}).");
     }
 
     // EDGE CASE: The IVT entry for IvtHalt must point into the code region.
@@ -448,7 +450,7 @@ public class OsSeedDataTests
             $"IvtContextSwitch entry ({entryAddress}) does not point into code region [{OsLayout.CodeBase}, {OsLayout.DataBase}).");
     }
 
-    // EDGE CASE: All 9 used IVT entries must point into the code region.
+    // EDGE CASE: All 10 used IVT entries must point into the code region.
     // A single loop test catches any inadvertently zeroed or wrongly-ordered entry.
     [Fact]
     public void BuildOsImage_AllUsedIvtEntries_PointIntoCodeRegion() // EDGE CASE
@@ -465,7 +467,8 @@ public class OsSeedDataTests
             Hardware.IvtWakeOutput,
             Hardware.IvtHalt,
             Hardware.IvtInvalidInstruction,
-            Hardware.IvtLoadProcess
+            Hardware.IvtAllocate,
+            Hardware.IvtDiskLoad
         };
 
         // Act + Assert
@@ -478,25 +481,25 @@ public class OsSeedDataTests
         }
     }
 
-    // POTENTIAL DYSFUNCTION: IvtLoadProcess must point to the BuddyAlloc entry, NOT
-    // to the resume_mlfq label (which appears directly after BuddyFree). If the
-    // addresses were accidentally emitted in the wrong order, IvtLoadProcess would
-    // jump past the alloc logic into the scheduler tail, returning -1 every time.
+    // POTENTIAL DYSFUNCTION: IvtAllocate must point to the BuddyAlloc entry, NOT to
+    // the resume_mlfq label (which appears directly after BuddyFree). If the addresses
+    // were accidentally emitted in the wrong order, IvtAllocate would jump past the
+    // alloc logic into the scheduler tail, returning -1 every time.
     [Fact]
-    public void BuildOsImage_IvtLoadProcess_PointsBeforeIvtHalt_InCodeOrder() // POTENTIAL DYSFUNCTION
+    public void BuildOsImage_IvtAllocate_PointsBeforeIvtHalt_InCodeOrder() // POTENTIAL DYSFUNCTION
     {
         // Arrange
         byte[] image = OsRoutines.BuildOsImage();
 
         // Act
-        int loadOffset  = Hardware.IvtLoadProcess * 4;
+        int allocOffset = Hardware.IvtAllocate * 4;
         int haltOffset  = Hardware.IvtHalt * 4;
-        int loadAddress = image[loadOffset]  | (image[loadOffset  + 1] << 8) | (image[loadOffset  + 2] << 16) | (image[loadOffset  + 3] << 24);
-        int haltAddress = image[haltOffset]  | (image[haltOffset  + 1] << 8) | (image[haltOffset  + 2] << 16) | (image[haltOffset  + 3] << 24);
+        int allocAddress = image[allocOffset] | (image[allocOffset + 1] << 8) | (image[allocOffset + 2] << 16) | (image[allocOffset + 3] << 24);
+        int haltAddress  = image[haltOffset]  | (image[haltOffset  + 1] << 8) | (image[haltOffset  + 2] << 16) | (image[haltOffset  + 3] << 24);
 
-        // Assert: per the emit order in BuildOsImage, Halt is emitted before LoadProcess.
-        // So loadAddress > haltAddress in code order.
-        Assert.True(loadAddress > haltAddress,
-            $"IvtLoadProcess ({loadAddress}) should be assembled after IvtHalt ({haltAddress}); emit order may be wrong.");
+        // Assert: per the emit order in BuildOsImage, Halt is emitted before Allocate.
+        // So allocAddress > haltAddress in code order.
+        Assert.True(allocAddress > haltAddress,
+            $"IvtAllocate ({allocAddress}) should be assembled after IvtHalt ({haltAddress}); emit order may be wrong.");
     }
 }

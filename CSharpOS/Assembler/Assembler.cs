@@ -198,6 +198,18 @@ public sealed partial class Assembler
         Emit(Instruction.OSRET, (byte)levelRegister, 0, 0);
     }
 
+    // Privileged disk transfers: copy a slot into RAM (DREAD writes the byte count
+    // into lengthOut), and copy a RAM range into a slot (DWRITE).
+    public void DRead(RegisterName dest, RegisterName slot, RegisterName lengthOut)
+    {
+        Emit(Instruction.DREAD, (byte)dest, (byte)slot, (byte)lengthOut);
+    }
+
+    public void DWrite(RegisterName slot, RegisterName src, RegisterName length)
+    {
+        Emit(Instruction.DWRITE, (byte)slot, (byte)src, (byte)length);
+    }
+
     // Reserves a 4-byte zero-initialized slot in the data section.
     public void DataInt(string name)
     {

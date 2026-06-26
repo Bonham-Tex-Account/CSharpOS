@@ -165,4 +165,63 @@ public class OperatingSystemTests : IDisposable
 
         Assert.False(os.HasProcesses);
     }
+
+    [Fact]
+    public void LoadProcess_SlotBased_CopiesTheDiskImageIntoRamViaDread()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 7);
+        asm.Hlt();
+        byte[] image = asm.Build();
+
+        int slot = hw.Disk.Store(image);
+        Process process = new Process(slot, 16, 16);
+        os.LoadProcess(process);
+
+        // The allocator's DREAD placed the program image at the allocated address.
+        Assert.Equal(image.Length, process.ProgramSize);
+        byte[] inRam = new byte[image.Length];
+        for (int i = 0; i < image.Length; i++)
+        {
+            inRam[i] = hw.ReadBytes(process.ProgramAddress + i)[0];
+        }
+        Assert.Equal(image, inRam);
+
+        // And it actually runs (schedules into User mode).
+        for (int i = 0; i < 100 && !os.HasRunningProcess; i++)
+        {
+            hw.Run();
+        }
+        Assert.True(os.HasRunningProcess);
+    }
+
+    [Fact]
+    public void LoadProcess_SlotBasedAndFilePath_ProduceIdenticalRamImages()
+    {
+        byte[] program = new byte[] { 0x02, 0x00, 0x05, 0x00, 0x32, 0x00, 0x00, 0x00 };
+
+        // File-path process: auto-stages to a disk slot, then loads from it.
+        BasicOS fileOs = new BasicOS(new StringWriter());
+        Hardware fileHw = new Hardware(Memory, Test.AllRegisters(), fileOs);
+        Process fileProcess = new Process(CreateProgramFile(program), 16, 16);
+        fileOs.LoadProcess(fileProcess);
+
+        // Slot-based process: the image is staged explicitly first.
+        BasicOS slotOs = new BasicOS(new StringWriter());
+        Hardware slotHw = new Hardware(Memory, Test.AllRegisters(), slotOs);
+        int slot = slotHw.Disk.Store(program);
+        Process slotProcess = new Process(slot, 16, 16);
+        slotOs.LoadProcess(slotProcess);
+
+        Assert.Equal(fileProcess.ProgramSize, slotProcess.ProgramSize);
+        for (int i = 0; i < program.Length; i++)
+        {
+            byte fromFile = fileHw.ReadBytes(fileProcess.ProgramAddress + i)[0];
+            byte fromSlot = slotHw.ReadBytes(slotProcess.ProgramAddress + i)[0];
+            Assert.Equal(fromFile, fromSlot);
+        }
+    }
 }

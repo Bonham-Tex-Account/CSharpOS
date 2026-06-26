@@ -27,6 +27,9 @@ public class Device
     public Queue<int> Input;
     public List<int> Waiters;
     public bool OutputBusy;
+    // Backing store for a block device (the disk's flat slot store); null for a
+    // character device.
+    public Bin? Block;
 
     public Device(int id, DeviceType type)
     {
@@ -35,5 +38,17 @@ public class Device
         Input = new Queue<int>();
         Waiters = new List<int>();
         OutputBusy = false;
+        Block = null;
+    }
+
+    // Block-device constructor: a device whose backing store is the given Bin.
+    public Device(int id, Bin block)
+    {
+        Id = id;
+        Type = DeviceType.Block;
+        Input = new Queue<int>();
+        Waiters = new List<int>();
+        OutputBusy = false;
+        Block = block;
     }
 }

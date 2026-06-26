@@ -52,6 +52,8 @@ public static class Disassembler
             case Instruction.LOADREGS:      return $"LOADREGS [{Reg(b1)}]";
             case Instruction.SETLAYOUT:     return $"SETLAYOUT [{Reg(b1)}]";
             case Instruction.OSRET:         return $"OSRET {Reg(b1)}";
+            case Instruction.DREAD:         return $"DREAD [{Reg(b1)}], {Reg(b2)}, {Reg(b3)}";
+            case Instruction.DWRITE:        return $"DWRITE {Reg(b1)}, [{Reg(b2)}], {Reg(b3)}";
             default:                        return $"??? {opcode:X2}";
         }
     }

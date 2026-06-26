@@ -62,7 +62,7 @@ public class OsAllocatorRoutineTests
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
         Assert.True(addr >= heapStart, "ProgramAddress should be within the heap");
@@ -83,8 +83,8 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, e0 + Hardware.ProcessEntryTotalSize, MinBlock);
         WriteWord(hw, e1 + Hardware.ProcessEntryTotalSize, MinBlock);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e0);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e1);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e0);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e1);
 
         int addr0 = ReadWord(hw, e0 + Hardware.ProcessEntryProgramAddress);
         int addr1 = ReadWord(hw, e1 + Hardware.ProcessEntryProgramAddress);
@@ -103,7 +103,7 @@ public class OsAllocatorRoutineTests
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock * 2 + 1);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
         Assert.True(addr >= heapStart, "ProgramAddress within heap");
@@ -120,7 +120,7 @@ public class OsAllocatorRoutineTests
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, heapSize + 1);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         Assert.Equal(-1, ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress));
     }
@@ -140,7 +140,7 @@ public class OsAllocatorRoutineTests
             WriteWord(hw, OsLayout.ProcessCountOffset, i + 1);
             int entry = OsLayout.ProcessEntryAddress(i % OsLayout.MaxProcesses);
             WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
-            hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+            hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
             int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
             Assert.True(addr >= 0, $"Alloc {i} should succeed");
         }
@@ -166,7 +166,7 @@ public class OsAllocatorRoutineTests
         Hardware hw = NewSeededHardware();
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
         Assert.True(addr >= 0, "Alloc must succeed");
 
@@ -201,7 +201,7 @@ public class OsAllocatorRoutineTests
         {
             e[i] = OsLayout.ProcessEntryAddress(i);
             WriteWord(hw, e[i] + Hardware.ProcessEntryTotalSize, MinBlock);
-            hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e[i]);
+            hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e[i]);
             addrs[i] = ReadWord(hw, e[i] + Hardware.ProcessEntryProgramAddress);
             Assert.True(addrs[i] >= 0, $"Alloc {i} must succeed");
         }
@@ -249,7 +249,7 @@ public class OsAllocatorRoutineTests
         {
             e[i] = OsLayout.ProcessEntryAddress(i);
             WriteWord(hw, e[i] + Hardware.ProcessEntryTotalSize, MinBlock);
-            hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e[i]);
+            hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e[i]);
             addrs[i] = ReadWord(hw, e[i] + Hardware.ProcessEntryProgramAddress);
             Assert.True(addrs[i] >= 0, $"Alloc {i} must succeed");
         }
@@ -285,7 +285,7 @@ public class OsAllocatorRoutineTests
         {
             e[i] = OsLayout.ProcessEntryAddress(i);
             WriteWord(hw, e[i] + Hardware.ProcessEntryTotalSize, MinBlock);
-            hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e[i]);
+            hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e[i]);
             addrs[i] = ReadWord(hw, e[i] + Hardware.ProcessEntryProgramAddress);
             Assert.True(addrs[i] >= 0, $"Alloc {i} must succeed");
         }
@@ -317,7 +317,7 @@ public class OsAllocatorRoutineTests
         Hardware hw = NewSeededHardware();
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
         Assert.True(addr >= 0);
 
@@ -346,7 +346,7 @@ public class OsAllocatorRoutineTests
         hw.SetInstructionPointer(savedIp);
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         Assert.Equal(0xAA, hw.ReadRegisterAt((byte)RegisterName.EAX));
         Assert.Equal(0xBB, hw.ReadRegisterAt((byte)RegisterName.EBX));
@@ -369,7 +369,7 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, heapSize);
 
         // Act
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         // Assert: root node (1) used, address is heapStart.
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
@@ -388,7 +388,7 @@ public class OsAllocatorRoutineTests
 
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, heapSize);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
         Assert.True(ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress) >= 0, "alloc must succeed");
 
         WriteWord(hw, OsLayout.ProcessCountOffset, 1);
@@ -418,7 +418,7 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, halfSize);
 
         // Act
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         // Assert: address == heapStart (leftmost level-1 block).
         // Root cleared, right child (node 3) marked free, left child (node 2) used.
@@ -441,7 +441,7 @@ public class OsAllocatorRoutineTests
 
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, halfSize);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
         Assert.True(ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress) >= 0, "alloc must succeed");
 
         WriteWord(hw, OsLayout.ProcessCountOffset, 1);
@@ -473,7 +473,7 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 1);
 
         // Act
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         // Assert: a valid leaf-level block is returned (not -1), proving rounding to MinBlock.
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
@@ -498,7 +498,7 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 0);
 
         // Act
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         // Assert: a valid address (not -1) at leaf level — not a failure.
         int addr = ReadWord(hw, entry + Hardware.ProcessEntryProgramAddress);
@@ -523,7 +523,7 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry0 + Hardware.ProcessEntryTotalSize, MinBlock);
 
         // Alloc
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry0);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry0);
         int firstAddr = ReadWord(hw, entry0 + Hardware.ProcessEntryProgramAddress);
         Assert.True(firstAddr >= heapStart, "first alloc must succeed");
 
@@ -540,7 +540,7 @@ public class OsAllocatorRoutineTests
         // (same leftmost-leaf policy on a freshly-merged root).
         int entry1 = OsLayout.ProcessEntryAddress(1);
         WriteWord(hw, entry1 + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry1);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry1);
 
         int secondAddr = ReadWord(hw, entry1 + Hardware.ProcessEntryProgramAddress);
         Assert.Equal(firstAddr, secondAddr);
@@ -565,7 +565,7 @@ public class OsAllocatorRoutineTests
         {
             entries[i] = OsLayout.ProcessEntryAddress(i);
             WriteWord(hw, entries[i] + Hardware.ProcessEntryTotalSize, MinBlock);
-            hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entries[i]);
+            hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entries[i]);
             addrs[i] = ReadWord(hw, entries[i] + Hardware.ProcessEntryProgramAddress);
             Assert.True(addrs[i] >= 0, $"fill alloc {i} must succeed");
         }
@@ -581,7 +581,7 @@ public class OsAllocatorRoutineTests
         // Act: alloc MinBlock again — must reuse the freed leaf.
         int newEntry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, newEntry + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, newEntry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, newEntry);
 
         int newAddr = ReadWord(hw, newEntry + Hardware.ProcessEntryProgramAddress);
         Assert.True(newAddr >= heapStart, "re-alloc after partial free must succeed");
@@ -606,7 +606,7 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
 
         // Act
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         // Assert: node 33 must be free (set by the split path in word 1, bit 0).
         // Node 33: bitPos=32, word=1, bitInWord=0.
@@ -633,13 +633,13 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, e1 + Hardware.ProcessEntryTotalSize, MinBlock);
         WriteWord(hw, e2 + Hardware.ProcessEntryTotalSize, MinBlock);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e0);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e1);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e0);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e1);
 
         AssertBit(hw, 33, true, "node 33 free before alloc 2 (pre-condition)");
 
         // Act
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e2);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e2);
 
         // Assert: node 33 must be cleared (ClearBit across word boundary), node 67 set (SetBit).
         // Node 67: bitPos=66, word=2, bitInWord=2.
@@ -657,7 +657,7 @@ public class OsAllocatorRoutineTests
         Hardware hw = NewSeededHardware();
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         WriteWord(hw, OsLayout.BuddyHeapSizeOffset, 0);   // corrupt heapSize after alloc
 
@@ -683,7 +683,7 @@ public class OsAllocatorRoutineTests
         Hardware hw = NewSeededHardware();
         int entry = OsLayout.ProcessEntryAddress(0);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, entry);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, entry);
 
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, 0);   // zero out after alloc
 
@@ -715,8 +715,8 @@ public class OsAllocatorRoutineTests
         WriteWord(hw, e0 + Hardware.ProcessEntryTotalSize, MinBlock);
         WriteWord(hw, e1 + Hardware.ProcessEntryTotalSize, MinBlock);
 
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e0);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e1);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e0);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e1);
         Assert.True(ReadWord(hw, e0 + Hardware.ProcessEntryProgramAddress) >= 0, "alloc 0 must succeed");
         Assert.True(ReadWord(hw, e1 + Hardware.ProcessEntryProgramAddress) >= 0, "alloc 1 must succeed");
 
@@ -738,7 +738,7 @@ public class OsAllocatorRoutineTests
         // Act: alloc one more block — must find and use the manually freed leaf.
         int e2 = OsLayout.ProcessEntryAddress(2);
         WriteWord(hw, e2 + Hardware.ProcessEntryTotalSize, MinBlock);
-        hw.RunOsRoutineSynchronously(Hardware.IvtLoadProcess, e2);
+        hw.RunOsRoutineSynchronously(Hardware.IvtAllocate, e2);
 
         // Assert: the new alloc must be at the manually freed leaf's address.
         int expectedAddr = heapStart + 4 * MinBlock;
