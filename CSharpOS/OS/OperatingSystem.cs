@@ -173,6 +173,12 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, entry + Hardware.ProcessEntryPriority, 0);
         WriteWord(hw, entry + Hardware.ProcessEntryTicksUsed, 0);
 
+        // Seed file descriptors: stdin (0) and stdout (1) point at the process's own
+        // device (device id == slot index, the behavior-preserving shim). The focus
+        // effort later rebinds these to a shared keyboard/screen.
+        WriteWord(hw, entry + Hardware.ProcessEntryFdTable + Hardware.StdIn * 4, slot);
+        WriteWord(hw, entry + Hardware.ProcessEntryFdTable + Hardware.StdOut * 4, slot);
+
         // Grow the table high-water mark when this is a fresh slot.
         int count = ReadWord(hw, OsLayout.ProcessCountOffset);
         if (slot == count)

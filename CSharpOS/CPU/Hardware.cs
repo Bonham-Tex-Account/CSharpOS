@@ -30,7 +30,21 @@ public partial class Hardware
     public const int ProcessEntryTotalSize         = 124;
     public const int ProcessEntryPriority           = 128;  // MLFQ queue level (0 = highest)
     public const int ProcessEntryTicksUsed          = 132;  // hardware ticks used in current level
-    public const int ProcessEntrySize               = 160;
+    // Per-process file-descriptor table: FdCount handles (0 = stdin, 1 = stdout, ...),
+    // each a 4-byte device id. IN/OUT resolve the fd's device rather than assuming
+    // device == process index. Bytes 136-159 stay free for later efforts (disk slot,
+    // PID group); the fd table sits at 160 so those stay untouched.
+    public const int ProcessEntryFdTable            = 160;
+    public const int FdCount                        = 4;
+    public const int StdIn                          = 0;
+    public const int StdOut                         = 1;
+    public const int ProcessEntrySize               = 176;  // 160 + FdCount * 4
+
+    // ---- device ids ------------------------------------------------------
+    // Character device ids 0..MaxProcesses-1 are the per-process I/O devices (the
+    // device == process-index shim, until the focus effort rebinds them). Block
+    // devices live above that range; the disk effort registers one at DiskDeviceId.
+    public const int DiskDeviceId = 256;
 
     // ---- interrupt vector table -----------------------------------------
     // One 4-byte slot per OS routine at the front of the OS region. Hardware reads
@@ -133,11 +147,11 @@ public partial class Hardware
     private int osMemoryBase;
     private int osMemorySize;
 
-    // Per-device I/O state, keyed by device id (== the owning process's table
-    // index). Each process's terminal is its own device, so its input never leaks
-    // to another process and its output device is busy-tracked independently.
-    private readonly Dictionary<int, Queue<int>> inputByDevice = new Dictionary<int, Queue<int>>();
-    private readonly HashSet<int> outputBusyDevices = new HashSet<int>();
+    // First-class I/O devices, keyed by device id. Each character device owns an
+    // input buffer, a wait queue (process indices blocked on its input), and an
+    // output-busy flag. Device ids are independent of processes; the device ==
+    // process-index mapping survives only as a default via fd tables / CurrentDeviceId.
+    private readonly Dictionary<int, Device> devices = new Dictionary<int, Device>();
     private readonly ConcurrentQueue<Interrupt> pendingInterrupts = new ConcurrentQueue<Interrupt>();
 
     // ---- constructor -----------------------------------------------------
@@ -438,14 +452,69 @@ public partial class Hardware
         return index;
     }
 
-    private Queue<int> InputQueueFor(int device)
+    // Returns the device with this id, creating a character device on first use
+    // (mirroring the previous on-demand input-queue creation).
+    private Device DeviceFor(int id)
     {
-        if (!inputByDevice.TryGetValue(device, out Queue<int>? queue))
+        if (!devices.TryGetValue(id, out Device? device))
         {
-            queue = new Queue<int>();
-            inputByDevice[device] = queue;
+            device = new Device(id, DeviceType.Character);
+            devices[id] = device;
         }
-        return queue;
+        return device;
+    }
+
+    // Registers a device explicitly (used by the disk effort to add a block device).
+    public void RegisterDevice(Device device)
+    {
+        devices[device.Id] = device;
+    }
+
+    // Public accessor for a device (creating a character device on first use).
+    public Device GetDevice(int id)
+    {
+        return DeviceFor(id);
+    }
+
+    // Resolves the running process's file descriptor to a device id. Falls back to
+    // CurrentDeviceId() (the process index) with no OS image or no running process,
+    // so the bare-hardware harness and the idle state behave exactly as before.
+    private int FdDevice(int fd)
+    {
+        if (!OsManaged)
+        {
+            return CurrentDeviceId();
+        }
+        int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
+        if (index < 0)
+        {
+            return CurrentDeviceId();
+        }
+        int entry = osMemoryBase + OsLayout.ProcessEntryAddress(index);
+        return ReadWord(entry + ProcessEntryFdTable + fd * 4);
+    }
+
+    // Records a process index as waiting on a device's input (no duplicates).
+    private static void AddInputWaiter(Device device, int processIndex)
+    {
+        if (!device.Waiters.Contains(processIndex))
+        {
+            device.Waiters.Add(processIndex);
+        }
+    }
+
+    // The next process to wake for this device's input: the first registered waiter
+    // (removed from the queue), or the device id itself when none is registered —
+    // the device == process-index shim, identical to the previous wake behaviour.
+    private static int NextInputWaiter(Device device, int fallbackProcess)
+    {
+        if (device.Waiters.Count > 0)
+        {
+            int processIndex = device.Waiters[0];
+            device.Waiters.RemoveAt(0);
+            return processIndex;
+        }
+        return fallbackProcess;
     }
 
     private int ReadWord(int address)
@@ -489,17 +558,19 @@ public partial class Hardware
         {
             return false;
         }
+        Device device = DeviceFor(interrupt.Device);
         if (interrupt.Kind == InterruptKind.InputReady)
         {
-            InputQueueFor(interrupt.Device).Enqueue(interrupt.Value);
+            device.Input.Enqueue(interrupt.Value);
             ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Input, Value = interrupt.Value, Device = interrupt.Device });
-            // Wake routines take the target device (== process index) in EAX and
-            // wake that specific process if it is blocked on the matching reason.
-            DispatchOsRoutine(IvtWakeInput, interrupt.Device);
+            // Wake the first process blocked on this device's input (or the device's
+            // owner under the shim). Wake routines take the target process index in EAX.
+            int target = NextInputWaiter(device, interrupt.Device);
+            DispatchOsRoutine(IvtWakeInput, target);
         }
         else
         {
-            outputBusyDevices.Remove(interrupt.Device);
+            device.OutputBusy = false;
             ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.Output, Value = 0, Device = interrupt.Device });
             DispatchOsRoutine(IvtWakeOutput, interrupt.Device);
         }
@@ -830,32 +901,36 @@ public partial class Hardware
         return null;
     }
 
-    // Kernel-mode input: deliver a value from the running process's own input
-    // device, or block the process until that device's input interrupt wakes it
-    // (the IN instruction re-runs on resume).
+    // Kernel-mode input: deliver a value from the running process's stdin device
+    // (fd 0), or block the process on that device until its input interrupt wakes it
+    // (the IN instruction re-runs on resume). The process is recorded in the device's
+    // wait queue so the interrupt dispatch knows whom to wake.
     public void KernelInput(byte register)
     {
-        Queue<int> queue = InputQueueFor(CurrentDeviceId());
-        if (queue.Count == 0)
+        int deviceId = FdDevice(StdIn);
+        Device device = DeviceFor(deviceId);
+        if (device.Input.Count == 0)
         {
+            AddInputWaiter(device, CurrentDeviceId());
             BlockCurrent(WaitReason.Input);
             return;
         }
-        WriteRegisterAt(register, queue.Dequeue());
+        WriteRegisterAt(register, device.Input.Dequeue());
     }
 
-    // Kernel-mode output: deliver if the running process's output device is free
-    // (marking it busy until an output-complete interrupt), otherwise block.
+    // Kernel-mode output: deliver to the running process's stdout device (fd 1) if it
+    // is free (marking it busy until an output-complete interrupt), otherwise block.
     public void KernelOutput(int value)
     {
-        int device = CurrentDeviceId();
-        if (outputBusyDevices.Contains(device))
+        int deviceId = FdDevice(StdOut);
+        Device device = DeviceFor(deviceId);
+        if (device.OutputBusy)
         {
             BlockCurrent(WaitReason.Output);
             return;
         }
-        Output(value, device);
-        outputBusyDevices.Add(device);
+        Output(value, deviceId);
+        device.OutputBusy = true;
     }
 
     // Raises an input interrupt for device 0 (the default single device).
