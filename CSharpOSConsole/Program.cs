@@ -3,18 +3,6 @@ using CSharpOSConsole;
 using CSharpOSConsole.Visualization;
 using OperatingSystem = CSharpOS.OperatingSystem;
 
-// When relaunched as a per-process terminal window, run that loop and exit.
-if (args.Length >= 2 && args[0] == "--terminal")
-{
-    string terminalTitle = "process";
-    if (args.Length >= 3)
-    {
-        terminalTitle = args[2];
-    }
-    TerminalHost.Run(args[1], terminalTitle);
-    return;
-}
-
 // Resolve OS plugin path: --os-plugin <path> overrides the default.
 string pluginPath = Path.Combine(AppContext.BaseDirectory, "BasicOSPlugin.dll");
 for (int i = 0; i < args.Length - 1; i++)
@@ -66,8 +54,8 @@ while (true)
     Console.WriteLine("  7) Fill & drain the heap (mixed-size jobs fill memory, then drain — watch reclaim/merging)");
     Console.WriteLine("  8) Scheduler + memory (counter + average run while short jobs churn the heap)");
     Console.WriteLine("  q) Quit");
-    Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows step back/forward, 'o' toggle program I/O, 'q' quit run)");
-    Console.WriteLine("  (modes 1-5 give each process its own I/O window; the churn modes 6-8 mirror I/O in the dashboard instead)");
+    Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows scrub history, 'o' toggle program I/O, 'q' quit run)");
+    Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, digits + Enter send it a number)");
     Console.Write("Select: ");
 
     string? choice = Console.ReadLine();
@@ -88,49 +76,49 @@ while (true)
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<StagedProgram> { counter }, mode, detail);
+            RunShared(new List<StagedProgram> { counter }, mode, detail);
             break;
         }
         case "2":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<StagedProgram> { average }, mode, detail);
+            RunShared(new List<StagedProgram> { average }, mode, detail);
             break;
         }
         case "3":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<StagedProgram> { guess }, mode, detail);
+            RunShared(new List<StagedProgram> { guess }, mode, detail);
             break;
         }
         case "4":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<StagedProgram> { counter, average }, mode, detail);
+            RunShared(new List<StagedProgram> { counter, average }, mode, detail);
             break;
         }
         case "5":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            RunWindowed(new List<StagedProgram> { counter, average, guess }, mode, detail);
+            RunShared(new List<StagedProgram> { counter, average, guess }, mode, detail);
             break;
         }
         case "6":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            Run(Churn(3, 0), Churn(15, 3), 60, false, mode, detail);
+            Run(Churn(3, 0), Churn(15, 3), 60, mode, detail);
             break;
         }
         case "7":
         {
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
-            Run(Churn(8, 0), new List<StagedProgram>(), 0, false, mode, detail);
+            Run(Churn(8, 0), new List<StagedProgram>(), 0, mode, detail);
             break;
         }
         case "8":
@@ -138,7 +126,7 @@ while (true)
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
             List<StagedProgram> initial = new List<StagedProgram> { counter, average };
-            Run(initial, Churn(10, 0), 80, false, mode, detail);
+            Run(initial, Churn(10, 0), 80, mode, detail);
             break;
         }
         default:
@@ -199,18 +187,18 @@ DetailLevel PromptDetail()
     return DetailLevel.High;
 }
 
-// Windowed run: each program gets its own per-process I/O window (modes 1-5).
-void RunWindowed(List<StagedProgram> programs, VisualizerMode mode, DetailLevel detail)
+// Shared-screen run: the initial programs load up front and share one screen (modes 1-5).
+void RunShared(List<StagedProgram> programs, VisualizerMode mode, DetailLevel detail)
 {
-    Run(programs, new List<StagedProgram>(), 0, true, mode, detail);
+    Run(programs, new List<StagedProgram>(), 0, mode, detail);
 }
 
-// Generalized run. `initial` programs load up front; `staggered` programs load one at
-// a time during the run (every `interval` instructions) for memory/scheduler churn.
-// Every program is first staged onto this machine's disk and referenced by slot. With
-// `useWindows`, each initial process gets its own I/O window; otherwise program I/O is
-// mirrored into the dashboard.
-void Run(List<StagedProgram> initial, List<StagedProgram> staggered, int interval, bool useWindows, VisualizerMode mode, DetailLevel detail)
+// Generalized run. `initial` programs load up front; `staggered` programs load one at a
+// time during the run (every `interval` instructions) for memory/scheduler churn. Every
+// program is first staged onto this machine's disk and referenced by slot. All processes
+// share a single screen in the dashboard, bound to the focused (foreground) process; Tab
+// switches focus and the live keyboard feeds the focused process's input.
+void Run(List<StagedProgram> initial, List<StagedProgram> staggered, int interval, VisualizerMode mode, DetailLevel detail)
 {
     Console.WriteLine();
     OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
@@ -221,19 +209,7 @@ void Run(List<StagedProgram> initial, List<StagedProgram> staggered, int interva
     List<Process> initialProcesses = StageAll(hw, initial);
     List<Process> staggeredProcesses = StageAll(hw, staggered);
 
-    // One terminal window per initial process, keyed by device id (== process-table
-    // index). The churn modes pass no windows; their I/O is mirrored in the dashboard.
-    Dictionary<int, IProcessTerminal> terminals = new Dictionary<int, IProcessTerminal>();
-    if (useWindows)
-    {
-        for (int i = 0; i < initial.Count; i++)
-        {
-            terminals[i] = new ConsoleWindowTerminal(initial[i].Name);
-        }
-    }
-
-    ProcessIoRouter router = new ProcessIoRouter(hw, terminals);
-    SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail, showProgramIo: !useWindows);
+    SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail);
 
     foreach (Process process in initialProcesses)
     {
@@ -245,15 +221,9 @@ void Run(List<StagedProgram> initial, List<StagedProgram> staggered, int interva
     }
 
     // The dashboard owns the run loop: it steps the emulator (which never blocks on
-    // input — that arrives asynchronously from the per-process terminal windows),
-    // redraws every step, and lets the user pace/scrub with the keyboard until every
-    // process has finished.
+    // input — keystrokes arrive through the dashboard's own key loop), redraws every
+    // step, and lets the user pace/scrub/type until every process has finished.
     dashboard.Run();
-
-    foreach (IProcessTerminal terminal in terminals.Values)
-    {
-        terminal.Close();
-    }
 
     Console.WriteLine();
     Console.WriteLine("--- run finished ---");

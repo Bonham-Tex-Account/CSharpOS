@@ -85,6 +85,11 @@ public class OsRunLoopTests
         Assert.True(hw.IsProcessRunning());
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
 
+        // Register process 0 as a waiter on device 0's input — the precondition
+        // KernelInput establishes when a process blocks on IN. With explicit wake
+        // routing, a device interrupt only dispatches a wake for an actual waiter.
+        hw.GetDevice(0).Waiters.Add(0);
+
         // Queue an input interrupt.
         hw.RaiseInputInterrupt(42);
 
@@ -92,6 +97,31 @@ public class OsRunLoopTests
         hw.Run();
 
         Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel()); // routine entered
+    }
+
+    [Fact]
+    public void Run_InterruptWithNoWaiter_BuffersInputWithoutDispatchingWake()
+    {
+        // With explicit wake routing (no device-as-process fallback), an input
+        // interrupt for a device that has no registered waiter must not enter any wake
+        // routine; the value is simply buffered until a process reads it.
+        Hardware hw = NewSeededHardware();
+        WriteWord(hw, OsLayout.ProcessCountOffset, 1);
+        WriteWord(hw, OsLayout.CurrentIndexOffset, -1);
+        SeedEntry(hw, 0, (int)ProcessState.Ready, (int)PrivilegeLevel.User, 0, 4096, 4096, 4, 64, 32);
+
+        for (int i = 0; i < 500 && !hw.IsProcessRunning(); i++)
+        {
+            hw.Run();
+        }
+        Assert.True(hw.IsProcessRunning());
+
+        // No waiter registered on device 0.
+        hw.RaiseInputInterrupt(42);
+        hw.Run();
+
+        Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel()); // no wake routine entered
+        Assert.Equal(42, hw.GetDevice(0).Input.Peek());            // value buffered for later
     }
 
     private static int ReadWord(Hardware hw, int address)

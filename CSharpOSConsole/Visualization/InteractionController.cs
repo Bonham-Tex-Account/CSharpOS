@@ -9,13 +9,18 @@ public enum StepAction
 }
 
 /// <summary>
-/// Drives pacing and navigation for the live dashboard: auto-run vs. single-step, and
-/// forward/backward scrubbing over <see cref="FrameHistory"/> with the arrow keys. The
-/// key-to-action mapping lives in the pure <see cref="HandleKey"/> (unit-testable); the
-/// console polling in <see cref="NextAction"/> is the only part that touches the keyboard.
+/// Drives pacing, navigation, focus, and process input for the live dashboard. It
+/// pairs auto-run vs. single-step and forward/backward scrubbing over
+/// <see cref="FrameHistory"/> with the shared-screen interaction: Tab cycles the
+/// focused process, digits build a number, and Enter submits it to the focused
+/// process. The key-to-action mapping lives in the pure <see cref="HandleKey"/>
+/// (unit-testable); the console polling in <see cref="NextAction"/> is the only part
+/// that touches the keyboard.
 ///
 /// Keys: a = auto-run, s = single-step (pause), o = toggle program-I/O mirror,
-/// left = step back, right/Enter = step forward (executes at the live edge), q = quit.
+/// left = step back, right = step forward (executes at the live edge), Tab = switch
+/// focus, digits + Enter = send a number to the focused process, Backspace = edit the
+/// number, q = quit.
 /// </summary>
 public sealed class InteractionController
 {
@@ -23,14 +28,20 @@ public sealed class InteractionController
     private readonly bool interactive;
     private readonly int delayMs;
     private readonly Action toggleIo;
+    private readonly Action cycleFocus;
+    private readonly Action<int> submitInput;
     private bool paused;
+    private string inputLine = "";
 
-    public InteractionController(FrameHistory frames, bool interactive, int delayMs, Action toggleIo)
+    public InteractionController(FrameHistory frames, bool interactive, int delayMs,
+        Action toggleIo, Action cycleFocus, Action<int> submitInput)
     {
         this.frames = frames;
         this.interactive = interactive;
         this.delayMs = delayMs;
         this.toggleIo = toggleIo;
+        this.cycleFocus = cycleFocus;
+        this.submitInput = submitInput;
     }
 
     public bool Paused
@@ -38,9 +49,15 @@ public sealed class InteractionController
         get { return paused; }
     }
 
+    /// <summary>The digits typed but not yet submitted, shown as the screen's input line.</summary>
+    public string InputLine
+    {
+        get { return inputLine; }
+    }
+
     /// <summary>
-    /// Pure key handler: maps a key to the loop action and updates the cursor / mode.
-    /// Console-free so it can be unit-tested.
+    /// Pure key handler: maps a key to the loop action and updates the cursor / mode /
+    /// pending input. Console-free so it can be unit-tested.
     /// </summary>
     public StepAction HandleKey(ConsoleKeyInfo key)
     {
@@ -50,7 +67,7 @@ public sealed class InteractionController
             frames.StepBack();
             return StepAction.Redraw;
         }
-        if (key.Key == ConsoleKey.RightArrow || key.Key == ConsoleKey.Enter)
+        if (key.Key == ConsoleKey.RightArrow)
         {
             paused = true;
             if (frames.StepForward())
@@ -58,6 +75,37 @@ public sealed class InteractionController
                 return StepAction.Redraw;
             }
             return StepAction.Execute; // at the live edge: advance the emulator
+        }
+        if (key.Key == ConsoleKey.Tab)
+        {
+            cycleFocus();
+            return StepAction.Redraw;
+        }
+        if (key.Key == ConsoleKey.Enter)
+        {
+            // Submit the accumulated number to the focused process, if any.
+            if (inputLine.Length > 0)
+            {
+                if (int.TryParse(inputLine, out int value))
+                {
+                    submitInput(value);
+                }
+                inputLine = "";
+            }
+            return StepAction.Redraw;
+        }
+        if (key.Key == ConsoleKey.Backspace)
+        {
+            if (inputLine.Length > 0)
+            {
+                inputLine = inputLine.Substring(0, inputLine.Length - 1);
+            }
+            return StepAction.Redraw;
+        }
+        if (key.KeyChar >= '0' && key.KeyChar <= '9')
+        {
+            inputLine += key.KeyChar;
+            return StepAction.Redraw;
         }
 
         char c = char.ToLowerInvariant(key.KeyChar);

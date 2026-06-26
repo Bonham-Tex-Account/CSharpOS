@@ -59,8 +59,6 @@ public class SpectreDashboardTests : IDisposable
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
-
         SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Verbose, 0);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
 
@@ -76,6 +74,7 @@ public class SpectreDashboardTests : IDisposable
         Assert.Contains("Buddy allocator", text);
         Assert.Contains("Registers", text);
         Assert.Contains("Run stats", text);
+        Assert.Contains("Screen", text);      // shared focused-process I/O panel
     }
 
     [Fact]
@@ -83,8 +82,6 @@ public class SpectreDashboardTests : IDisposable
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
-
         SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(1)), 128, 64));
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(2)), 128, 64));
@@ -104,8 +101,6 @@ public class SpectreDashboardTests : IDisposable
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
-
         SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
 
@@ -125,8 +120,6 @@ public class SpectreDashboardTests : IDisposable
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
-
         SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0, DetailLevel.Low);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
 
@@ -143,8 +136,6 @@ public class SpectreDashboardTests : IDisposable
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
-
         SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0, DetailLevel.Medium);
         os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(5)), 128, 64));
 
@@ -161,8 +152,6 @@ public class SpectreDashboardTests : IDisposable
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(32768), Test.AllRegisters(), os);
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { hw.RaiseOutputComplete(e.Device); };
-
         SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0, showProgramIo: true);
 
         // A short job up front, then several varied-size jobs injected over time => more

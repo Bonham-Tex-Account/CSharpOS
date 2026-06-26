@@ -97,8 +97,9 @@ public sealed class HardwareEventBridge
     private void OnProgramOutput(object? sender, ProgramOutputArgs e)
     {
         model.OutputCount++;
-        // Program output belongs to the process's own window; only mirror it here when
-        // I/O display is toggled on.
+        // Append to the producing process's own screen buffer (the shared screen shows
+        // the focused one). Also mirror into the OS/kernel stream when I/O display is on.
+        model.RecordOutput(e.SourceProcess, e.Value);
         if (model.ShowProgramIo)
         {
             renderer.ProgramOutput(e.Value);

@@ -22,6 +22,42 @@ public class VisualizerModelTests
     }
 
     [Fact]
+    public void RecordOutput_AppendsPerSourceProcess()
+    {
+        VisualizerModel model = new VisualizerModel();
+        model.RecordOutput(0, 11);
+        model.RecordOutput(1, 22);
+        model.RecordOutput(0, 33);
+
+        Assert.Equal(new List<int> { 11, 33 }, model.OutputBuffers[0]);
+        Assert.Equal(new List<int> { 22 }, model.OutputBuffers[1]);
+    }
+
+    [Fact]
+    public void FocusedOutput_ReturnsTheFocusedProcessBuffer()
+    {
+        VisualizerModel model = new VisualizerModel();
+        model.RecordOutput(0, 11);
+        model.RecordOutput(1, 22);
+
+        model.FocusedProcess = 1;
+        Assert.Equal(new List<int> { 22 }, model.FocusedOutput());
+
+        model.FocusedProcess = 0;
+        Assert.Equal(new List<int> { 11 }, model.FocusedOutput());
+    }
+
+    [Fact]
+    public void FocusedOutput_IsEmptyWhenNothingFocusedOrNoOutput()
+    {
+        VisualizerModel model = new VisualizerModel();
+        Assert.Empty(model.FocusedOutput()); // FocusedProcess == -1 by default
+
+        model.FocusedProcess = 5; // focused but never produced output
+        Assert.Empty(model.FocusedOutput());
+    }
+
+    [Fact]
     public void History_ExactlyAtCap_RetainsAllEntries()
     {
         VisualizerModel model = new VisualizerModel();
