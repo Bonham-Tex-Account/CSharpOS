@@ -100,7 +100,10 @@ public partial class Hardware
     // EnterKernel jumps here directly without masking interrupts, so the handler stays
     // preemptible; only its address is stored here (wired up by BuildOsImage).
     public const int IvtSyscall            = 14;
-    public const int IvtSlotCount          = 15;
+    // Demand-paging fault handler (Phase 2): dispatched by the MMU when a user data
+    // access touches a non-resident page; makes the page resident, then resumes.
+    public const int IvtPageFault          = 15;
+    public const int IvtSlotCount          = 16;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // ---- public events ---------------------------------------------------
@@ -165,6 +168,22 @@ public partial class Hardware
     private BranchPredictor predictor = new BranchPredictor();
     private long cycles;
     private int currentInstructionAddress;
+
+    // Per-process-slot record of the (programAddress, userExtent) the page table was last
+    // seeded for, so SeedPageTableIfNew reseeds only when a slot is reused for a new
+    // process (not on every resume, which would evict all resident pages).
+    private int[] pageSeedBase = NewFilled(OsLayout.MaxProcesses, -1);
+    private int[] pageSeedExtent = NewFilled(OsLayout.MaxProcesses, -1);
+
+    private static int[] NewFilled(int count, int value)
+    {
+        int[] array = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            array[i] = value;
+        }
+        return array;
+    }
 
     // The interrupted process's register file (incl. saved IP in the EIP slot),
     // snapshotted when an OS routine is dispatched so the routine can clobber the
@@ -330,6 +349,7 @@ public partial class Hardware
             case IvtExec:               return "Exec";
             case IvtWait:               return "Wait";
             case IvtSpawn:              return "Spawn";
+            case IvtPageFault:          return "PageFault";
             default:                    return $"slot {slot}";
         }
     }
@@ -697,75 +717,121 @@ public partial class Hardware
     // ---- MMU: virtual-to-physical translation (paging) -------------------
 
     // Translates a user-mode data/stack virtual address through the running process's
-    // page table; kernel/OS code (and non-OS-managed hardware) addresses memory
-    // absolutely, so it is returned unchanged via the program base. In Phase 1 each
-    // process occupies one contiguous block and its table is seeded linearly, so the
-    // translated physical address equals the old base+offset result.
+    // page table and reports whether it succeeded. Kernel/OS code (and non-OS-managed
+    // hardware) addresses memory absolutely, so it always succeeds via the program base.
+    // A user access to a **non-resident** page raises a demand page fault (dispatching
+    // IvtPageFault) and returns false — the caller must abort the instruction without
+    // committing; the faulting instruction re-runs after the page is made resident.
+    // `isWrite` is recorded for the dirty/LRU bookkeeping added in a later increment.
+    public bool TryTranslateData(int virtualAddress, bool isWrite, out int physical)
+    {
+        if (level != PrivilegeLevel.User || !OsManaged)
+        {
+            physical = GetProgramBase() + virtualAddress;
+            return true;
+        }
+
+        int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
+        int page = virtualAddress / OsLayout.PageSize;
+        int offset = virtualAddress % OsLayout.PageSize;
+        // Anything the page table cannot describe (no running process or an out-of-range
+        // page) falls back to the linear mapping; the bounds traps still guard genuinely
+        // out-of-bounds accesses.
+        if (index < 0 || index >= OsLayout.MaxProcesses || page < 0 || page >= OsLayout.MaxPagesPerProcess)
+        {
+            physical = currentProcessInstructionStart + virtualAddress;
+            return true;
+        }
+
+        int pte = ReadWord(osMemoryBase + OsLayout.PageTableAddress(index) + page * OsLayout.PageTableEntryBytes);
+        if (pte == OsLayout.NonResidentPage)
+        {
+            RaisePageFault(page);
+            physical = 0;
+            return false;
+        }
+        if (pte < 0)
+        {
+            // Unmapped page (outside the process): linear fallback.
+            physical = currentProcessInstructionStart + virtualAddress;
+            return true;
+        }
+        physical = pte + offset; // resident: PTE holds the page's physical base
+        return true;
+    }
+
+    // Non-faulting query of a user virtual address against the running process's page
+    // table (resident pages only); used by the visualizer/tests. Returns the linear
+    // address for non-resident/unmapped pages without raising a fault.
     public int TranslateDataAddress(int virtualAddress)
     {
         if (level != PrivilegeLevel.User || !OsManaged)
         {
             return GetProgramBase() + virtualAddress;
         }
-        return TranslateUserPage(virtualAddress);
-    }
-
-    private int TranslateUserPage(int virtualAddress)
-    {
         int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
         int page = virtualAddress / OsLayout.PageSize;
         int offset = virtualAddress % OsLayout.PageSize;
-        // Anything the page table cannot describe (no running process, a negative or
-        // out-of-range page, or an unmapped PTE) falls back to the linear mapping; the
-        // existing bounds traps still guard genuinely out-of-bounds accesses.
         if (index < 0 || index >= OsLayout.MaxProcesses || page < 0 || page >= OsLayout.MaxPagesPerProcess)
         {
             return currentProcessInstructionStart + virtualAddress;
         }
-        int pteAddress = osMemoryBase + OsLayout.PageTableAddress(index) + page * OsLayout.PageTableEntryBytes;
-        int pagePhysicalBase = ReadWord(pteAddress);
-        if (pagePhysicalBase < 0)
+        int pte = ReadWord(osMemoryBase + OsLayout.PageTableAddress(index) + page * OsLayout.PageTableEntryBytes);
+        if (pte < 0)
         {
             return currentProcessInstructionStart + virtualAddress;
         }
-        return pagePhysicalBase + offset;
+        return pte + offset;
     }
 
-    // Seeds the page table for the process whose table entry is at `entryAddress`, mapping
-    // each of its virtual pages onto the contiguous physical frames of its allocated block
-    // (and the rest of the table to UnmappedFrame). Run from SetLayoutFromEntry, the gate
-    // every process passes through before it is resumed, so loaded/forked/exec'd processes
-    // all get a valid table. Idempotent; uses raw writes to avoid event spam.
-    private void SeedPageTable(int entryAddress, int programAddress, int totalSize)
+    // Raises a demand page fault for the running process: rewinds the IP to the faulting
+    // instruction so it re-runs, then dispatches the ISA page-fault handler with the
+    // faulting page number in EAX. The handler makes the page resident and resumes.
+    private void RaisePageFault(int faultingPage)
     {
-        if (!OsManaged)
+        instructionPointer = currentInstructionAddress;
+        DispatchOsRoutine(IvtPageFault, faultingPage);
+    }
+
+    // (Re)seeds the page table for the process in slot `index` when that slot is first
+    // used for a process with this (base, extent) — every user-accessible page starts
+    // **non-resident** (so its first data touch faults in via IvtPageFault); pages beyond
+    // the process are unmapped. Guarded so it runs once per process creation, not on every
+    // resume (which would clobber resident pages back to non-resident — a fault storm).
+    // Run from SetLayoutFromEntry, the universal pre-resume gate, so loaded/forked/exec'd
+    // processes all get seeded. Uses raw writes to avoid event spam.
+    private void SeedPageTableIfNew(int index, int programAddress, int userExtent)
+    {
+        if (!OsManaged || index < 0 || index >= OsLayout.MaxProcesses)
         {
             return;
         }
-        int index = (entryAddress - osMemoryBase - OsLayout.ProcessTableOffset) / ProcessEntrySize;
-        if (index < 0 || index >= OsLayout.MaxProcesses)
+        if (pageSeedBase[index] == programAddress && pageSeedExtent[index] == userExtent)
         {
-            return;
+            return; // already seeded for this process; preserve its resident pages
         }
-        int pageCount = (totalSize + OsLayout.PageSize - 1) / OsLayout.PageSize;
+        pageSeedBase[index] = programAddress;
+        pageSeedExtent[index] = userExtent;
+
+        int pageCount = (userExtent + OsLayout.PageSize - 1) / OsLayout.PageSize;
         int tableBase = osMemoryBase + OsLayout.PageTableAddress(index);
         for (int p = 0; p < OsLayout.MaxPagesPerProcess; p++)
         {
-            int pagePhysicalBase;
+            int pte;
             if (p < pageCount)
             {
-                pagePhysicalBase = programAddress + p * OsLayout.PageSize;
+                pte = OsLayout.NonResidentPage;
             }
             else
             {
-                pagePhysicalBase = OsLayout.UnmappedPage;
+                pte = OsLayout.UnmappedPage;
             }
-            WriteWordRaw(tableBase + p * OsLayout.PageTableEntryBytes, pagePhysicalBase);
+            WriteWordRaw(tableBase + p * OsLayout.PageTableEntryBytes, pte);
         }
     }
 
-    // The physical base address mapped to a process's virtual page, or UnmappedPage (-1)
-    // if the page is not mapped (exposed for tests/visualizer).
+    // The PTE for a process's virtual page: a resident page's physical base (>= 0), or a
+    // NonResidentPage/UnmappedPage sentinel (exposed for tests/visualizer).
     public int PageTableEntry(int processIndex, int page)
     {
         if (!OsManaged || processIndex < 0 || page < 0 || page >= OsLayout.MaxPagesPerProcess)
@@ -773,6 +839,12 @@ public partial class Hardware
             return OsLayout.UnmappedPage;
         }
         return ReadWord(osMemoryBase + OsLayout.PageTableAddress(processIndex) + page * OsLayout.PageTableEntryBytes);
+    }
+
+    // True when a process's virtual page is currently resident (backed by physical memory).
+    public bool IsPageResident(int processIndex, int page)
+    {
+        return PageTableEntry(processIndex, page) >= 0;
     }
 
     // Word read/write against a plain byte[] (e.g. a register-file snapshot),
@@ -1095,10 +1167,12 @@ public partial class Hardware
         int requiredMemory    = ReadWord(entryAddress + ProcessEntryRequiredMemory);
         int requiredStackSize = ReadWord(entryAddress + ProcessEntryRequiredStackSize);
         SetProcessLayout(programAddress, programSize, requiredMemory, requiredStackSize);
-        // Seed the page table for the process about to run, so the MMU can translate its
-        // user-mode accesses. The mapped extent covers the whole allocated block.
-        int totalSize = programSize + requiredMemory + requiredStackSize + KernelStackSize;
-        SeedPageTable(entryAddress, programAddress, totalSize);
+        // Seed this process's page table the first time the slot is used for it, so the
+        // MMU can fault its user pages in on demand. The user-accessible extent is the
+        // program + data + user stack (the kernel stack beyond it is addressed absolutely).
+        int index = (entryAddress - osMemoryBase - OsLayout.ProcessTableOffset) / ProcessEntrySize;
+        int userExtent = programSize + requiredMemory + requiredStackSize;
+        SeedPageTableIfNew(index, programAddress, userExtent);
     }
 
     // OSRET: the OS's return-to-process primitive. Reads the target level from the

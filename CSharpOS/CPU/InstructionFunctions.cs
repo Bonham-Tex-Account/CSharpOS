@@ -60,7 +60,10 @@ internal static class InstructionFunctions
     // kernel/OS mode it is absolute (program base 0). Translation is behavior-preserving.
     internal static void Load(Hardware hw, byte b1, byte b2, byte b3)
     {
-        int address = hw.TranslateDataAddress(hw.ReadRegisterAt(b2));
+        if (!hw.TryTranslateData(hw.ReadRegisterAt(b2), false, out int address))
+        {
+            return; // page fault raised; the instruction re-runs once the page is resident
+        }
         byte[] bytes = hw.ReadBytes(address);
         int value = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
         hw.WriteRegisterAt(b1, value);
@@ -69,7 +72,10 @@ internal static class InstructionFunctions
     // STORE [ptr], src  — (MMU-translated reg[ptr]) = reg[src]
     internal static void Store(Hardware hw, byte b1, byte b2, byte b3)
     {
-        int address = hw.TranslateDataAddress(hw.ReadRegisterAt(b1));
+        if (!hw.TryTranslateData(hw.ReadRegisterAt(b1), true, out int address))
+        {
+            return; // page fault raised; the instruction re-runs once the page is resident
+        }
         int value = hw.ReadRegisterAt(b2);
         hw.WriteBytes(address, new byte[]
         {
@@ -233,8 +239,13 @@ internal static class InstructionFunctions
         int returnOffset = hw.GetInstructionPointer() - programBase;
         int esp = hw.ReadRegister(RegisterName.ESP) - 4;
         // The stack slot is addressed virtually (translated); the jump target stays a
-        // program-relative code address (code is not paged in Phase 1).
-        hw.WriteBytes(hw.TranslateDataAddress(esp), new byte[]
+        // program-relative code address (code is not paged). A fault aborts the push and
+        // re-runs the CALL once the stack page is resident (ESP not yet decremented).
+        if (!hw.TryTranslateData(esp, true, out int stackAddress))
+        {
+            return;
+        }
+        hw.WriteBytes(stackAddress, new byte[]
         {
             (byte)(returnOffset & 0xFF),
             (byte)((returnOffset >> 8)  & 0xFF),
@@ -249,7 +260,11 @@ internal static class InstructionFunctions
     {
         int programBase = hw.GetProgramBase();
         int esp = hw.ReadRegister(RegisterName.ESP);
-        byte[] bytes = hw.ReadBytes(hw.TranslateDataAddress(esp));
+        if (!hw.TryTranslateData(esp, false, out int stackAddress))
+        {
+            return; // page fault raised; RET re-runs once the stack page is resident
+        }
+        byte[] bytes = hw.ReadBytes(stackAddress);
         int returnOffset = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
         hw.WriteRegister(RegisterName.ESP, esp + 4);
         hw.SetInstructionPointer(programBase + returnOffset);
