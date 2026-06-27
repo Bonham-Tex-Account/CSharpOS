@@ -154,7 +154,7 @@ public class ConsoleVisualizerTests : IDisposable
         RunSteps(os, hw, 2000);
 
         string text = sink.ToString();
-        Assert.Contains("OS routine", text);       // scheduler dispatch -> Privileged
+        Assert.Contains("OS routine", text);       // scheduler dispatch -> Kernel (atomic)
         Assert.Contains("syscall trap", text);     // OUT in user mode -> Kernel
         Assert.Contains("User", text);
         Assert.Contains("Kernel", text);

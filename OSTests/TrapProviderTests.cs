@@ -55,26 +55,12 @@ public class TrapProviderTests
         Assert.True(trapped);
     }
 
-    // EDGE CASE: IRET in Kernel mode must NOT trap — kernel handlers use IRET to
-    // return to user code. Trapping here would kill every syscall.
+    // EDGE CASE: IRET in Kernel mode must NOT trap — the shared syscall handler and
+    // the OS routines both use IRET to return to user code. Trapping here would kill
+    // every syscall. (Before the privilege model collapsed to two levels this was two
+    // separate tests: one for Kernel mode, one for the now-removed Privileged level.)
     [Fact]
     public void IretTrap_InKernelMode_DoesNotTrap()
-    {
-        Hardware hw = BuildHardwareWithLayout();
-
-        bool trapped = false;
-        hw.InvalidInstruction += (_, _) => { trapped = true; };
-
-        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        ExecuteAt(hw, 200, Instruction.IRET, 0, 0, 0);
-
-        Assert.False(trapped);
-    }
-
-    // EDGE CASE: IRET in Privileged mode must NOT trap — OS routines are not
-    // prohibited from using IRET.
-    [Fact]
-    public void IretTrap_InPrivilegedMode_DoesNotTrap()
     {
         Hardware hw = BuildHardwareWithLayout();
 
@@ -372,7 +358,7 @@ public class TrapProviderTests
     public void BasicOs_CollectTraps_RegistersAllThreeOpcodes()
     {
         // Each opcode is checked on a separate Hardware instance. Firing one trap
-        // enters the Privileged OS routine, which changes the privilege level and
+        // enters the Kernel-mode OS routine, which changes the privilege level and
         // prevents subsequent User-mode trap conditions from being evaluated.
 
         bool iretTrapped = false;

@@ -4,9 +4,9 @@ using Xunit;
 namespace OSTests;
 
 /// <summary>
-/// Covers the privileged OS-support instructions (MOV_REG_IMM16, SAVEREGS,
-/// LOADREGS, SETLAYOUT, OSRET) and the Privileged-mode absolute addressing that
-/// underpins OS code running in its own memory region.
+/// Covers the OS-support instructions (MOV_REG_IMM16, SAVEREGS, LOADREGS,
+/// SETLAYOUT, OSRET) and the Kernel-mode absolute addressing that underpins OS
+/// code running in its own memory region.
 /// </summary>
 public class OsSupportInstructionTests
 {
@@ -44,7 +44,7 @@ public class OsSupportInstructionTests
     }
 
     [Fact]
-    public void GetProgramBase_InPrivilegedMode_IsZero()
+    public void GetProgramBase_InKernelMode_IsZero()
     {
         Hardware hw = NewHw();
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
@@ -112,7 +112,7 @@ public class OsSupportInstructionTests
     }
 
     [Fact]
-    public void DispatchOsRoutine_CapturesContext_JumpsToIvtSlot_InPrivilegedMode()
+    public void DispatchOsRoutine_CapturesContext_JumpsToIvtSlot_InKernelAtomic()
     {
         Hardware hw = NewHw();
         hw.ReserveOsMemory(256);

@@ -324,10 +324,10 @@ public class EdgeCaseScenarioTests : IDisposable
     // ---- kernel-mode faults ----------------------------------------------
 
     [Fact]
-    public void InvalidOpcodeInKernelMode_FaultsToPrivileged()
+    public void InvalidOpcodeInKernelMode_FaultsAndStopsAtomically()
     {
         // An invalid opcode is a fault: Hardware fires the InvalidInstruction event
-        // and raises to Privileged for teardown (no re-entry into the kernel).
+        // and masks interrupts for atomic teardown (no re-entry into the kernel).
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);

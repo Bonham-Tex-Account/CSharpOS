@@ -5,7 +5,7 @@ namespace OSTests;
 
 /// <summary>
 /// Covers the three active dispatch branches inside Hardware.Run when an OS image
-/// is loaded: stepping an in-progress Privileged routine, dispatching the Schedule
+/// is loaded: stepping an in-progress atomic OS routine, dispatching the Schedule
 /// routine when idle, and dispatching a Wake routine when an interrupt is pending.
 /// </summary>
 public class OsRunLoopTests

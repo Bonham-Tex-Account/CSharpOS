@@ -154,19 +154,19 @@ Opcode gaps: opcodes 0x27–0x2F are undefined (jump if carry, jump if overflow,
 ### I/O
 
 `OUT` and `IN` are the user-mode I/O syscall mechanism. When executed in user mode, they do **not** perform the I/O directly; instead they call `hw.EnterKernel()`, which:
-1. Saves the user register file to the kernel section header.
-2. Records trap-info (faulting opcode, operand byte-offset, return IP).
-3. Raises the CPU to Kernel mode.
-4. Jumps to the kernel section's entry point (offset `KernelHeaderSize`).
+1. Pushes a trap frame (the saved user register file + trap-info) onto the base of this process's kernel stack and sets `EBP` to it.
+2. Records trap-info (faulting opcode, operand byte-offset, return IP) within that frame.
+3. Sets the CPU to Kernel mode (interrupts stay enabled — the handler is preemptible).
+4. Jumps to the **shared** syscall handler in the OS region (address in IVT slot `IvtSyscall`).
 
-The kernel-mode handler (assembled by `BasicOS.BuildKernelImage()`) reads the faulting opcode, dispatches to the real `OUT` or `IN` call (which now executes at Kernel level), and calls `IRET` to return to user mode.
+The shared handler (`EmitSyscall` in `OsRoutines.cs`) reads the faulting opcode via `EBP`, dispatches to the real `OUT` or `IN` call (which now executes at Kernel level), and calls `IRET` to return to user mode. Because the trap frame lives on the per-process kernel stack, a syscall that blocks mid-handler survives a context switch without clobbering another process's in-flight syscall.
 
 | Mnemonic | Opcode | Assembler method | Description |
 |----------|--------|------------------|-------------|
 | `OUT reg` | 0x30 | `Out(reg)` | Write `reg[reg]` to the process's stdout device (fd 1). In user mode: trap to kernel. In kernel mode: deliver to device, blocking if the device is output-busy. |
 | `IN reg` | 0x31 | `In(reg)` | Read from the process's stdin device (fd 0) into `reg[reg]`. In user mode: trap to kernel. In kernel mode: dequeue from device buffer or block the process until input arrives. |
 | `HLT` | 0x32 | `Hlt()` | Terminate the running process with exit status 0. Dispatches `IvtHalt`; the OS frees memory, resolves parent/zombie/orphan logic, and schedules the next process. |
-| `IRET` | 0x33 | `Iret()` | Return from a kernel-mode syscall handler to user mode. Restores the user register file from the kernel section header and resumes user code at the saved return IP. **Forbidden in user mode** (trapped as an invalid instruction by `IretTrapProvider`). |
+| `IRET` | 0x33 | `Iret()` | Return from a kernel-mode syscall handler to user mode. Restores the user register file from the kernel-stack trap frame and resumes user code at the saved return IP. **Forbidden in user mode** (trapped as an invalid instruction by `IretTrapProvider`). |
 
 ### Process control
 
@@ -182,20 +182,20 @@ These instructions are available to user-mode processes. They trap into the priv
 
 ### OS / privileged support
 
-These instructions are used exclusively by the OS ISA routines running in Privileged mode. They have no user-mode guards enforced by traps, but calling them from user mode is incorrect: SAVEREGS/LOADREGS read and write absolute memory addresses, SETLAYOUT reconfigures the hardware layout, and OSRET manipulates the staged context and privilege level in ways that corrupt process state. Only DREAD/DWRITE/DLEN have explicit user-mode faults (see Disk section).
+These instructions are used exclusively by the OS ISA routines running in Kernel mode with interrupts masked (atomic). They have no user-mode guards enforced by traps, but calling them from user mode is incorrect: SAVEREGS/LOADREGS read and write absolute memory addresses, SETLAYOUT reconfigures the hardware layout, and OSRET manipulates the staged context and privilege level in ways that corrupt process state. Only DREAD/DWRITE/DLEN have explicit user-mode faults (see Disk section).
 
 | Mnemonic | Opcode | Assembler method | Description |
 |----------|--------|------------------|-------------|
 | `SAVEREGS [ptr]` | 0x40 | `SaveRegs(ptr)` | Write the captured interrupt frame (the interrupted process's register file, with EIP folded in as a base-relative offset) to the absolute address `reg[ptr]`, followed by the interrupted privilege level. Used by the context-switch routine to persist a process's state to its process-table entry. |
 | `LOADREGS [ptr]` | 0x41 | `LoadRegs(ptr)` | Stage the register file stored at absolute address `reg[ptr]` for `OSRET` to commit. Does not touch the live registers immediately (the routine may still use them as scratch until OSRET). |
-| `SETLAYOUT [ptr]` | 0x42 | `SetLayout(ptr)` | Reload the hardware memory layout (program base, kernel section, memory region, stack extents) from the process-table entry at absolute address `reg[ptr]`. Must be called before OSRET so program-relative addressing targets the correct process. |
+| `SETLAYOUT [ptr]` | 0x42 | `SetLayout(ptr)` | Reload the hardware memory layout (program base, memory region, stack extents) from the process-table entry at absolute address `reg[ptr]`. Must be called before OSRET so program-relative addressing targets the correct process. |
 | `OSRET reg` | 0x43 | `OsRet(reg)` | Atomically commit the context staged by LOADREGS, restore the IP from the EIP slot of that context (resolved against the program base for `reg[reg]`'s privilege level), and drop the CPU to privilege level `reg[reg]`. If no context was staged, sets `processRunning = false` (idle). |
 
-**OSRET is the only path back from Privileged mode.** An OS routine always ends with a `LOADREGS`/`SETLAYOUT`/`OSRET` sequence (or a `JMP resume_mlfq` that eventually reaches one).
+**OSRET is the only path back from an atomic OS routine** (it re-enables interrupts). An OS routine always ends with a `LOADREGS`/`SETLAYOUT`/`OSRET` sequence (or a `JMP resume_mlfq` that eventually reaches one).
 
 ### Disk
 
-Block-device transfers between RAM and the `Bin` disk. The disk is only accessible from Kernel or Privileged mode; executing these in User mode calls `hw.TrapInvalidInstruction` (faults the process).
+Block-device transfers between RAM and the `Bin` disk. The disk is only accessible from Kernel mode; executing these in User mode calls `hw.TrapInvalidInstruction` (faults the process).
 
 | Mnemonic | Opcode | Assembler method | Description |
 |----------|--------|------------------|-------------|
@@ -203,7 +203,7 @@ Block-device transfers between RAM and the `Bin` disk. The disk is only accessib
 | `DWRITE slot, [src], len` | 0x45 | `DWrite(slot, src, len)` | Copy `reg[len]` bytes from **absolute** address `reg[src]` into disk slot `reg[slot]`. |
 | `DLEN slot, lenOut` | 0x46 | `DLen(slot, lenOut)` | Write the stored byte length of disk slot `reg[slot]` into `reg[lenOut]`. Used by `IvtExec` to size the new image's allocation before loading it. |
 
-**Disk addresses are absolute** (program base = 0 for Privileged mode), not program-relative.
+**Disk addresses are absolute** (program base = 0 in Kernel mode), not program-relative.
 
 ---
 
@@ -370,7 +370,7 @@ asm.Hlt();
 byte[] image = asm.Build();
 ```
 
-When `OUT` executes in user mode, the kernel handler runs (via the kernel section), delivers the value to the process's stdout device, and returns with `IRET`. Similarly for `IN` — if no input is buffered, the process is blocked until a `RaiseInputInterrupt` wakes it.
+When `OUT` executes in user mode, the shared syscall handler runs (in Kernel mode, on the process's kernel stack), delivers the value to the process's stdout device, and returns with `IRET`. Similarly for `IN` — if no input is buffered, the process is blocked until a `RaiseInputInterrupt` wakes it.
 
 ---
 
