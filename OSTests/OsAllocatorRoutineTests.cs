@@ -751,7 +751,7 @@ public class OsAllocatorRoutineTests
 
     private static void RunRoutine(Hardware hw)
     {
-        for (int step = 0; step < 5000 && hw.GetPrivilegeLevel() == PrivilegeLevel.Privileged; step++)
+        for (int step = 0; step < 5000 && !hw.InterruptsEnabled(); step++)
         {
             int ip = hw.GetInstructionPointer();
             hw.SetInstructionPointer(ip + 4);

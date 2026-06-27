@@ -401,8 +401,10 @@ public sealed class SpectreDashboard
 
             if (havePrev && OnProgramSide(prev) != isProgram)
             {
-                // Control crossed sides: annotate the side being entered.
-                string desc = HardwareEventBridge.DescribeTransition(prev, step.Privilege);
+                // Control crossed sides: annotate the side being entered. Recorded steps
+                // are only user code and the (preemptible) syscall handler — never an
+                // atomic OS routine — so interrupts are not masked at these crossings.
+                string desc = HardwareEventBridge.DescribeTransition(prev, step.Privilege, false);
                 IRenderable marker = new Markup($"[grey39]── {Markup.Escape(desc)} @{step.Address} ──[/]");
                 if (isProgram)
                 {

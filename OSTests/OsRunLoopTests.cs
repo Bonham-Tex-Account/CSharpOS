@@ -42,14 +42,14 @@ public class OsRunLoopTests
         int addr = 3000; // past the OS data section
         hw.WriteBytes(addr, Test.Word(Instruction.MOV_REG_IMM, 0, 77, 0));
         hw.SetInstructionPointer(addr);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         hw.SetInterruptsEnabled(false);
 
         hw.Run();
 
         Assert.Equal(77, hw.ReadRegisterAt(0));
         Assert.Equal(addr + 4, hw.GetInstructionPointer());
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
         Assert.False(hw.InterruptsEnabled());
     }
 
@@ -65,8 +65,9 @@ public class OsRunLoopTests
 
         hw.Run();
 
-        // The Schedule routine was entered: hardware is now executing it (Privileged).
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        // The Schedule routine was entered: hardware is now executing it atomically.
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled());
     }
 
     [Fact]
@@ -99,7 +100,8 @@ public class OsRunLoopTests
         // The next Run tick must dispatch WakeInput before executing any process instruction.
         hw.Run();
 
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel()); // routine entered
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel()); // routine entered
+        Assert.False(hw.InterruptsEnabled());
     }
 
     [Fact]

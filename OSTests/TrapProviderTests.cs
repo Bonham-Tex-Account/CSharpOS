@@ -81,7 +81,7 @@ public class TrapProviderTests
         bool trapped = false;
         hw.InvalidInstruction += (_, _) => { trapped = true; };
 
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         ExecuteAt(hw, 200, Instruction.IRET, 0, 0, 0);
 
         Assert.False(trapped);

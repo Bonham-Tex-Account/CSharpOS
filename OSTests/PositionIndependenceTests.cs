@@ -67,7 +67,7 @@ public class PositionIndependenceTests
         hw.WriteBytes(Base, CallRetProgram());
         hw.SetInstructionPointer(Base);
 
-        for (int i = 0; i < 20 && hw.GetPrivilegeLevel() != PrivilegeLevel.Privileged; i++)
+        for (int i = 0; i < 20 && hw.InterruptsEnabled(); i++)
         {
             hw.Run();
         }

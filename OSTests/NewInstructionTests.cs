@@ -208,7 +208,8 @@ public class NewInstructionTests
         Hardware hw = Test.NewHardware(1024, os);
         hw.WriteBytes(0, Test.Word(Instruction.HLT, 0, 0, 0));
         Instruction.Execute(0, hw);
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled()); // atomic teardown
     }
 
     [Fact]

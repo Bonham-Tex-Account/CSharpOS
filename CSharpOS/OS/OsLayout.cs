@@ -28,7 +28,6 @@ public static class OsLayout
     public const int BuddyMinBlockOffset   = DataBase + 36;  // minimum allocatable block size (power of 2)
     public const int BuddyLevelsOffset     = DataBase + 40;  // tree depth: log2(HeapSize / MinBlock)
     public const int NextPidOffset         = DataBase + 44;  // monotonic PID counter (spawning)
-    public const int KernelImageSlotOffset = DataBase + 48;  // disk slot holding the syscall image (EXEC re-loads it)
 
     // ---- MLFQ constants ---------------------------------------------------
     public const int QueueCount    = 4;
@@ -46,7 +45,7 @@ public static class OsLayout
 
     // ---- process table -----------------------------------------------------
     public const int MaxProcesses       = 8;
-    public const int ProcessTableOffset = DataBase + 52;  // after header + buddy fields + NextPid + KernelImageSlot
+    public const int ProcessTableOffset = DataBase + 48;  // after header + buddy fields + NextPid
 
     // ---- buddy bitmap (compact: 1 bit per tree node, bit=1 means FREE) ----
     // Stored as BuddyBitmapWords consecutive 4-byte words immediately after the

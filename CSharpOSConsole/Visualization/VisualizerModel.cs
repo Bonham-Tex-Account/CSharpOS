@@ -97,6 +97,9 @@ public sealed class PrivilegeTransition
     public PrivilegeLevel From { get; init; }
     public PrivilegeLevel To { get; init; }
     public string Description { get; init; } = "";
+    // True when interrupts were masked at the transition — i.e. this is an atomic
+    // OS-routine dispatch rather than a (preemptible) syscall trap into the kernel.
+    public bool InterruptsMasked { get; init; }
     public int AtAddress { get; init; }
 }
 

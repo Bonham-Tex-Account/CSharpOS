@@ -19,12 +19,13 @@ public class OsContextSwitchRoutineTests
     }
 
     // Runs privileged instructions one at a time (mirroring Hardware.Run's advance)
-    // until the routine drops out of Privileged mode via OSRET, or a step cap trips.
+    // until the routine re-enables interrupts via OSRET (leaves the atomic OS routine),
+    // or a step cap trips.
     private static void RunRoutine(Hardware hw)
     {
         for (int step = 0; step < 2000; step++)
         {
-            if (hw.GetPrivilegeLevel() != PrivilegeLevel.Privileged)
+            if (hw.InterruptsEnabled())
             {
                 return;
             }

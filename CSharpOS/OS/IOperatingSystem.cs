@@ -7,12 +7,6 @@ namespace CSharpOS;
 public interface IOperatingSystem
 {
     /// <summary>
-    /// The assembled syscall functions copied into each process's kernel section. Its
-    /// length sizes that section (empty when the OS ships no syscall library).
-    /// </summary>
-    byte[] KernelImage { get; }
-
-    /// <summary>
     /// Size of the OS's own private memory region (IVT, assembled OS routines, and OS
     /// data structures). Hardware reserves this many bytes at address 0; 0 means the OS
     /// keeps no in-memory image.
