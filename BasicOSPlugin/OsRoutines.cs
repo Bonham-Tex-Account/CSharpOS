@@ -74,6 +74,8 @@ public static class OsRoutines
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
+        EmitReleaseFrames(asm); // shared subroutine "release_frames"; ends with Ret
+        EmitFlushFrames(asm);   // shared subroutine "flush_frames"; ends with Ret
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);
@@ -232,16 +234,23 @@ public static class OsRoutines
         asm.Jmp("exit_body");
     }
 
-    // IvtPageFault: demand-paging fault handler (Phase 2). Entered with the faulting page
-    // number in EAX when a user data access touches a non-resident page. Makes the page
-    // resident by pointing its PTE at the page's physical home in the process's allocated
-    // block (Phase 1 backing), then reschedules — the faulting instruction re-runs and now
-    // translates. The faulting context (with its IP rewound to the faulting instruction)
-    // was captured on entry; SAVEREGS persists it so the process can resume.
+    // IvtPageFault: demand-paging fault handler (Phase 2, increment 2). Entered with the
+    // faulting page number in EAX when a user data access touches a non-resident page.
+    // Makes the page resident by mapping it into a physical frame from the small shared
+    // frame pool: it claims a free frame, or — when the pool is full — evicts the
+    // least-recently-used resident frame (writing it back to its home first if dirty) and
+    // flips that page's owner PTE back to non-resident. It then copies the faulting page in
+    // from its block home, records the frame in the core map, points the PTE at the frame,
+    // and reschedules — the faulting instruction re-runs and now translates. The faulting
+    // context (IP rewound to the faulting instruction) was captured on entry; SAVEREGS
+    // persists it so the process can resume.
+    //
+    // Persistent registers across the handler: R12 = faulting page, R13 = current index,
+    // R14 = the faulting page's block home, R15 = the chosen frame index.
     private static void EmitPageFault(Assembler asm)
     {
-        // PageSize and the per-process page-table stride are powers of two; shift by their
-        // log2 (computed at emit time) instead of multiplying.
+        // PageSize, the page-table stride, and the PTE size are powers of two; shift by
+        // their log2 (computed at emit time) instead of multiplying.
         int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
         int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
         int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
@@ -249,30 +258,229 @@ public static class OsRoutines
         asm.Mov(R(R12), R(EAX));                    // R12 = faulting page (helpers clobber EAX)
 
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
-        asm.Load(R(ECX), R(EAX));                   // ECX = current index (resume_mlfq anchor)
-        EntryAddress(asm, ECX, EBX);                // EBX = faulting process's entry
+        asm.Load(R(R13), R(EAX));                   // R13 = current index
+        EntryAddress(asm, R13, EBX);                // EBX = faulting process's entry
         asm.SaveRegs(R(EBX));                        // persist faulting context (IP rewound)
 
-        // physBase = entry.ProgramAddress + faultingPage * PageSize
-        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R8);
-        asm.Mov(R(R9), R(R12));
-        asm.MovImm(R(R10), pageShift);
-        asm.Shl(R(R9), R(R10));
-        asm.Add(R(R9), R(R8));                        // R9 = page's physical home
+        // home = entry.ProgramAddress + faultingPage * PageSize  (the page's block home)
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R14);
+        asm.Mov(R(R8), R(R12));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shl(R(R8), R(EAX));
+        asm.Add(R(R14), R(R8));                      // R14 = home
 
-        // pteAddress = PageTableBase + index * PageTableBytesPerProcess + faultingPage * 4
-        asm.Mov(R(R11), R(ECX));
-        asm.MovImm(R(R10), tableStrideShift);
-        asm.Shl(R(R11), R(R10));
-        Imm16(asm, R13, OsLayout.PageTableBase);
-        asm.Add(R(R11), R(R13));
-        asm.Mov(R(R13), R(R12));
-        asm.MovImm(R(R10), pteShift);
-        asm.Shl(R(R13), R(R10));
-        asm.Add(R(R11), R(R13));                      // R11 = &PTE[index][faultingPage]
+        // --- find a free frame (Occupied == 0) ---
+        asm.MovImm(R(ESI), 0);                       // ESI = f
+        asm.Label("pf_free");
+        asm.MovImm(R(EAX), OsLayout.FrameCount);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("pf_lru");                           // no free frame -> evict LRU
+        FrameEntryAddress(asm, ESI, R9);             // R9 = &frame[f]
+        LoadField(asm, R9, OsLayout.FrameOccupiedField, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jz("pf_take_free");                      // Occupied == 0
+        asm.Inc(R(ESI));
+        asm.Jmp("pf_free");
 
-        asm.Store(R(R11), R(R9));                     // PTE := physBase (now resident)
+        asm.Label("pf_take_free");
+        asm.Mov(R(R15), R(ESI));                     // frame = the free frame
+        asm.Jmp("pf_fill");                          // empty frame: no eviction needed
+
+        // --- pool full: choose the LRU victim (smallest LastUse stamp) ---
+        asm.Label("pf_lru");
+        asm.MovImm(R(R15), 0);                       // victim = frame 0
+        FrameEntryAddress(asm, R15, R9);
+        LoadField(asm, R9, OsLayout.FrameLastUseField, EDX); // EDX = minUse
+        asm.MovImm(R(ESI), 1);                       // scan from frame 1
+        asm.Label("pf_lru_scan");
+        asm.MovImm(R(EAX), OsLayout.FrameCount);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("pf_evict");                         // scanned all frames
+        FrameEntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, OsLayout.FrameLastUseField, R10);
+        asm.Cmp(R(R10), R(EDX));
+        asm.Jns("pf_lru_next");                      // R10 >= minUse: not older
+        asm.Mov(R(EDX), R(R10));                      // new minimum
+        asm.Mov(R(R15), R(ESI));                      // new victim
+        asm.Label("pf_lru_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("pf_lru_scan");
+
+        // --- evict the victim frame R15 (it is occupied) ---
+        asm.Label("pf_evict");
+        FrameEntryAddress(asm, R15, R9);             // R9 = &frame[victim]
+        LoadField(asm, R9, OsLayout.FrameDirtyField, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jz("pf_evict_unmap");                    // clean: drop without write-back
+        // dirty: write the frame back to its home
+        FrameBaseAddress(asm, R15, R8, pageShift);   // R8 = frame physical base (src)
+        LoadField(asm, R9, OsLayout.FrameHomeField, R11); // R11 = home (dst)
+        EmitPageCopy(asm, R8, R11, "pf_wb", R10);    // copy PageSize bytes (word value in R10)
+
+        asm.Label("pf_evict_unmap");
+        // flip the evicted page's owner PTE back to non-resident
+        FrameEntryAddress(asm, R15, R9);             // recompute &frame[victim]
+        LoadField(asm, R9, OsLayout.FrameOwnerProcField, R8);  // R8 = oldProc
+        LoadField(asm, R9, OsLayout.FrameOwnerPageField, R10); // R10 = oldPage
+        EmitPteAddress(asm, R8, R10, R11, EDX, tableStrideShift, pteShift); // R11 = &PTE[oldProc][oldPage]
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Dec(R(EAX));                              // EAX = NonResidentPage (-2)
+        asm.Store(R(R11), R(EAX));
+
+        // --- fill: copy the faulting page from its home into frame R15 ---
+        asm.Label("pf_fill");
+        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame physical base (dst)
+        asm.Mov(R(R8), R(R14));                       // R8 = home (src)
+        EmitPageCopy(asm, R8, R11, "pf_fl", R10);    // copy home -> frame
+
+        // --- record the new occupant in the core map ---
+        FrameEntryAddress(asm, R15, R9);             // R9 = &frame[R15]
+        StoreFieldImm(asm, R9, OsLayout.FrameOccupiedField, 1);
+        StoreFieldReg(asm, R9, OsLayout.FrameOwnerProcField, R13);
+        StoreFieldReg(asm, R9, OsLayout.FrameOwnerPageField, R12);
+        StoreFieldReg(asm, R9, OsLayout.FrameHomeField, R14);
+        StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0);
+        StoreFieldImm(asm, R9, OsLayout.FrameLastUseField, 0); // the MMU stamps it on the retry
+
+        // --- map the faulting page resident -> the frame base ---
+        EmitPteAddress(asm, R13, R12, R10, EDX, tableStrideShift, pteShift); // R10 = &PTE[cur][page]
+        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base
+        asm.Store(R(R10), R(R11));                    // PTE := frame base (now resident)
+
+        asm.Mov(R(ECX), R(R13));                      // resume_mlfq anchor = current index
         asm.Jmp("resume_mlfq");
+    }
+
+    // release_frames: free every frame owned by the current process (Occupied := 0), with
+    // NO write-back — the process is exiting or replacing its memory, so the page contents
+    // are discarded. Prevents a dead process's frame from later being evicted into RAM that
+    // has since been freed and reused. CALL/RET subroutine (needs the privileged stack);
+    // clobbers EAX/EBP/ESI/R8/R9/R10, preserves EBX.
+    private static void EmitReleaseFrames(Assembler asm)
+    {
+        asm.Label("release_frames");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R8), R(EAX));                      // R8 = my index
+        asm.MovImm(R(ESI), 0);
+        asm.Label("rf_scan");
+        asm.MovImm(R(EAX), OsLayout.FrameCount);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("rf_done");
+        FrameEntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, OsLayout.FrameOccupiedField, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jz("rf_next");                            // already free
+        LoadField(asm, R9, OsLayout.FrameOwnerProcField, R10);
+        asm.Cmp(R(R10), R(R8));
+        asm.Jnz("rf_next");                           // owned by another process
+        StoreFieldImm(asm, R9, OsLayout.FrameOccupiedField, 0);
+        asm.Label("rf_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("rf_scan");
+        asm.Label("rf_done");
+        asm.Ret();
+    }
+
+    // flush_frames: write every DIRTY frame owned by the current process back to its home
+    // and clear its dirty bit (the page stays resident in its frame). Used by fork before
+    // it flat-memcpys the parent's home RAM, so the copy sees the parent's live data.
+    // CALL/RET subroutine (needs the privileged stack). R12 = my index across the loop.
+    private static void EmitFlushFrames(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        asm.Label("flush_frames");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R12), R(EAX));                     // R12 = my index
+        asm.MovImm(R(ESI), 0);
+        asm.Label("ff_scan");
+        asm.MovImm(R(EAX), OsLayout.FrameCount);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("ff_done");
+        FrameEntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, OsLayout.FrameOccupiedField, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jz("ff_next");                            // free frame
+        LoadField(asm, R9, OsLayout.FrameOwnerProcField, R10);
+        asm.Cmp(R(R10), R(R12));
+        asm.Jnz("ff_next");                           // owned by another process
+        LoadField(asm, R9, OsLayout.FrameDirtyField, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jz("ff_next");                            // clean: nothing to write back
+        FrameBaseAddress(asm, ESI, R8, pageShift);    // R8 = frame base (src)
+        LoadField(asm, R9, OsLayout.FrameHomeField, R11); // R11 = home (dst)
+        EmitPageCopy(asm, R8, R11, "ff_wb", R10);     // copy frame -> home
+        FrameEntryAddress(asm, ESI, R9);              // recompute (copy clobbered scratch)
+        StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0); // now clean
+        asm.Label("ff_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("ff_scan");
+        asm.Label("ff_done");
+        asm.Ret();
+    }
+
+    // Computes the absolute address of frame `frameReg`'s core-map entry into `dest`
+    // (= FrameTableBase + frame * FrameTableEntryBytes). Clobbers EAX and `dest`.
+    private static void FrameEntryAddress(Assembler asm, byte frameReg, byte dest)
+    {
+        asm.Mov(R(dest), R(frameReg));
+        asm.MovImm(R(EAX), OsLayout.FrameTableEntryBytes);
+        asm.Mul(R(dest), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.FrameTableBase);
+        asm.Add(R(dest), R(EAX));
+    }
+
+    // Computes the absolute physical base of frame `frameReg` into `dest`
+    // (= FramePoolBase + frame * PageSize). Clobbers EAX and `dest`.
+    private static void FrameBaseAddress(Assembler asm, byte frameReg, byte dest, int pageShift)
+    {
+        asm.Mov(R(dest), R(frameReg));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shl(R(dest), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.FramePoolBase);
+        asm.Add(R(dest), R(EAX));
+    }
+
+    // Computes &PTE[procReg][pageReg] into `dest` (= PageTableBase + proc*stride + page*4).
+    // Clobbers EAX, `dest`, and `scratch`.
+    private static void EmitPteAddress(Assembler asm, byte procReg, byte pageReg, byte dest, byte scratch, int strideShift, int pteShift)
+    {
+        asm.Mov(R(dest), R(procReg));
+        asm.MovImm(R(EAX), strideShift);
+        asm.Shl(R(dest), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.PageTableBase);
+        asm.Add(R(dest), R(EAX));
+        asm.Mov(R(scratch), R(pageReg));
+        asm.MovImm(R(EAX), pteShift);
+        asm.Shl(R(scratch), R(EAX));
+        asm.Add(R(dest), R(scratch));
+    }
+
+    // Emits a word-by-word copy of PageSize bytes from [srcReg] to [dstReg]. `valReg` holds
+    // each word in flight. Clobbers EAX, EDI, and `valReg`; preserves srcReg/dstReg. Label
+    // names are derived from `prefix`, so each call site must pass a unique prefix.
+    private static void EmitPageCopy(Assembler asm, byte srcReg, byte dstReg, string prefix, byte valReg)
+    {
+        asm.MovImm(R(EDI), 0);                        // EDI = byte offset
+        asm.Label(prefix + "_c");
+        asm.MovImm16(R(EAX), OsLayout.PageSize);
+        asm.Cmp(R(EDI), R(EAX));
+        asm.Jns(prefix + "_d");                       // offset >= PageSize: done
+        asm.Mov(R(EAX), R(srcReg));
+        asm.Add(R(EAX), R(EDI));
+        asm.Load(R(valReg), R(EAX));                  // valReg = *(src + offset)
+        asm.Mov(R(EAX), R(dstReg));
+        asm.Add(R(EAX), R(EDI));
+        asm.Store(R(EAX), R(valReg));                 // *(dst + offset) = valReg
+        asm.MovImm(R(EAX), 4);
+        asm.Add(R(EDI), R(EAX));                       // offset += 4
+        asm.Jmp(prefix + "_c");
+        asm.Label(prefix + "_d");
     }
 
     // exit_body: tear down the running process (entry in EBX, ExitStatus already set).
@@ -287,6 +495,9 @@ public static class OsRoutines
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated); // hide from scans
         SetupPrivilegedStack(asm);
         asm.Call("free_sub");
+        // Reclaim this process's physical frames (no write-back — its memory is gone), so
+        // they cannot later be evicted into freed/reused RAM. EBX (entry) is preserved.
+        asm.Call("release_frames");
 
         // Scan for a parent blocked in wait() on this PID.
         LoadField(asm, EBX, Hardware.ProcessEntryPid, R8);   // R8 = my Pid
@@ -735,6 +946,11 @@ public static class OsRoutines
         EntryAddress(asm, ECX, R8);                // R8 = parent entry
         asm.SaveRegs(R(R8));                        // parent entry now holds current regs/EIP/level
 
+        // Flush the parent's dirty pages from their frames back to their block homes, so the
+        // flat memcpy below (which copies the parent's home RAM) sees the parent's live data.
+        SetupPrivilegedStack(asm);
+        asm.Call("flush_frames");
+
         // Find a free child slot: a Terminated slot in [0, count), else a fresh slot if
         // the table is not full; otherwise fork fails.
         Imm16(asm, EAX, OsLayout.ProcessCountOffset);
@@ -893,6 +1109,9 @@ public static class OsRoutines
         // TotalSize that free_sub reads (DiskSlot, which we changed, is not read by it).
         SetupPrivilegedStack(asm);
         asm.Call("free_sub");
+        // Release the old image's physical frames (its memory is being replaced); the new
+        // image faults its pages in fresh after the page table is reseeded on resume.
+        asm.Call("release_frames");
 
         // Recompute sizing from the entry (still holds old ProgramSize/TotalSize; the new
         // slot is in DiskSlot): newLen via DLEN, newTotal = oldTotal - oldProgramSize + newLen.

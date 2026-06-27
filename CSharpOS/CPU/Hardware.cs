@@ -175,6 +175,11 @@ public partial class Hardware
     private int[] pageSeedBase = NewFilled(OsLayout.MaxProcesses, -1);
     private int[] pageSeedExtent = NewFilled(OsLayout.MaxProcesses, -1);
 
+    // Global monotonically increasing access counter the MMU stamps into a frame's
+    // LastUse on every resident access (the reference clock for LRU eviction). The ISA
+    // page-fault handler evicts the resident frame with the smallest stamp.
+    private int pageClock;
+
     private static int[] NewFilled(int count, int value)
     {
         int[] array = new int[count];
@@ -756,7 +761,13 @@ public partial class Hardware
             physical = currentProcessInstructionStart + virtualAddress;
             return true;
         }
-        physical = pte + offset; // resident: PTE holds the page's physical base
+        // Resident: the PTE holds the page's frame base in the physical frame pool. Bump
+        // the frame's LRU stamp (and set its dirty bit on a write) — the reference/dirty
+        // bits a hardware MMU maintains; the ISA page-fault handler reads them when it must
+        // evict a victim to free a frame.
+        int frameIndex = (pte - OsLayout.FramePoolBase) / OsLayout.PageSize;
+        StampFrame(frameIndex, isWrite);
+        physical = pte + offset;
         return true;
     }
 
@@ -845,6 +856,50 @@ public partial class Hardware
     public bool IsPageResident(int processIndex, int page)
     {
         return PageTableEntry(processIndex, page) >= 0;
+    }
+
+    // Stamps a frame's LRU counter on every resident access and sets its dirty bit on a
+    // write. Raw writes: this is OS/MMU bookkeeping (the reference and dirty bits), not
+    // part of the visible program-memory timeline, so it fires no MemoryWritten events.
+    private void StampFrame(int frameIndex, bool isWrite)
+    {
+        if (frameIndex < 0 || frameIndex >= OsLayout.FrameCount)
+        {
+            return; // a resident PTE outside the pool (e.g. a hand-seeded test value): nothing to stamp
+        }
+        pageClock++;
+        int entry = osMemoryBase + OsLayout.FrameTableEntry(frameIndex);
+        WriteWordRaw(entry + OsLayout.FrameLastUseField, pageClock);
+        if (isWrite)
+        {
+            WriteWordRaw(entry + OsLayout.FrameDirtyField, 1);
+        }
+    }
+
+    // ---- frame table ("core map") accessors for tests and the visualizer ----
+    public bool FrameOccupied(int frame) { return ReadFrameField(frame, OsLayout.FrameOccupiedField) != 0; }
+    public int FrameOwnerProcess(int frame) { return ReadFrameField(frame, OsLayout.FrameOwnerProcField); }
+    public int FrameOwnerPage(int frame) { return ReadFrameField(frame, OsLayout.FrameOwnerPageField); }
+    public bool FrameDirty(int frame) { return ReadFrameField(frame, OsLayout.FrameDirtyField) != 0; }
+    public int FrameLastUse(int frame) { return ReadFrameField(frame, OsLayout.FrameLastUseField); }
+
+    // Number of frames in the pool currently holding a page.
+    public int ResidentFrameCount()
+    {
+        int count = 0;
+        for (int f = 0; f < OsLayout.FrameCount; f++)
+        {
+            if (FrameOccupied(f))
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int ReadFrameField(int frame, int field)
+    {
+        return ReadWord(osMemoryBase + OsLayout.FrameTableEntry(frame) + field);
     }
 
     // Word read/write against a plain byte[] (e.g. a register-file snapshot),
