@@ -17,11 +17,14 @@ public sealed partial class Assembler
 
     // ---- accessor methods ------------------------------------------------
 
-    // Current length of the emitted code in bytes. Lets a caller record where the
-    // next routine will start (before applying Build's origin) when packing several
-    // routines into one image.
+    /// <summary>
+    /// Current length of the emitted code in bytes. Lets a caller record where the next
+    /// routine will start (before applying Build's origin) when packing several routines
+    /// into one image.
+    /// </summary>
     public int CodeLength { get { return code.Count; } }
 
+    /// <summary>Defines a label at the current code position for jumps and references to target.</summary>
     public void Label(string name)
     {
         labels[name] = code.Count;
@@ -60,7 +63,7 @@ public sealed partial class Assembler
         Emit(Instruction.MOV_REG_IMM16, (byte)dest, (byte)((immediate >> 8) & 0xFF), (byte)(immediate & 0xFF));
     }
 
-    // Loads the resolved program-relative offset of a label as an 8-bit immediate.
+    /// <summary>Loads the resolved program-relative offset of a label as an 8-bit immediate.</summary>
     public void MovImmLabel(RegisterName dest, string label)
     {
         int position = code.Count;
@@ -247,14 +250,18 @@ public sealed partial class Assembler
         Emit(Instruction.SETFOCUS, (byte)pid, 0, 0);
     }
 
-    // Reserves a 4-byte zero-initialized slot in the data section.
+    /// <summary>Reserves a 4-byte zero-initialized slot in the data section, addressable by <paramref name="name"/>.</summary>
     public void DataInt(string name)
     {
         dataLabels.Add(name);
     }
 
-    // origin is added to every resolved label offset, so code assembled here can
-    // be loaded at a non-zero offset and still self-reference correctly.
+    /// <summary>
+    /// Resolves labels and returns the assembled bytes (code followed by the data
+    /// section). <paramref name="origin"/> is added to every resolved label offset, so
+    /// code assembled here can be loaded at a non-zero offset and still self-reference
+    /// correctly.
+    /// </summary>
     public byte[] Build(int origin = 0)
     {
         List<byte> output = new List<byte>(code);

@@ -1,5 +1,9 @@
 namespace CSharpOS;
 
+/// <summary>
+/// Traps IRET when executed in user mode: returning from an interrupt is privileged.
+/// Discovered and registered by reflection at OS load.
+/// </summary>
 public sealed class IretTrapProvider : ITrapProvider
 {
     public Trap GetTrap()

@@ -1,11 +1,17 @@
 namespace CSharpOS;
 
+/// <summary>
+/// Raised when a process emits an output value (a kernel OUT). Carries the value, the
+/// stdout device it went to, and the producing process so a host can route it.
+/// </summary>
 public class ProgramOutputArgs : EventArgs
 {
     public int Value { get; init; }
-    // The stdout device the output went to (resolved through the process's fd 1).
+    /// <summary>The stdout device the output went to (resolved through the process's fd 1).</summary>
     public int Device { get; init; }
-    // The process-table index that produced the output, so the host can append it to
-    // that process's own screen buffer regardless of how its fds are bound.
+    /// <summary>
+    /// The process-table index that produced the output, so the host can append it to
+    /// that process's own screen buffer regardless of how its fds are bound.
+    /// </summary>
     public int SourceProcess { get; init; }
 }

@@ -1,5 +1,10 @@
 namespace CSharpOS;
 
+/// <summary>
+/// The instruction set: the opcode byte constants and the dispatch table that maps
+/// each opcode to its implementation in <see cref="InstructionFunctions"/>. Every
+/// instruction is a 4-byte word (opcode + three operand bytes).
+/// </summary>
 public static class Instruction
 {
     // ---- public constants (opcodes) --------------------------------------
@@ -113,7 +118,11 @@ public static class Instruction
 
     // ---- integral functions ----------------------------------------------
 
-    // Returns true if a handler ran, false if the opcode was invalid and trapped.
+    /// <summary>
+    /// Fetches and runs the instruction at <paramref name="address"/>: evaluates any
+    /// OS traps for the opcode, then dispatches to its handler.
+    /// </summary>
+    /// <returns>True if a handler ran; false if the opcode trapped (OS trap or invalid opcode).</returns>
     public static bool Execute(int address, Hardware hw)
     {
         byte[] bytes = hw.ReadBytes(address);

@@ -8,6 +8,6 @@ public enum WaitReason
     None,
     Input,
     Output,
-    // Blocked in wait(pid), waiting for a child process to terminate.
+    /// <summary>Blocked in wait(pid), waiting for a child process to terminate.</summary>
     ChildProcess
 }
