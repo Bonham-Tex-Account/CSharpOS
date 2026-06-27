@@ -159,8 +159,10 @@ public abstract class OperatingSystem : IOperatingSystem
             process.RequiredMemory = minMemory;
         }
 
-        int kernelSection = Hardware.KernelHeaderSize + KernelImage.Length;
-        int total = programLength + kernelSection + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
+        // Layout: [program][memory][user stack][kernel stack]. The syscall handler is
+        // shared OS code now (no per-process kernel section); the kernel stack region
+        // (KernelStackSize) holds the syscall trap frame at its base.
+        int total = programLength + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
         int slot = FindFreeSlot(hw);
         if (slot < 0)
@@ -190,12 +192,6 @@ public abstract class OperatingSystem : IOperatingSystem
             return;
         }
 
-        // The program image is now in RAM; place the per-process kernel section after it.
-        if (KernelImage.Length > 0)
-        {
-            hw.WriteBytes(programAddress + programLength + Hardware.KernelHeaderSize, KernelImage);
-        }
-
         // Read back the PID the spawn routine assigned.
         process.Pid = ReadWord(hw, entry + Hardware.ProcessEntryPid);
 
@@ -215,7 +211,7 @@ public abstract class OperatingSystem : IOperatingSystem
         // Keep the C# descriptor and the name map in sync for callers/observers.
         process.ProgramAddress = programAddress;
         process.ProgramSize = programLength;
-        process.RegisterStateAddress = programAddress + programLength + kernelSection;
+        process.RegisterStateAddress = programAddress + programLength; // front of the memory region (no kernel section)
         process.InstructionPointer = programAddress;
         namesByBase[programAddress] = ProcessName(process, diskSlot);
     }

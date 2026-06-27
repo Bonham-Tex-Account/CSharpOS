@@ -33,21 +33,24 @@ public class OsRunLoopTests
     }
 
     [Fact]
-    public void Run_WhenPrivileged_StepsOneOsRoutineInstruction()
+    public void Run_WhenInterruptsDisabled_StepsOneOsRoutineInstruction()
     {
-        // When level == Privileged, Run steps the current OS routine instruction
-        // rather than dispatching a new one or stepping a user process.
+        // While interrupts are disabled (an atomic OS routine in flight), Run steps the
+        // current OS routine instruction rather than dispatching a new one or stepping a
+        // user process. Atomicity is now the interrupt flag, not the privilege level.
         Hardware hw = NewSeededHardware();
         int addr = 3000; // past the OS data section
         hw.WriteBytes(addr, Test.Word(Instruction.MOV_REG_IMM, 0, 77, 0));
         hw.SetInstructionPointer(addr);
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetInterruptsEnabled(false);
 
         hw.Run();
 
         Assert.Equal(77, hw.ReadRegisterAt(0));
         Assert.Equal(addr + 4, hw.GetInstructionPointer());
         Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled());
     }
 
     [Fact]

@@ -17,9 +17,10 @@ public class MissingCoverageTests
 
     // Returns Hardware with a process layout loaded. The merged process range runs
     // from LayoutProgramAddress to RangeEnd (exclusive):
-    //   ProgramAddress + ProgramSize + kernel section + user memory + user stack + kernel stack
+    //   ProgramAddress + ProgramSize + user memory + user stack + kernel stack
+    // (there is no per-process kernel section now; the handler is shared OS code).
     private static int RangeEnd =>
-        LayoutProgramAddress + LayoutProgramSize + Hardware.KernelHeaderSize
+        LayoutProgramAddress + LayoutProgramSize
         + LayoutUserMemory + LayoutUserStack + Hardware.KernelStackSize;
 
     private static Hardware BuildWithLayout()
@@ -119,8 +120,8 @@ public class MissingCoverageTests
         hw.InvalidInstruction += (_, _) => { trapped = true; };
 
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        // programBase in Kernel = kernelSectionStart = 104
-        // pointer=500 → address = 104 + 500 = 604, outside [100, 376)
+        // programBase in Kernel = 0 (kernel addresses absolutely); kernel-mode memory
+        // access is not bounds-checked (the LOAD/STORE bounds traps gate on User mode).
         hw.WriteRegisterAt(1, 500); // pointer register
         hw.WriteRegisterAt(0, 0xAB); // value register
         hw.WriteBytes(100, Test.Word(Instruction.STORE, 1, 0, 0));
