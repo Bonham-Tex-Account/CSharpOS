@@ -55,12 +55,12 @@ At boot, `Hardware.ReserveOsMemory(OsLayout.TotalSize)` places the OS at address
 ```
 Address 0
 +------------------------------------------------------------+
-| Interrupt Vector Table (IVT)                               |  56 bytes (14 × 4)
+| Interrupt Vector Table (IVT)                               |  60 bytes (15 × 4)
 +------------------------------------------------------------+  offset 0x000 (= 0)
-| OS code (assembled ISA routines)                           |  starts at OsLayout.CodeBase = 56
+| OS code (assembled ISA routines)                           |  starts at OsLayout.CodeBase = 60
 |   ContextSwitch, Schedule, Block, WakeInput, WakeOutput,  |
 |   Halt, InvalidInstruction, BuddyAlloc, DiskLoad, Spawn,  |
-|   Fork, Exec, Wait + shared exit_body, alloc_sub,         |
+|   Fork, Exec, Wait, Syscall + shared exit_body, alloc_sub,|
 |   free_sub, resume_mlfq                                    |
 +------------------------------------------------------------+  up to OsLayout.DataBase = 8192
 | OS data section (runtime-seeded by C#)                     |  starts at OsLayout.DataBase = 8192
@@ -86,10 +86,9 @@ Address 0
 | BuddyMinBlock | 8228 | 4 | Minimum allocatable block size in bytes (default: 256). |
 | BuddyLevels | 8232 | 4 | Buddy tree depth = log2(HeapSize / MinBlock). |
 | NextPid | 8236 | 4 | Monotonic PID counter; incremented each time a process is created. Starts at 1 (0 = "no process"). |
-| KernelImageSlot | 8240 | 4 | Disk slot holding the kernel image (syscall handlers); EXEC re-loads it. |
-| ProcessTable | 8244 | 1408 | 8 entries × 176 bytes (see entry layout below). |
-| BuddyBitmap | 9652 | 32 | 8 × 32-bit words; 1 bit per buddy tree node (1=free, 0=used/split). |
-| PrivilegedStack | 9684 | 64 | Scratch stack for CALL/RET within privileged OS routines. |
+| ProcessTable | 8240 | 1408 | 8 entries × 176 bytes (see entry layout below). |
+| BuddyBitmap | 9648 | 32 | 8 × 32-bit words; 1 bit per buddy tree node (1=free, 0=used/split). |
+| PrivilegedStack | 9680 | 64 | Scratch stack for CALL/RET within the atomic OS routines. |
 
 ### Per-process memory layout
 
@@ -100,27 +99,25 @@ Each process occupies one contiguous block allocated by the buddy allocator. The
 +---------------------------------------------------+
 | Program image       (ProgramSize bytes)           |
 +---------------------------------------------------+
-| Kernel section                                    |
-|   [0]    Saved user register file  (96 bytes)     |  KernelSaveAreaOffset = 0
-|   [96]   Trap info                 (16 bytes)     |  KernelTrapInfoOffset = 96
-|           +0: faulting opcode (4 bytes)           |
-|           +4: operand byte-offset in save area    |
-|           +8: return IP (user-relative offset)    |
-|           +12: (unused)                           |
-|   [112]  Kernel ISA code (syscall handlers)       |  KernelHeaderSize = 112
-+---------------------------------------------------+
 | Process data memory (RequiredMemory bytes)        |
 +---------------------------------------------------+
 | User stack          (RequiredStackSize bytes)     |
 +---------------------------------------------------+
-| Kernel stack        (KernelStackSize = 64 bytes)  |
+| Kernel stack        (KernelStackSize = 176 bytes) |
+|   The syscall trap frame sits at the base:        |
+|   [0]    Saved user register file  (96 bytes)     |  KernelSaveAreaOffset = 0
+|   [96]   Trap info                 (16 bytes)     |  KernelTrapInfoOffset = 96
+|           +0: faulting opcode                     |
+|           +4: operand byte-offset in save area    |
+|           +8: return IP (user-relative offset)    |
+|   (handler stack space above the frame)           |  KernelHeaderSize = 112
 +---------------------------------------------------+
 [programBase + TotalSize]
 ```
 
-`TotalSize = ProgramSize + KernelHeaderSize + KernelImage.Length + RequiredMemory + RequiredStackSize + KernelStackSize`
+`TotalSize = ProgramSize + RequiredMemory + RequiredStackSize + KernelStackSize`
 
-The kernel stack is shared for all kernel-mode execution of this process. The privileged OS stack (at `OsLayout.PrivilegedStackTop`) is shared across all processes because Privileged routines run atomically (they cannot nest).
+There is **no per-process kernel section**: the syscall handler is shared OS code in the OS region (reached via IVT slot `IvtSyscall`). Each process keeps its own kernel stack, whose base holds the trap frame of an in-flight syscall — so a syscall that blocks survives a context switch without clobbering another process's. The shared privileged OS stack (at `OsLayout.PrivilegedStackTop`) is used by the atomic OS routines, which run with interrupts masked and never nest.
 
 ### Process table entry layout
 
@@ -129,7 +126,7 @@ Each entry is 176 bytes. Source: `Hardware.ProcessEntry*` constants.
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 96 | Register file | 24 × 4-byte register values. The EIP slot (register index 8, offset 32) holds the saved IP as a program-relative offset (not absolute). |
-| 96 | 4 | Level | Saved `PrivilegeLevel` (0=User, 1=Kernel, 2=Privileged). |
+| 96 | 4 | Level | Saved `PrivilegeLevel` (0=User, 1=Kernel). |
 | 100 | 4 | State | `ProcessState` enum: Ready(0), Blocked(1), Terminated(2), Zombie(3). |
 | 104 | 4 | WaitReason | `WaitReason` enum: None(0), Input(1), Output(2), ChildProcess(3). |
 | 108 | 4 | ProgramAddress | Absolute physical address where the program image begins. Set to −1 if allocation failed. |
@@ -164,9 +161,9 @@ The register-file region (offset 0–95) is the save area written by `SAVEREGS` 
 
 5. **`BuildOsImage`.** `OsRoutines.BuildOsImage()` assembles all OS ISA routines into one `Assembler`, calls `Build(OsLayout.CodeBase)` to resolve labels against their absolute addresses, and returns a `byte[]` of length `OsLayout.TotalSize`. The IVT slots at the front are filled with the entry-point addresses of each routine.
 
-6. **`SeedOsData`.** The C# side writes runtime values into the data section: heap parameters, the MLFQ quantum table, the initial buddy bitmap (root node free), and stages the kernel image (syscall handlers) to a disk slot, recording the slot number in `KernelImageSlotOffset`.
+6. **`SeedOsData`.** The C# side writes runtime values into the data section: heap parameters, the MLFQ quantum table, the initial buddy bitmap (root node free), and the initial PID counter.
 
-7. **Process loading.** `os.LoadProcess(process)` (called per program) resolves the disk slot, runs `hw.RunOsRoutineSynchronously(IvtSpawn, entry)` to allocate and load the process in ISA, then writes the kernel image into the kernel section and seeds the fd table from C#.
+7. **Process loading.** `os.LoadProcess(process)` (called per program) resolves the disk slot, runs `hw.RunOsRoutineSynchronously(IvtSpawn, entry)` to allocate and load the process in ISA, then seeds the fd table and reads back the assigned PID from C# (no per-process kernel image to copy — the syscall handler is shared OS code).
 
 ---
 
@@ -175,8 +172,8 @@ The register-file region (offset 0–95) is the save area written by `SAVEREGS` 
 `Hardware.Run()` is called in a tight loop by the host until `!os.HasProcesses`. Each call does exactly one of:
 
 ```
-if (level == Privileged)
-    StepInstruction()           // continue an in-progress OS routine
+if (!InterruptsEnabled())
+    StepInstruction()           // continue an in-progress atomic OS routine
 
 else if (TryDispatchPendingInterrupt())
     (wake routine entered — will run on next ticks)
@@ -190,19 +187,19 @@ else
 
 `StepInstruction` fetches the 4-byte instruction at `instructionPointer`, advances IP by 4, executes it (which may fire a trap and redirect IP), and counts the instruction. After `SchedulerInstructionCount = 30` counted instructions, it dispatches `IvtContextSwitch`. Instructions that trap (invalid opcode, OUT/IN in user mode, process-control syscalls) do **not** count toward the quantum.
 
-Privileged-mode instructions are never counted and never preempted.
+Atomic OS-routine instructions (those running with interrupts masked) are never counted and never preempted.
 
 ---
 
 ## Interrupt vector table (IVT) and dispatch model
 
-The IVT occupies the first 56 bytes of the OS region (`IvtSlotCount = 14` slots × 4 bytes). Each slot holds the absolute address of the corresponding OS routine. Hardware reads slot `s` as `ReadWord(0 + s * 4)` and jumps there in Privileged mode.
+The IVT occupies the first 60 bytes of the OS region (`IvtSlotCount = 15` slots × 4 bytes). Each slot holds the absolute address of the corresponding OS routine. Hardware reads slot `s` as `ReadWord(0 + s * 4)` and jumps there in Kernel mode. Slot `IvtSyscall` holds the shared syscall handler's address; `EnterKernel` jumps there directly **without** masking interrupts (so the handler stays preemptible), while the *dispatched* routines below mask interrupts and run atomically.
 
 `Hardware.DispatchOsRoutine(int slot)` (or the overload with an EAX argument):
 1. `CaptureInterruptedContext()` — snapshots the live register file plus the current IP (as a base-relative offset) into `trapFrame`; records the current privilege level in `interruptedLevel`.
 2. Reads the routine address from the IVT.
 3. Fires the `OsRoutineEntered` event.
-4. Sets `level = Privileged`.
+4. Masks interrupts (the routine runs atomically), then sets `level = Kernel`.
 5. Sets `instructionPointer` to the routine address.
 6. Sets `trapTaken = true` so the current step does not advance the quantum.
 
@@ -255,7 +252,7 @@ A "tick" here is one context-switch event, not one instruction. Each context-swi
 
 ## Buddy memory allocator
 
-The buddy allocator manages physical RAM above the OS region. It is implemented entirely in ISA (`EmitBuddyAlloc`, `EmitAllocSub`, `EmitBuddyFree` in `OsRoutines.cs`) and runs in Privileged mode.
+The buddy allocator manages physical RAM above the OS region. It is implemented entirely in ISA (`EmitBuddyAlloc`, `EmitAllocSub`, `EmitBuddyFree` in `OsRoutines.cs`) and runs in Kernel mode with interrupts masked (atomic).
 
 **Bitmap representation:** a compact binary tree where each node is one bit. Bit = 1 means the block is FREE; bit = 0 means it is either allocated or split. Node numbering is 1-indexed: root = node 1, left child of n = 2n, right child = 2n + 1. Node i maps to bit (i−1) in the bitmap, stored in word `(i−1) / 32`, bit-in-word `(i−1) % 32`. The bitmap fits in `BuddyBitmapWords = 8` 32-bit words (supports up to 255 nodes = 8 levels).
 
@@ -313,7 +310,7 @@ The buddy allocator manages physical RAM above the OS region. It is implemented 
 - `Free(int slot)` — marks the slot empty and zeroes its storage.
 - `GetLength(int slot)` — returns the stored byte count (throws if slot is free).
 
-**ISA interface:** the `DREAD`, `DWRITE`, and `DLEN` instructions (all Privileged-only) delegate to `hw.DiskRead`, `hw.DiskWrite`, and `hw.DiskLength`, which call through to the `Bin` behind the `Device` at `DiskDeviceId`. Addresses passed to `DREAD`/`DWRITE` are absolute (Privileged mode program base = 0).
+**ISA interface:** the `DREAD`, `DWRITE`, and `DLEN` instructions (all Kernel-only) delegate to `hw.DiskRead`, `hw.DiskWrite`, and `hw.DiskLength`, which call through to the `Bin` behind the `Device` at `DiskDeviceId`. Addresses passed to `DREAD`/`DWRITE` are absolute (Kernel mode program base = 0).
 
 ---
 
@@ -351,10 +348,9 @@ Traps are evaluated by `Hardware.EvaluateTraps(opcode, b1, b2, b3)` before any i
    - Seeds the saved register file: `EIP = 0`, `ESP = TotalSize − KernelStackSize`.
    - Sets `Level = User`, `State = Ready`, `Priority = 0`, `WaitReason = None`.
    - Assigns `Pid = NextPid++`.
-5. C# writes the kernel image (syscall handlers) into the kernel section.
-6. C# seeds `FdTable`: fd 0 and fd 1 both point to the process's own device (slot index shim).
-7. C# bumps `ProcessCount` if a fresh slot was used.
-8. C# updates the C# `Process` object and `namesByBase` map.
+5. C# seeds `FdTable`: fd 0 and fd 1 both point to the process's own device (slot index shim).
+6. C# bumps `ProcessCount` if a fresh slot was used.
+7. C# updates the C# `Process` object and `namesByBase` map.
 
 ### Scheduling and context switching
 
@@ -370,8 +366,8 @@ After 30 counted instructions, `IvtContextSwitch` is dispatched:
 ### I/O: blocking and waking
 
 When a process's `OUT` or `IN` executes in user mode:
-1. `EnterKernel` saves the user register file, enters Kernel mode, and jumps to the kernel section's entry point.
-2. The kernel ISA handler reads the trap-info to decide which syscall fired.
+1. `EnterKernel` pushes the trap frame onto the process's kernel stack (setting `EBP`), enters Kernel mode (interrupts stay **enabled** — the handler is preemptible), and jumps to the shared syscall handler in the OS region.
+2. The shared handler reads the trap-info (via `EBP`) to decide which syscall fired.
 3. For `OUT`: `hw.KernelOutput` delivers the value if the output device is free, or calls `BlockCurrent(WaitReason.Output)` (which rewinds IP and dispatches `IvtBlockOutput`).
 4. For `IN`: `hw.KernelInput` dequeues a value if the input buffer is non-empty, or adds the process to the device's waiter list and calls `BlockCurrent(WaitReason.Input)` (dispatches `IvtBlockInput`).
 
@@ -386,7 +382,7 @@ When a process's `OUT` or `IN` executes in user mode:
 2. Find a free child slot (Terminated or fresh).
 3. Copy the parent's sizing fields (`ProgramSize`, `TotalSize`, etc.) to the child entry.
 4. `alloc_sub` allocates the child's physical region.
-5. ISA `memcpy` copies `TotalSize` bytes from the parent's physical base to the child's. (4 bytes at a time, using absolute LOAD/STORE in Privileged mode.)
+5. ISA `memcpy` copies `TotalSize` bytes from the parent's physical base to the child's. (4 bytes at a time, using absolute LOAD/STORE in Kernel mode.)
 6. Copy the parent's saved register file (96 bytes) to the child entry. Because `ESP` and `EIP` are base-relative, no relocation is needed.
 7. Assign the child `Pid = NextPid++`; set `ParentPid = parent.Pid`.
 8. Seed child fd table (slot index shim).
@@ -402,7 +398,7 @@ On failure (table full or out of memory): write −1 into the parent's EAX and c
 2. Call `free_sub` to release the old physical region (using the entry's current `ProgramAddress` and `TotalSize`).
 3. `DLEN` the new slot to get `newLen`; recompute `TotalSize = oldTotal − oldProgramSize + newLen`.
 4. `alloc_sub` allocates the new region.
-5. `DREAD` the new program image; `DREAD` the kernel image (from `KernelImageSlotOffset`) into the kernel section.
+5. `DREAD` the new program image into the allocated region. (The syscall handler is shared OS code, so there is no per-process kernel image to reload.)
 6. Zero the register file (96 bytes). Set `EIP = 0`, `ESP = TotalSize − KernelStackSize`.
 7. Reset scheduling state; preserve `Pid` and `ParentPid`.
 8. `LOADREGS`/`SETLAYOUT`/`OSRET` to resume the same process running the new image.
@@ -444,8 +440,7 @@ The `--os-plugin` command-line flag in `CSharpOSConsole` passes a custom DLL pat
 
 **Plugin contract:** a plugin DLL must contain exactly one non-abstract `OperatingSystem` subclass with a `(TextWriter)` constructor. The subclass overrides:
 - `OsMemorySize` — how much memory to reserve for the OS region.
-- `BuildOsImage(int osMemoryBase)` — returns the assembled OS image bytes.
-- `KernelImage` — the syscall handler bytes to copy into each process's kernel section.
+- `BuildOsImage(int osMemoryBase)` — returns the assembled OS image bytes (including the shared syscall handler).
 
 Trap providers are auto-discovered within the same plugin assembly via `ITrapProvider` reflection in `CollectTraps()`.
 
@@ -458,13 +453,13 @@ Here is a walkthrough of one process running `OUT EAX` through to output and the
 1. **Run loop** calls `StepInstruction`.
 2. `Instruction.Execute` finds opcode 0x30 (OUT), calls `EvaluateTraps` (no trap on OUT), then calls `InstructionFunctions.Out`.
 3. `InstructionFunctions.Out` detects `PrivilegeLevel == User`, calls `hw.EnterKernel(OUT, EAX*4)`.
-4. **EnterKernel:** saves user registers to the kernel section header, writes trap-info, sets level = Kernel, points ESP at the kernel stack, jumps to `kernelSectionStart + 112`.
-5. The **kernel ISA handler** (built by `BasicOS.BuildKernelImage`) reads the trap-info, identifies `OUT`, loads the user's `EAX` value from the save area, and calls `OUT ESI` (now in Kernel mode).
+4. **EnterKernel:** pushes the trap frame onto the process's kernel stack (sets `EBP`), writes trap-info, sets level = Kernel (interrupts stay enabled), points `ESP` at the kernel-stack top, and jumps to the shared syscall handler (IVT slot `IvtSyscall`).
+5. The **shared syscall handler** (`EmitSyscall` in `OsRoutines.cs`) reads the trap-info via `EBP`, identifies `OUT`, loads the user's `EAX` value from the save area, and calls `OUT ESI` (now in Kernel mode).
 6. **`InstructionFunctions.Out`** in Kernel mode calls `hw.KernelOutput(value)`.
 7. **`KernelOutput`:** resolves the running process's fd 1 → device id, checks `OutputBusy`. If free: calls `Output(value, deviceId)` → fires `ProgramOutput` event → host renders the value. Sets `OutputBusy = true`.
 8. Kernel handler calls `IRET`. **`Hardware.Iret`** restores the user register file, sets level = User, resumes user code.
 9. After 30 counted instructions, **`DispatchOsRoutine(IvtContextSwitch)`** is called.
-10. `CaptureInterruptedContext` snapshots the user registers. CPU goes to Privileged; IP points to the ContextSwitch routine.
+10. `CaptureInterruptedContext` snapshots the user registers. Interrupts are masked (the routine runs atomically) and IP points to the ContextSwitch routine.
 11. **ContextSwitch ISA routine:** calls `SAVEREGS [EBX]` (entry address in EBX). Increments `TicksUsed`. Checks demotion. Decrements boost timer. Falls into `resume_mlfq`.
 12. **`resume_mlfq`:** finds the highest-priority Ready process, calls `LOADREGS [entry]` → `SETLAYOUT [entry]` → `OSRET level`. **`Hardware.OsReturn`** commits the staged context, fires `ContextSwitched` if the base changed, drops to User mode.
 13. The next process runs its next instruction.

@@ -92,7 +92,7 @@ public class DisassemblerTests
     }
 
     [Fact]
-    public void Decodes_PrivilegedOsSupportOps()
+    public void Decodes_OsSupportOps()
     {
         Assert.Equal("SAVEREGS [ESP]", Disassembler.Decode(Instruction.SAVEREGS, Idx(RegisterName.ESP), 0, 0));
         Assert.Equal("LOADREGS [ESP]", Disassembler.Decode(Instruction.LOADREGS, Idx(RegisterName.ESP), 0, 0));

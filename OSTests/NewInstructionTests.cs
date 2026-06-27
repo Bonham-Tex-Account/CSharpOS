@@ -200,10 +200,10 @@ public class NewInstructionTests
     }
 
     [Fact]
-    public void Hlt_RaisesToPrivilegedForTeardown()
+    public void Hlt_EntersKernelTeardown()
     {
-        // HLT requests OS-level teardown: it raises to Privileged. With an OS image
-        // the Halt routine then frees the process (covered by SyscallTests).
+        // HLT requests OS-level teardown: it enters Kernel mode with interrupts masked.
+        // With an OS image the Halt routine then frees the process (covered by SyscallTests).
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(1024, os);
         hw.WriteBytes(0, Test.Word(Instruction.HLT, 0, 0, 0));

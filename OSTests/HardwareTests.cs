@@ -211,10 +211,10 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Run_InvalidOpcode_FiresFaultEventAndRaisesToPrivileged()
+    public void Run_InvalidOpcode_FiresFaultEventAndEntersKernelTeardown()
     {
-        // Without an OS image, an invalid opcode fires the fault event and raises to
-        // Privileged (the teardown level); with an OS image the routine would run.
+        // Without an OS image, an invalid opcode fires the fault event and enters Kernel
+        // mode with interrupts masked (atomic teardown); with an OS image the routine would run.
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
         InvalidInstructionArgs? captured = null;
@@ -294,10 +294,10 @@ public class HardwareTests
     }
 
     [Fact]
-    public void Halt_WithoutOsImage_RaisesToPrivileged()
+    public void Halt_WithoutOsImage_EntersKernelTeardown()
     {
         // HLT is an OS-level teardown request. Without an OS image the machine just
-        // raises to Privileged (with an image, the Halt routine frees the process).
+        // enters Kernel mode with interrupts masked (with an image, the Halt routine frees the process).
         FakeOS os = new FakeOS();
         Hardware hw = Test.NewHardware(512, os);
         hw.WriteBytes(0, Test.Word(Instruction.HLT, 0, 0, 0));

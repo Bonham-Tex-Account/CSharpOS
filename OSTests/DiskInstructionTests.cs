@@ -17,7 +17,7 @@ public class DiskInstructionTests
 
     // Bare Hardware whose disk is the supplied Bin, raised to Kernel so the disk
     // instructions are allowed (they trap in user mode).
-    private static Hardware PrivilegedHardwareWithDisk(Bin disk)
+    private static Hardware KernelHardwareWithDisk(Bin disk)
     {
         Hardware hw = new Hardware(512, Test.AllRegisters(), new FakeOS(), disk);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
@@ -38,7 +38,7 @@ public class DiskInstructionTests
         byte[] image = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x10 };
         int slot = disk.Store(image);
 
-        Hardware hw = PrivilegedHardwareWithDisk(disk);
+        Hardware hw = KernelHardwareWithDisk(disk);
         int destAddress = 100;
         hw.WriteRegisterAt(EAX, destAddress);
         hw.WriteRegisterAt(EBX, slot);
@@ -53,7 +53,7 @@ public class DiskInstructionTests
     public void DWrite_CopiesRamRangeIntoSlot()
     {
         Bin disk = new Bin(4, 32);
-        Hardware hw = PrivilegedHardwareWithDisk(disk);
+        Hardware hw = KernelHardwareWithDisk(disk);
         int srcAddress = 120;
         byte[] payload = new byte[] { 1, 2, 3, 4 };
         hw.WriteBytes(srcAddress, payload);
@@ -74,7 +74,7 @@ public class DiskInstructionTests
     public void DWriteThenDRead_RoundTripsThroughTheDisk()
     {
         Bin disk = new Bin(4, 32);
-        Hardware hw = PrivilegedHardwareWithDisk(disk);
+        Hardware hw = KernelHardwareWithDisk(disk);
 
         int srcAddress = 80;
         byte[] payload = new byte[] { 7, 6, 5, 4, 3 };
@@ -97,7 +97,7 @@ public class DiskInstructionTests
     public void DRead_OfAFreeSlot_SurfacesTheEmptyError()
     {
         Bin disk = new Bin(4, 32);
-        Hardware hw = PrivilegedHardwareWithDisk(disk);
+        Hardware hw = KernelHardwareWithDisk(disk);
         hw.WriteRegisterAt(EAX, 100);
         hw.WriteRegisterAt(EBX, 0); // never stored
 
