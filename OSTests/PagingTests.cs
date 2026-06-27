@@ -4,13 +4,16 @@ using Xunit;
 namespace OSTests;
 
 /// <summary>
-/// Paging (Phase 2, increment 1 — demand fault-in): user-mode data/stack accesses
-/// translate through a per-process page table in the OS region. Pages start
-/// **non-resident** and fault in on first touch via the ISA IvtPageFault handler, which
-/// makes the page resident (pointing its PTE at the page's physical home in the process's
-/// allocated block). Kernel/OS access stays absolute. Demand paging is transparent: real
-/// programs run identically (covered by the rest of the suite); these tests prove the
-/// seeding, the fault path, and the resident transition.
+/// Paging (Phase 2): user-mode data/stack accesses translate through a per-process page
+/// table in the OS region. Pages start **non-resident** and fault in on first touch via
+/// the ISA IvtPageFault handler. Increment 1 added demand fault-in; increment 2 adds a
+/// small shared physical **frame pool** with **LRU eviction** and **dirty write-back**:
+/// the handler maps a faulting page into a free frame, or evicts the least-recently-used
+/// resident frame (writing it back to its block home first if dirty) when the pool is
+/// full, and flips the evicted page's PTE back to non-resident. A resident PTE holds the
+/// frame's physical base. Kernel/OS access stays absolute. Demand paging is transparent:
+/// real programs run identically (covered by the rest of the suite); these tests prove the
+/// seeding, the fault path, the resident transition, eviction, LRU order, and write-back.
 /// </summary>
 public class PagingTests : IDisposable
 {
@@ -153,8 +156,9 @@ public class PagingTests : IDisposable
     {
         (Hardware hw, Process process, int index) = LoadAndLayout(512, 512);
 
-        // Simulate the page-fault handler making page 0 resident.
-        int residentBase = process.ProgramAddress;
+        // Simulate the page-fault handler making page 0 resident (a resident PTE holds a
+        // frame base in the pool).
+        int residentBase = OsLayout.FrameBase(0);
         Test.WriteWord(hw, OsLayout.PageTableAddress(index), residentBase);
         Assert.True(hw.IsPageResident(index, 0));
 
@@ -177,9 +181,155 @@ public class PagingTests : IDisposable
         hw.SetLayoutFromEntry(OsLayout.ProcessEntryAddress(1));
 
         // Both seeded independently; making one resident does not affect the other.
-        Test.WriteWord(hw, OsLayout.PageTableAddress(0), first.ProgramAddress);
+        Test.WriteWord(hw, OsLayout.PageTableAddress(0), OsLayout.FrameBase(0));
         Assert.True(hw.IsPageResident(0, 0));
         Assert.False(hw.IsPageResident(1, 0));
         Assert.Equal(OsLayout.NonResidentPage, hw.PageTableEntry(1, 0));
+    }
+
+    // ---- increment 2: frame pool + LRU eviction + dirty write-back --------------
+
+    // Builds one process from `code`, runs it to completion (or a step cap), and returns
+    // the hardware (for frame/page inspection) plus everything it OUT-ed.
+    private (Hardware hw, List<int> outputs) BuildAndRun(byte[] code, int requiredMemory, int requiredStackSize)
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(code), requiredMemory, requiredStackSize));
+
+        List<int> outputs = new List<int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(); };
+        int steps = 0;
+        while (os.HasProcesses && steps < 20000)
+        {
+            hw.Run();
+            steps++;
+        }
+        return (hw, outputs);
+    }
+
+    // The frame currently holding process `proc`'s virtual page `page`, or -1 if none.
+    private static int FrameHolding(Hardware hw, int proc, int page)
+    {
+        for (int f = 0; f < OsLayout.FrameCount; f++)
+        {
+            if (hw.FrameOccupied(f) && hw.FrameOwnerProcess(f) == proc && hw.FrameOwnerPage(f) == page)
+            {
+                return f;
+            }
+        }
+        return -1;
+    }
+
+    // Emits "STORE [page*PageSize + 8] = value" — a write that faults `page` in on first touch.
+    private static void EmitStorePage(Assembler asm, int page, int value)
+    {
+        asm.MovImm(RegisterName.EAX, value);
+        asm.MovImm16(RegisterName.EBX, page * OsLayout.PageSize + 8);
+        asm.Store(RegisterName.EBX, RegisterName.EAX);
+    }
+
+    [Fact]
+    public void Eviction_ResidentFramesNeverExceedThePool()
+    {
+        // Touch more distinct data pages than the pool has frames: residency must cap at
+        // the pool size (the surplus pages are evicted), and the earliest-touched page goes.
+        int pages = OsLayout.FrameCount + 2;
+        Assembler asm = new Assembler();
+        for (int p = 1; p <= pages; p++)
+        {
+            EmitStorePage(asm, p, p);
+        }
+        asm.Hlt();
+
+        (Hardware hw, List<int> _) = BuildAndRun(asm.Build(), 2048, 512);
+
+        Assert.Equal(OsLayout.FrameCount, hw.ResidentFrameCount());   // pool is full, never over
+        Assert.False(hw.IsPageResident(0, 1));                         // earliest touched: evicted
+        Assert.True(hw.IsPageResident(0, pages));                      // most recent: resident
+    }
+
+    [Fact]
+    public void Lru_RecentlyUsedPageIsProtected_LeastRecentlyUsedIsEvicted()
+    {
+        // Fill the pool with pages 1..N, then re-touch page 1 (making it most-recently-used),
+        // then fault in one more page. The victim must be page 2 (now the LRU), not page 1.
+        int n = OsLayout.FrameCount;
+        Assembler asm = new Assembler();
+        for (int p = 1; p <= n; p++)
+        {
+            EmitStorePage(asm, p, p);
+        }
+        EmitStorePage(asm, 1, 100);   // page 1 becomes most-recently-used
+        EmitStorePage(asm, n + 1, 0); // faults: must evict the LRU = page 2
+        asm.Hlt();
+
+        (Hardware hw, List<int> _) = BuildAndRun(asm.Build(), 2048, 512);
+
+        Assert.True(hw.IsPageResident(0, 1));       // protected by recent use
+        Assert.False(hw.IsPageResident(0, 2));      // the least-recently-used victim
+        Assert.True(hw.IsPageResident(0, n + 1));   // the page that forced the eviction
+    }
+
+    [Fact]
+    public void DirtyWriteBack_EvictedPageReloadsWithItsWrittenValue()
+    {
+        // Write a value to page 1, evict it under pressure (it is dirty, so it is written
+        // back to its home), then read page 1 again — it faults back in from home and must
+        // carry the written value. A broken write-back would yield the home's initial 0.
+        int n = OsLayout.FrameCount;
+        Assembler asm = new Assembler();
+        EmitStorePage(asm, 1, 77);            // page 1 dirty = 77
+        for (int p = 2; p <= n; p++)
+        {
+            EmitStorePage(asm, p, p);         // fill the rest of the pool
+        }
+        EmitStorePage(asm, n + 1, 88);        // faults: evicts page 1 (LRU, dirty) -> home = 77
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX); // faults page 1 back in from home
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        (Hardware hw, List<int> outputs) = BuildAndRun(asm.Build(), 2048, 512);
+
+        Assert.Contains(77, outputs);   // the written value survived eviction + reload
+    }
+
+    [Fact]
+    public void DirtyBit_SetByAWrite_ClearForAReadOnlyPage()
+    {
+        // A stored-to page is dirty (must be written back on eviction); a read-only page is
+        // clean (can be dropped). The pool is large enough that neither is evicted here.
+        Assembler asm = new Assembler();
+        EmitStorePage(asm, 1, 7);                          // page 1: written -> dirty
+        asm.MovImm16(RegisterName.EBX, 2 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX);      // page 2: read only -> clean
+        asm.Hlt();
+
+        (Hardware hw, List<int> _) = BuildAndRun(asm.Build(), 2048, 512);
+
+        int dirtyFrame = FrameHolding(hw, 0, 1);
+        int cleanFrame = FrameHolding(hw, 0, 2);
+        Assert.True(dirtyFrame >= 0);
+        Assert.True(cleanFrame >= 0);
+        Assert.True(hw.FrameDirty(dirtyFrame));
+        Assert.False(hw.FrameDirty(cleanFrame));
+    }
+
+    [Fact]
+    public void FaultedPage_MapsToAPoolFrame_RecordedInTheCoreMap()
+    {
+        // A faulted-in page's PTE points into the physical frame pool, and the core map
+        // records the owner/page for that frame.
+        Assembler asm = new Assembler();
+        EmitStorePage(asm, 1, 5);
+        asm.Hlt();
+
+        (Hardware hw, List<int> _) = BuildAndRun(asm.Build(), 2048, 512);
+
+        int pte = hw.PageTableEntry(0, 1);
+        Assert.True(pte >= OsLayout.FramePoolBase && pte < OsLayout.FramePoolBase + OsLayout.FramePoolSize);
+        int frame = FrameHolding(hw, 0, 1);
+        Assert.Equal(OsLayout.FrameBase(frame), pte);
     }
 }

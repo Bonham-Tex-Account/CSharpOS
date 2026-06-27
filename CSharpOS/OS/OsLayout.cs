@@ -83,8 +83,34 @@ public static class OsLayout
     public const int PageTableBase = PrivilegedStackTop;
     public const int PageTableRegionSize = MaxProcesses * PageTableBytesPerProcess;
 
+    // ---- paging Phase 2 increment 2: physical frame pool + frame table ----
+    // Demand paging now maps resident pages into a SMALL shared pool of physical frames
+    // instead of each page's own block home, so resident capacity is scarce and the ISA
+    // page-fault handler must evict an LRU victim (writing it back to its home when dirty)
+    // to make room. A resident PTE holds the frame's physical base (within the pool); the
+    // page's content otherwise lives at its block home (ProgramAddress + page*PageSize) —
+    // increment 3 will move that home onto a Bin-disk swap slot. The frame table ("core
+    // map") records, per frame, which process/page owns it (so eviction can flip the
+    // owner's PTE back to non-resident), the page's home (so a dirty page writes back to
+    // the right place), a dirty bit, and an LRU stamp.
+    public const int FrameCount = 4;            // small on purpose: forces eviction in demos/tests
+    // Frame-table entry fields (4-byte words), one entry per physical frame.
+    public const int FrameOccupiedField  = 0;   // 0 = free, 1 = holds a page
+    public const int FrameOwnerProcField = 4;   // owning process-table index
+    public const int FrameOwnerPageField = 8;   // owning virtual page number
+    public const int FrameHomeField      = 12;  // physical base of the page's block home
+    public const int FrameDirtyField     = 16;  // 0 = clean (drop on evict), 1 = needs write-back
+    public const int FrameLastUseField   = 20;  // LRU stamp (the MMU bumps it on each access)
+    public const int FrameTableEntryBytes = 24;
+    public const int FrameTableBase = PageTableBase + PageTableRegionSize;
+    public const int FrameTableSize = FrameCount * FrameTableEntryBytes;
+    // The frame pool: FrameCount contiguous PageSize frames. Frame f's physical base is
+    // FramePoolBase + f * PageSize.
+    public const int FramePoolBase = FrameTableBase + FrameTableSize;
+    public const int FramePoolSize = FrameCount * PageSize;
+
     // Total OS region size.
-    public const int TotalSize = PageTableBase + PageTableRegionSize;
+    public const int TotalSize = FramePoolBase + FramePoolSize;
 
     public static int ProcessEntryAddress(int index)
     {
@@ -95,5 +121,17 @@ public static class OsLayout
     public static int PageTableAddress(int index)
     {
         return PageTableBase + index * PageTableBytesPerProcess;
+    }
+
+    // Absolute address of frame `frame`'s core-map entry in the frame table.
+    public static int FrameTableEntry(int frame)
+    {
+        return FrameTableBase + frame * FrameTableEntryBytes;
+    }
+
+    // Absolute physical base address of frame `frame` in the frame pool.
+    public static int FrameBase(int frame)
+    {
+        return FramePoolBase + frame * PageSize;
     }
 }
