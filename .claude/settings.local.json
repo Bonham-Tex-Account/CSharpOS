@@ -5,7 +5,9 @@
       "Bash(dotnet build *)",
       "PowerShell(dotnet build *)",
       "PowerShell(dotnet test *)",
-      "Bash(dotnet test *)"
+      "Bash(dotnet test *)",
+      "Read(//c/Users/Tex/.claude/plans/**)",
+      "Read(//c/Users/Tex/.claude/plans//**)"
     ]
   }
 }
