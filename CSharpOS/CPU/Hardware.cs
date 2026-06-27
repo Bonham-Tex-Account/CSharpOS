@@ -2,6 +2,15 @@ using System.Collections.Concurrent;
 
 namespace CSharpOS;
 
+/// <summary>
+/// The emulated machine: memory, the register file, the instruction-execution loop,
+/// privilege levels, the trap table, I/O devices, and the interrupt queue. It drives
+/// the OS by dispatching its routines through the interrupt vector table (entering
+/// Privileged mode) rather than calling OS methods directly, and exposes a stream of
+/// observability events (instruction executed, context switch, privilege change, …)
+/// for the visualizer. The layout-related public constants describe the process-table
+/// entry format and IVT slots shared with the ISA OS code.
+/// </summary>
 public partial class Hardware
 {
     // ---- public constants ------------------------------------------------
@@ -738,6 +747,11 @@ public partial class Hardware
     // Without one (a bare hardware harness), Run just executes instructions.
     private bool OsManaged { get { return osMemorySize > 0; } }
 
+    /// <summary>
+    /// Advances the machine by one tick: runs an in-progress OS routine, services a
+    /// pending device interrupt, invokes the scheduler when idle, or steps the running
+    /// process. With no OS image it simply steps the next instruction.
+    /// </summary>
     public void Run()
     {
         if (!OsManaged)

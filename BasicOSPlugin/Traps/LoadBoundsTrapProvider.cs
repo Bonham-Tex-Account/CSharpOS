@@ -1,5 +1,9 @@
 namespace CSharpOS;
 
+/// <summary>
+/// Traps a user-mode LOAD whose effective address falls outside the running process's
+/// memory ranges. Discovered and registered by reflection at OS load.
+/// </summary>
 public sealed class LoadBoundsTrapProvider : ITrapProvider
 {
     public Trap GetTrap()

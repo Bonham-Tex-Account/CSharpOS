@@ -39,6 +39,11 @@ public abstract class OperatingSystem : IOperatingSystem
     }
 
     // ---- setup -----------------------------------------------------------
+    /// <summary>
+    /// Binds this OS to its hardware: loads the traps, reserves the OS memory region,
+    /// and (when the OS keeps an in-memory image) writes the OS image and seeds its
+    /// data structures.
+    /// </summary>
     public void AttachHardware(Hardware hw)
     {
         hardware = hw;
@@ -115,9 +120,12 @@ public abstract class OperatingSystem : IOperatingSystem
     }
 
     // ---- process loading -------------------------------------------------
-    // Resolves the program's disk slot (auto-staging a file-path process on first
-    // load), runs the ISA allocator — which now also DREADs the image from disk into
-    // RAM — then seeds the process-table entry and marks it Ready for the scheduler.
+    /// <summary>
+    /// Loads a program into a process-table slot. Resolves the program's disk slot
+    /// (auto-staging a file-path process on first load), runs the ISA spawn routine —
+    /// which allocates memory and DREADs the image from disk into RAM — then seeds the
+    /// entry (PID, fds) and marks it Ready for the scheduler.
+    /// </summary>
     public void LoadProcess(Process process)
     {
         if (hardware == null)
@@ -223,7 +231,7 @@ public abstract class OperatingSystem : IOperatingSystem
         return process.ProgramFilePath;
     }
 
-    // Resolves the program name for a context-switch event's program base.
+    /// <summary>Resolves the program name for a context-switch event's program base, or null if unknown.</summary>
     public string? NameForBase(int programBase)
     {
         if (namesByBase.TryGetValue(programBase, out string? name))

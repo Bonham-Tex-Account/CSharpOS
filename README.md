@@ -98,6 +98,13 @@ while (os.HasProcesses) { hw.Run(); }
 
 See `CSharpOSConsole/Programs.cs` for more examples including memory loads/stores and interactive I/O.
 
+## Documentation
+
+| Document | Description |
+|---|---|
+| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 41 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
+| [docs/OS-Architecture.md](docs/OS-Architecture.md) | OS structure and function — memory layout with exact offsets, IVT dispatch model, MLFQ scheduler, buddy allocator, device table, Bin disk, process lifecycle (spawn/fork/exec/wait/exit), and the plugin loading mechanism. |
+
 ## Architecture overview
 
 ### CPU

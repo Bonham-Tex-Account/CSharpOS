@@ -1,5 +1,9 @@
 namespace CSharpOS;
 
+/// <summary>
+/// Traps a user-mode STORE whose effective address falls outside the running process's
+/// memory ranges. Discovered and registered by reflection at OS load.
+/// </summary>
 public sealed class StoreBoundsTrapProvider : ITrapProvider
 {
     public Trap GetTrap()

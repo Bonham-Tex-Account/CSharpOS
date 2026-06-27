@@ -1,5 +1,12 @@
 namespace CSharpOS;
 
+/// <summary>
+/// The CPU's register file. The enum value doubles as the register's index: an
+/// instruction's operand byte selects a register by ordinal, and a register's
+/// byte offset within the saved register file is its index times the word size.
+/// EIP and EFLAGS are the program counter and status flags; CS..SS are segment
+/// registers; R8-R15 are general-purpose scratch used by the OS routines.
+/// </summary>
 public enum RegisterName
 {
     EAX, EBX, ECX, EDX,
