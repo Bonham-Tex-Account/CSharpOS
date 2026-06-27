@@ -40,13 +40,13 @@ public class MlfqTests
         WriteWord(hw, entry + Hardware.ProcessEntryProgramAddress, programAddress);
     }
 
-    // Runs privileged instructions one step at a time until OSRET drops the
-    // routine out of Privileged mode, or the step cap fires.
+    // Runs privileged instructions one step at a time until OSRET re-enables interrupts
+    // (the routine leaves the atomic OS section), or the step cap fires.
     private static void RunRoutine(Hardware hw)
     {
         for (int step = 0; step < 3000; step++)
         {
-            if (hw.GetPrivilegeLevel() != PrivilegeLevel.Privileged)
+            if (hw.InterruptsEnabled())
             {
                 return;
             }
@@ -715,12 +715,10 @@ public class MlfqTests
     {
         int quantumTableEnd = OsLayout.QuantumTableOffset + OsLayout.QueueCount * 4;
         // Two buddy fields (BuddyMinBlock + BuddyLevels, 4 bytes each) follow the
-        // quantum table, then the NextPid counter and the kernel-image disk slot
-        // (4 bytes each), before the process table starts.
+        // quantum table, then the NextPid counter (4 bytes), before the process table.
         int buddyFieldsEnd = quantumTableEnd + 8;
         Assert.Equal(OsLayout.NextPidOffset, buddyFieldsEnd);
-        Assert.Equal(OsLayout.KernelImageSlotOffset, OsLayout.NextPidOffset + 4);
-        Assert.Equal(OsLayout.ProcessTableOffset, OsLayout.KernelImageSlotOffset + 4);
+        Assert.Equal(OsLayout.ProcessTableOffset, OsLayout.NextPidOffset + 4);
     }
 
     // ---- LoadProcess MLFQ field seeding ----------------------------------

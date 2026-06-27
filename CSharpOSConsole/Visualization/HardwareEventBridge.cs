@@ -115,11 +115,13 @@ public sealed class HardwareEventBridge
 
     private void OnPrivilegeChanged(object? sender, PrivilegeChangedArgs e)
     {
+        bool interruptsMasked = !hw.InterruptsEnabled();
         PrivilegeTransition transition = new PrivilegeTransition
         {
             From = e.From,
             To = e.To,
-            Description = DescribeTransition(e.From, e.To),
+            Description = DescribeTransition(e.From, e.To, interruptsMasked),
+            InterruptsMasked = interruptsMasked,
             AtAddress = hw.GetInstructionPointer()
         };
         model.CurrentPrivilege = e.To;
@@ -143,16 +145,17 @@ public sealed class HardwareEventBridge
     }
 
     // Describes a privilege transition in OS terms, so the dispatch path is legible.
-    public static string DescribeTransition(PrivilegeLevel from, PrivilegeLevel to)
+    public static string DescribeTransition(PrivilegeLevel from, PrivilegeLevel to, bool interruptsMasked)
     {
-        if (to == PrivilegeLevel.Privileged)
-        {
-            return "OS routine";
-        }
         if (to == PrivilegeLevel.Kernel)
         {
-            // From user code this is a syscall trap; from an OS routine it is the
-            // resumption of a process that was interrupted inside a kernel handler.
+            // Interrupts masked => an atomic OS-routine dispatch (also announced via
+            // OsRoutineEntered). Otherwise it is a syscall trap from user code, or the
+            // resumption of a process interrupted inside a (preemptible) kernel handler.
+            if (interruptsMasked)
+            {
+                return "OS routine";
+            }
             if (from == PrivilegeLevel.User)
             {
                 return "syscall trap";

@@ -339,7 +339,8 @@ public class EdgeCaseScenarioTests : IDisposable
         hw.Run();
 
         Assert.True(faulted);
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled()); // atomic teardown
     }
 
     // ---- memory-layout flaw (expected to surface a problem) --------------

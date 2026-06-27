@@ -226,7 +226,8 @@ public class HardwareTests
 
         Assert.NotNull(captured);
         Assert.Equal(0xFF, captured!.Opcode);
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled()); // atomic teardown stop
     }
 
     [Fact]
@@ -244,8 +245,6 @@ public class HardwareTests
         Hardware hw = Test.NewHardware(512, os);
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
         Assert.Equal(PrivilegeLevel.User, hw.GetPrivilegeLevel());
     }
@@ -306,6 +305,7 @@ public class HardwareTests
 
         hw.Run();
 
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled()); // atomic teardown stop
     }
 }

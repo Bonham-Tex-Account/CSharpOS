@@ -10,10 +10,6 @@ public abstract class OperatingSystem : IOperatingSystem
 {
     // ---- public properties -----------------------------------------------
 
-    // Syscall functions shipped by this OS, copied into each process's kernel
-    // section. Empty until overridden; subclasses supply the syscall library.
-    public virtual byte[] KernelImage => Array.Empty<byte>();
-
     // The OS in-memory image. Defaults to none (size 0); subclasses that run their
     // routines as ISA code override these to reserve and populate the OS region.
     public virtual int OsMemorySize => 0;
@@ -75,12 +71,6 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, OsLayout.BuddyHeapSizeOffset, heapSize);
         WriteWord(hw, OsLayout.BoostTimerOffset, OsLayout.BoostInterval);
         WriteWord(hw, OsLayout.NextPidOffset, 1); // PIDs start at 1 (0 = "no process")
-
-        // Stage the syscall (kernel) image to a disk slot so the ISA EXEC routine can
-        // re-load it into a re-execed process's kernel section (boot creation still
-        // writes it from C#). The slot id lives in OS data for the routine to read.
-        int kernelImageSlot = hw.Disk.Store(KernelImage);
-        WriteWord(hw, OsLayout.KernelImageSlotOffset, kernelImageSlot);
         WriteWord(hw, OsLayout.QuantumTableOffset + 0,  1);
         WriteWord(hw, OsLayout.QuantumTableOffset + 4,  2);
         WriteWord(hw, OsLayout.QuantumTableOffset + 8,  4);

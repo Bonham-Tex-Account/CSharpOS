@@ -214,14 +214,13 @@ The CPU computes effective memory addresses as `programBase + reg[ptr]`. The pro
 | Privilege level | Program base |
 |-----------------|-------------|
 | User | `currentProcessInstructionStart` (the process's code section start in physical RAM) |
-| Kernel | `currentProcessKernelSectionStart` (the process's kernel section start) |
-| Privileged | 0 (absolute — OS code can reach any address) |
+| Kernel | 0 (absolute — the shared syscall handler and the OS routines can reach any address) |
 
 Because all address arithmetic adds the program base, programs that only reference self-relative offsets work correctly when loaded at any physical address. This is the position-independent model used by `FORK` (the child is a byte-for-byte copy at a different base).
 
-**Label fixups and origin:** the `Assembler.Build(int origin)` method shifts all resolved label offsets by `origin`. User programs are typically built with `Build()` (origin 0). OS routines are built with `Build(OsLayout.CodeBase)` so their jump targets encode absolute OS-region addresses (which Privileged mode resolves correctly against base 0).
+**Label fixups and origin:** the `Assembler.Build(int origin)` method shifts all resolved label offsets by `origin`. User programs are typically built with `Build()` (origin 0). OS routines are built with `Build(OsLayout.CodeBase)` so their jump targets encode absolute OS-region addresses (which Kernel mode resolves correctly against base 0).
 
-**Memory-mapped address limits:** LOAD and STORE in User mode are bounds-checked by `LoadBoundsTrapProvider` and `StoreBoundsTrapProvider`. Any access to an address outside the process's allocated ranges (instruction section, kernel section, data memory, user stack, kernel stack) faults the process.
+**Memory-mapped address limits:** LOAD and STORE in User mode are bounds-checked by `LoadBoundsTrapProvider` and `StoreBoundsTrapProvider`. Any access to an address outside the process's allocated ranges (instruction section, data memory, user stack, kernel stack) faults the process.
 
 ---
 
@@ -229,13 +228,16 @@ Because all address arithmetic adds the program base, programs that only referen
 
 Source: `CSharpOS/Enums/PrivilegeLevel.cs`, `CSharpOS/CPU/Hardware.cs`, `BasicOSPlugin/Traps/`.
 
-### The three levels
+### The two levels
 
-| Level | Value | Who runs here | Preemptible? | Notes |
-|-------|-------|---------------|--------------|-------|
-| User | 0 | Process user code | Yes | Traps evaluated before every instruction. I/O (`OUT`/`IN`) traps to kernel. |
-| Kernel | 1 | Process kernel-section syscall handlers | Yes | Reached via `OUT`/`IN` in user mode. Returns to user with `IRET`. |
-| Privileged | 2 | OS ISA routines in the OS memory region | No (atomic) | Entered only via IVT dispatch. Returns to any level with `OSRET`. |
+Like real hardware, there are **two** privilege levels. Atomicity of OS routines is **not** a third level — it is the hardware **interrupt-enable flag** (`Hardware.InterruptsEnabled()`, the CPU's IF). OS routines run with interrupts masked (atomic, never preempted); the syscall handler runs with them enabled (preemptible).
+
+| Level | Value | Who runs here | Interrupts | Notes |
+|-------|-------|---------------|------------|-------|
+| User | 0 | Process user code | Enabled | Traps evaluated before every instruction. I/O (`OUT`/`IN`) traps to kernel. Addresses relative to the program base. |
+| Kernel | 1 | The shared syscall handler **and** the OS ISA routines | Syscall handler: enabled (preemptible). OS routines: masked (atomic). | Unrestricted; addresses the OS region absolutely (base 0). |
+
+The run loop treats code as atomic exactly when interrupts are masked: while `!InterruptsEnabled()` it neither preempts at the quantum nor dispatches a pending interrupt.
 
 ### Restrictions enforced in user mode
 
@@ -255,16 +257,16 @@ The following operations are forbidden (or redirected) when the CPU is at User l
 ### Mode transitions
 
 **User → Kernel (I/O syscall):**
-Triggered by `OUT`/`IN` in user mode. `Hardware.EnterKernel` saves the user register file at kernel-section offset 0, writes trap-info (opcode, operand byte-offset, return IP) at offset 96, sets the CPU to Kernel mode, points ESP at the kernel stack, and jumps to the kernel entry at `kernelSectionStart + KernelHeaderSize`.
+Triggered by `OUT`/`IN` in user mode. `Hardware.EnterKernel` pushes a trap frame — the saved user register file (offset 0) plus trap-info (opcode, operand byte-offset, return IP) at offset `KernelTrapInfoOffset` — onto the base of this process's kernel stack, sets `EBP` to that frame, points `ESP` at the kernel-stack top, sets the CPU to Kernel mode (interrupts stay **enabled**, so the handler is preemptible), and jumps to the shared syscall handler whose address is in IVT slot `IvtSyscall`.
 
 **Kernel → User (IRET):**
-`Hardware.Iret` restores the user register file from the kernel-section save area, sets the CPU to User mode, and resumes execution at the saved return IP (user-relative).
+`Hardware.Iret` restores the user register file from the kernel-stack trap frame, sets the CPU to User mode, re-enables interrupts, and resumes at the saved return IP (user-relative).
 
-**Any level → Privileged (IVT dispatch):**
-`Hardware.DispatchOsRoutine(slot)` (called by the hardware run loop, by I/O fault paths, and by process-control instructions): snapshots the interrupted process's registers plus its current IP (base-relative) into `trapFrame`, raises the CPU to Privileged, and jumps to the address stored in the IVT at `0 + slot * 4`.
+**→ atomic OS routine (IVT dispatch):**
+`Hardware.DispatchOsRoutine(slot)` (called by the hardware run loop, by I/O fault paths, and by process-control instructions): snapshots the interrupted process's registers plus its current IP (base-relative) into `trapFrame`, **masks interrupts** (making the routine atomic), sets the CPU to Kernel mode, and jumps to the address stored in the IVT at `0 + slot * 4`.
 
-**Privileged → resumed level (OSRET):**
-The OS routine calls `LOADREGS [entry]` (stages the target process's register file) then `SETLAYOUT [entry]` (rebuilds the hardware layout) then `OSRET levelReg`. `Hardware.OsReturn` commits the staged context, resolves the EIP slot against the target level's program base, drops to that level, and sets `processRunning = true`.
+**OS routine → resumed process (OSRET):**
+The OS routine calls `LOADREGS [entry]` (stages the target process's register file) then `SETLAYOUT [entry]` (rebuilds the hardware layout) then `OSRET levelReg`. `Hardware.OsReturn` commits the staged context, resolves the EIP slot against the target level's program base, drops to that level, **re-enables interrupts**, and sets `processRunning = true`.
 
 ---
 

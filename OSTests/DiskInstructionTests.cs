@@ -15,12 +15,12 @@ public class DiskInstructionTests
     private const byte ECX = (byte)RegisterName.ECX;
     private const byte EDX = (byte)RegisterName.EDX;
 
-    // Bare Hardware whose disk is the supplied Bin, raised to Privileged so the disk
+    // Bare Hardware whose disk is the supplied Bin, raised to Kernel so the disk
     // instructions are allowed (they trap in user mode).
     private static Hardware PrivilegedHardwareWithDisk(Bin disk)
     {
         Hardware hw = new Hardware(512, Test.AllRegisters(), new FakeOS(), disk);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         return hw;
     }
 

@@ -85,9 +85,9 @@ public sealed class PlainTextRenderer : IVisualizerRenderer
         {
             return;
         }
-        // The dispatch into an OS routine (-> Privileged) is already announced by
-        // OsRoutineEntered; skip it here so it isn't doubly reported.
-        if (transition.To == PrivilegeLevel.Privileged)
+        // An atomic OS-routine dispatch (interrupts masked) is already announced by
+        // OsRoutineEntered; skip its transition line so it isn't doubly reported.
+        if (transition.To == PrivilegeLevel.Kernel && transition.InterruptsMasked)
         {
             return;
         }

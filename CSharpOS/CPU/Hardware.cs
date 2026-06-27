@@ -327,8 +327,10 @@ public partial class Hardware
         {
             OsRoutineEntered?.Invoke(this, new OsRoutineArgs { Slot = slot, Name = NameForRoutineSlot(slot) });
         }
-        SetLevel(PrivilegeLevel.Privileged);
+        // Mask interrupts BEFORE SetLevel so a PrivilegeChanged observer can distinguish an
+        // atomic OS-routine dispatch (interrupts masked) from a syscall trap (still enabled).
         interruptsEnabled = false; // OS routines run atomically: no preemption, no interrupt dispatch
+        SetLevel(PrivilegeLevel.Kernel);
         instructionPointer = routineAddress;
         trapTaken = true;
     }
@@ -379,16 +381,12 @@ public partial class Hardware
     // before that level becomes current.
     private int GetProgramBaseFor(PrivilegeLevel forLevel)
     {
-        if (forLevel == PrivilegeLevel.Privileged)
-        {
-            return 0;
-        }
         if (forLevel == PrivilegeLevel.User)
         {
             return currentProcessInstructionStart;
         }
-        // Kernel and Privileged both address the OS region absolutely (base 0): the
-        // syscall handler is shared OS code and the OS routines live in the OS region.
+        // Kernel addresses the OS region absolutely (base 0): the syscall handler is
+        // shared OS code and the OS routines live in the OS region.
         return 0;
     }
 
@@ -1053,7 +1051,8 @@ public partial class Hardware
             DispatchOsRoutine(IvtHalt, status);
             return;
         }
-        SetLevel(PrivilegeLevel.Privileged);
+        SetLevel(PrivilegeLevel.Kernel);
+        interruptsEnabled = false; // atomic stop (no OS image to dispatch to)
         trapTaken = true;
     }
 
@@ -1135,7 +1134,8 @@ public partial class Hardware
             DispatchOsRoutine(IvtInvalidInstruction, opcode);
             return;
         }
-        SetLevel(PrivilegeLevel.Privileged);
+        SetLevel(PrivilegeLevel.Kernel);
+        interruptsEnabled = false; // atomic stop (no OS image to dispatch to)
         trapTaken = true;
     }
 

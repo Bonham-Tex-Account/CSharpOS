@@ -100,8 +100,6 @@ public class SyscallTests : IDisposable
         Assert.Equal(100, hw.GetProgramBase());                 // user program
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Assert.Equal(0, hw.GetProgramBase());                   // kernel code addresses the OS region absolutely
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
-        Assert.Equal(0, hw.GetProgramBase());                   // privileged OS code => absolute
     }
 
     // ---- Trap entry / IRET mechanism -------------------------------------
@@ -402,5 +400,42 @@ public class SyscallTests : IDisposable
 
         Assert.Equal(new List<int> { 1, 2 }, outputs);
         Assert.False(os.HasProcesses);
+    }
+
+    [Fact]
+    public void TwoProcessesBlockedMidSyscall_DoNotClobberEachOthersTrapFrames()
+    {
+        // Both processes block inside the shared syscall handler (IN with no input).
+        // Their trap frames live on their own per-process kernel stacks, so waking each
+        // with a distinct value must deliver the right value to the right process — the
+        // key B-real property: a shared handler must not clobber a concurrently-blocked
+        // syscall.
+        Assembler reader = new Assembler();
+        reader.In(RegisterName.EAX);
+        reader.Out(RegisterName.EAX);
+        reader.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        Dictionary<int, int> outBySource = new Dictionary<int, int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) =>
+        {
+            outBySource[e.SourceProcess] = e.Value;
+            hw.RaiseOutputComplete(e.SourceProcess);
+        };
+        os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64)); // P0 -> device 0
+        os.LoadProcess(new Process(CreateProgramFile(reader.Build()), 128, 64)); // P1 -> device 1
+
+        RunSteps(os, hw, 8000);
+        Assert.True(os.HasProcesses);        // both still alive
+        Assert.False(os.HasRunningProcess);  // both blocked on input -> CPU idle
+
+        hw.RaiseInputInterrupt(111, 0); // wake P0 with 111
+        hw.RaiseInputInterrupt(222, 1); // wake P1 with 222
+        RunSteps(os, hw, 8000);
+
+        Assert.False(os.HasProcesses);
+        Assert.Equal(111, outBySource[0]); // P0 delivered its own value
+        Assert.Equal(222, outBySource[1]); // P1 delivered its own value
     }
 }

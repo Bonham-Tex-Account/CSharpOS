@@ -22,7 +22,7 @@ public class OsSchedulingRoutineTests
     {
         for (int step = 0; step < 2000; step++)
         {
-            if (hw.GetPrivilegeLevel() != PrivilegeLevel.Privileged)
+            if (hw.InterruptsEnabled())
             {
                 return;
             }

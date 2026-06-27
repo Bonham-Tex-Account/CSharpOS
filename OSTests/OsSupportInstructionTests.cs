@@ -47,7 +47,7 @@ public class OsSupportInstructionTests
     public void GetProgramBase_InPrivilegedMode_IsZero()
     {
         Hardware hw = NewHw();
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Assert.Equal(0, hw.GetProgramBase());
     }
 
@@ -64,7 +64,7 @@ public class OsSupportInstructionTests
         hw.WriteRegisterAt((byte)RegisterName.EAX, -1);
         int target = 1024;
         hw.WriteRegisterAt((byte)RegisterName.ECX, target);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Exec(hw, Instruction.SAVEREGS, (byte)RegisterName.ECX, 0, 0);
 
         // The persisted frame holds the interrupted values, not the scratch ones.
@@ -83,7 +83,7 @@ public class OsSupportInstructionTests
 
         hw.WriteRegisterAt((byte)RegisterName.EAX, 5);
         hw.WriteRegisterAt((byte)RegisterName.EBX, entry);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
 
         Exec(hw, Instruction.LOADREGS, (byte)RegisterName.EBX, 0, 0);
         // Live registers are still the routine's scratch after LOADREGS.
@@ -99,7 +99,7 @@ public class OsSupportInstructionTests
         WriteWord(hw, entry + hw.GetRegisterOffset(RegisterName.EIP), 1500);
 
         hw.WriteRegisterAt((byte)RegisterName.EBX, entry);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Exec(hw, Instruction.LOADREGS, (byte)RegisterName.EBX, 0, 0);
 
         // Routine computes the return level into a live register, then OSRETs it.
@@ -126,7 +126,8 @@ public class OsSupportInstructionTests
         hw.DispatchOsRoutine(Hardware.IvtContextSwitch);
 
         Assert.Equal(200, hw.GetInstructionPointer());
-        Assert.Equal(PrivilegeLevel.Privileged, hw.GetPrivilegeLevel());
+        Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
+        Assert.False(hw.InterruptsEnabled()); // dispatched OS routine runs atomically
 
         // The interrupted context (regs + the IP it was about to run) is recoverable
         // via SAVEREGS even though the routine may now clobber live registers.
@@ -143,7 +144,7 @@ public class OsSupportInstructionTests
         // OSRET without a prior LOADREGS (pendingContext == null) takes the idle path:
         // it drops to the specified level but marks the CPU as not running a process.
         Hardware hw = NewHw();
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
 
         hw.WriteRegisterAt((byte)RegisterName.ECX, (int)PrivilegeLevel.User);
         Exec(hw, Instruction.OSRET, (byte)RegisterName.ECX, 0, 0);
@@ -161,7 +162,7 @@ public class OsSupportInstructionTests
         hw.WriteRegisterAt((byte)RegisterName.EAX, 321);
         int target = 1024;
         hw.WriteRegisterAt((byte)RegisterName.ECX, target);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         // No CaptureInterruptedContext: trapFrame is still Array.Empty<byte>().
 
         Exec(hw, Instruction.SAVEREGS, (byte)RegisterName.ECX, 0, 0);
@@ -180,7 +181,7 @@ public class OsSupportInstructionTests
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredStackSize, 32);
 
         hw.WriteRegisterAt((byte)RegisterName.EBX, entry);
-        hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
+        hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
         Exec(hw, Instruction.SETLAYOUT, (byte)RegisterName.EBX, 0, 0);
 
         // In user mode the program base is the program address the entry described.
