@@ -301,6 +301,8 @@ public sealed class SpectreDashboard
         totals.AddRow("blocks", model.BlockCount.ToString());
         totals.AddRow("wakes", model.WakeCount.ToString());
         totals.AddRow("outputs", model.OutputCount.ToString());
+        totals.AddRow("branches", $"{model.BranchPredictions} (acc {model.BranchAccuracy:P0}, miss {model.BranchMisses})");
+        totals.AddRow("cycles", model.Cycles.ToString());
 
         Table perProcess = new Table();
         perProcess.Border = TableBorder.Rounded;
@@ -719,7 +721,9 @@ public sealed class SpectreDashboard
             new Markup($"[grey]faults[/] {frame.FaultCount}"),
             new Markup($"[grey]blocks[/] {frame.BlockCount}"),
             new Markup($"[grey]wakes[/] {frame.WakeCount}"),
-            new Markup($"[grey]outputs[/] {frame.OutputCount}")
+            new Markup($"[grey]outputs[/] {frame.OutputCount}"),
+            new Markup($"[grey]branches[/] {frame.BranchPredictions} [grey]acc[/] {frame.BranchAccuracy:P0} [grey]miss[/] {frame.BranchMisses}"),
+            new Markup($"[grey]cycles[/] {frame.Cycles}")
         };
         return new Rows(lines);
     }

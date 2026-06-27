@@ -37,6 +37,21 @@ public sealed class HardwareEventBridge
         hw.ProcessBlocked += OnProcessBlocked;
         hw.ProcessWoken += OnProcessWoken;
         hw.OsRoutineEntered += OnOsRoutineEntered;
+        hw.BranchPredicted += OnBranchPredicted;
+    }
+
+    private void OnBranchPredicted(object? sender, BranchPredictedArgs e)
+    {
+        model.BranchPredictions++;
+        if (e.Hit)
+        {
+            model.BranchHits++;
+        }
+        else
+        {
+            model.BranchMisses++;
+        }
+        model.Cycles = hw.GetCycles();
     }
 
     private void OnOsRoutineEntered(object? sender, OsRoutineArgs e)

@@ -55,19 +55,21 @@ internal static class InstructionFunctions
         hw.WriteRegisterAt(b1, (b2 << 8) | b3);
     }
 
-    // LOAD dest, [ptr]  — dest = 32-bit value at (programBase + reg[ptr])
+    // LOAD dest, [ptr]  — dest = 32-bit value at the (MMU-translated) address reg[ptr].
+    // In user mode the pointer is a virtual address translated through the page table; in
+    // kernel/OS mode it is absolute (program base 0). Translation is behavior-preserving.
     internal static void Load(Hardware hw, byte b1, byte b2, byte b3)
     {
-        int address = hw.GetProgramBase() + hw.ReadRegisterAt(b2);
+        int address = hw.TranslateDataAddress(hw.ReadRegisterAt(b2));
         byte[] bytes = hw.ReadBytes(address);
         int value = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
         hw.WriteRegisterAt(b1, value);
     }
 
-    // STORE [ptr], src  — (programBase + reg[ptr]) = reg[src]
+    // STORE [ptr], src  — (MMU-translated reg[ptr]) = reg[src]
     internal static void Store(Hardware hw, byte b1, byte b2, byte b3)
     {
-        int address = hw.GetProgramBase() + hw.ReadRegisterAt(b1);
+        int address = hw.TranslateDataAddress(hw.ReadRegisterAt(b1));
         int value = hw.ReadRegisterAt(b2);
         hw.WriteBytes(address, new byte[]
         {
@@ -179,9 +181,14 @@ internal static class InstructionFunctions
         hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));
     }
 
+    // The conditional jumps compute `taken` first, let the branch predictor score it
+    // (observational only), then jump exactly as before when taken — control flow is
+    // unchanged whether or not the predictor is watching.
     internal static void Jz(Hardware hw, byte b1, byte b2, byte b3)
     {
-        if ((hw.ReadRegister(RegisterName.EFLAGS) & ZeroFlag) != 0)
+        bool taken = (hw.ReadRegister(RegisterName.EFLAGS) & ZeroFlag) != 0;
+        hw.RecordBranch(taken);
+        if (taken)
         {
             hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));
         }
@@ -189,7 +196,9 @@ internal static class InstructionFunctions
 
     internal static void Jnz(Hardware hw, byte b1, byte b2, byte b3)
     {
-        if ((hw.ReadRegister(RegisterName.EFLAGS) & ZeroFlag) == 0)
+        bool taken = (hw.ReadRegister(RegisterName.EFLAGS) & ZeroFlag) == 0;
+        hw.RecordBranch(taken);
+        if (taken)
         {
             hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));
         }
@@ -197,7 +206,9 @@ internal static class InstructionFunctions
 
     internal static void Js(Hardware hw, byte b1, byte b2, byte b3)
     {
-        if ((hw.ReadRegister(RegisterName.EFLAGS) & SignFlag) != 0)
+        bool taken = (hw.ReadRegister(RegisterName.EFLAGS) & SignFlag) != 0;
+        hw.RecordBranch(taken);
+        if (taken)
         {
             hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));
         }
@@ -205,7 +216,9 @@ internal static class InstructionFunctions
 
     internal static void Jns(Hardware hw, byte b1, byte b2, byte b3)
     {
-        if ((hw.ReadRegister(RegisterName.EFLAGS) & SignFlag) == 0)
+        bool taken = (hw.ReadRegister(RegisterName.EFLAGS) & SignFlag) == 0;
+        hw.RecordBranch(taken);
+        if (taken)
         {
             hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));
         }
@@ -219,7 +232,9 @@ internal static class InstructionFunctions
         int programBase = hw.GetProgramBase();
         int returnOffset = hw.GetInstructionPointer() - programBase;
         int esp = hw.ReadRegister(RegisterName.ESP) - 4;
-        hw.WriteBytes(programBase + esp, new byte[]
+        // The stack slot is addressed virtually (translated); the jump target stays a
+        // program-relative code address (code is not paged in Phase 1).
+        hw.WriteBytes(hw.TranslateDataAddress(esp), new byte[]
         {
             (byte)(returnOffset & 0xFF),
             (byte)((returnOffset >> 8)  & 0xFF),
@@ -234,7 +249,7 @@ internal static class InstructionFunctions
     {
         int programBase = hw.GetProgramBase();
         int esp = hw.ReadRegister(RegisterName.ESP);
-        byte[] bytes = hw.ReadBytes(programBase + esp);
+        byte[] bytes = hw.ReadBytes(hw.TranslateDataAddress(esp));
         int returnOffset = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
         hw.WriteRegister(RegisterName.ESP, esp + 4);
         hw.SetInstructionPointer(programBase + returnOffset);

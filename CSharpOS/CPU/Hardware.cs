@@ -122,9 +122,16 @@ public partial class Hardware
     // Fired when a process is torn down (HLT or invalid-instruction fault), so a
     // host can release per-process resources (e.g. close its terminal window).
     public event EventHandler<ProcessTerminatedArgs>? ProcessTerminated;
+    // Fired after a user-mode conditional branch is scored by the branch predictor.
+    public event EventHandler<BranchPredictedArgs>? BranchPredicted;
 
     // ---- private constants -----------------------------------------------
     private const int SchedulerInstructionCount = 30;
+
+    // Observational cycles added when the branch predictor mispredicts a user branch
+    // (models the pipeline-flush cost). The cycle counter is observational only; it
+    // does not drive the MLFQ quantum (which stays instruction-count based).
+    private const int MispredictPenalty = 3;
 
     // ---- private fields --------------------------------------------------
     private byte[] memory;
@@ -150,6 +157,14 @@ public partial class Hardware
     // OS routine is run synchronously (the C#-initiated allocation path), whose
     // transitions are bookkeeping, not part of the visible execution timeline.
     private bool suppressOsEvents;
+
+    // Branch predictor (2-bit BHT) + observational cycle counter. The predictor scores
+    // only user-program branches (see RecordBranch); cycles count executed non-atomic
+    // instructions plus misprediction penalties. currentInstructionAddress is the
+    // address of the instruction being executed, so a branch handler can index the BHT.
+    private BranchPredictor predictor = new BranchPredictor();
+    private long cycles;
+    private int currentInstructionAddress;
 
     // The interrupted process's register file (incl. saved IP in the EIP slot),
     // snapshotted when an OS routine is dispatched so the routine can clobber the
@@ -669,6 +684,97 @@ public partial class Hardware
         });
     }
 
+    // Writes a word directly into physical memory without firing MemoryWritten. Used to
+    // seed page tables (OS bookkeeping, not part of the visible program memory timeline).
+    private void WriteWordRaw(int address, int value)
+    {
+        memory[address]     = (byte)(value & 0xFF);
+        memory[address + 1] = (byte)((value >> 8)  & 0xFF);
+        memory[address + 2] = (byte)((value >> 16) & 0xFF);
+        memory[address + 3] = (byte)((value >> 24) & 0xFF);
+    }
+
+    // ---- MMU: virtual-to-physical translation (paging) -------------------
+
+    // Translates a user-mode data/stack virtual address through the running process's
+    // page table; kernel/OS code (and non-OS-managed hardware) addresses memory
+    // absolutely, so it is returned unchanged via the program base. In Phase 1 each
+    // process occupies one contiguous block and its table is seeded linearly, so the
+    // translated physical address equals the old base+offset result.
+    public int TranslateDataAddress(int virtualAddress)
+    {
+        if (level != PrivilegeLevel.User || !OsManaged)
+        {
+            return GetProgramBase() + virtualAddress;
+        }
+        return TranslateUserPage(virtualAddress);
+    }
+
+    private int TranslateUserPage(int virtualAddress)
+    {
+        int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
+        int page = virtualAddress / OsLayout.PageSize;
+        int offset = virtualAddress % OsLayout.PageSize;
+        // Anything the page table cannot describe (no running process, a negative or
+        // out-of-range page, or an unmapped PTE) falls back to the linear mapping; the
+        // existing bounds traps still guard genuinely out-of-bounds accesses.
+        if (index < 0 || index >= OsLayout.MaxProcesses || page < 0 || page >= OsLayout.MaxPagesPerProcess)
+        {
+            return currentProcessInstructionStart + virtualAddress;
+        }
+        int pteAddress = osMemoryBase + OsLayout.PageTableAddress(index) + page * OsLayout.PageTableEntryBytes;
+        int pagePhysicalBase = ReadWord(pteAddress);
+        if (pagePhysicalBase < 0)
+        {
+            return currentProcessInstructionStart + virtualAddress;
+        }
+        return pagePhysicalBase + offset;
+    }
+
+    // Seeds the page table for the process whose table entry is at `entryAddress`, mapping
+    // each of its virtual pages onto the contiguous physical frames of its allocated block
+    // (and the rest of the table to UnmappedFrame). Run from SetLayoutFromEntry, the gate
+    // every process passes through before it is resumed, so loaded/forked/exec'd processes
+    // all get a valid table. Idempotent; uses raw writes to avoid event spam.
+    private void SeedPageTable(int entryAddress, int programAddress, int totalSize)
+    {
+        if (!OsManaged)
+        {
+            return;
+        }
+        int index = (entryAddress - osMemoryBase - OsLayout.ProcessTableOffset) / ProcessEntrySize;
+        if (index < 0 || index >= OsLayout.MaxProcesses)
+        {
+            return;
+        }
+        int pageCount = (totalSize + OsLayout.PageSize - 1) / OsLayout.PageSize;
+        int tableBase = osMemoryBase + OsLayout.PageTableAddress(index);
+        for (int p = 0; p < OsLayout.MaxPagesPerProcess; p++)
+        {
+            int pagePhysicalBase;
+            if (p < pageCount)
+            {
+                pagePhysicalBase = programAddress + p * OsLayout.PageSize;
+            }
+            else
+            {
+                pagePhysicalBase = OsLayout.UnmappedPage;
+            }
+            WriteWordRaw(tableBase + p * OsLayout.PageTableEntryBytes, pagePhysicalBase);
+        }
+    }
+
+    // The physical base address mapped to a process's virtual page, or UnmappedPage (-1)
+    // if the page is not mapped (exposed for tests/visualizer).
+    public int PageTableEntry(int processIndex, int page)
+    {
+        if (!OsManaged || processIndex < 0 || page < 0 || page >= OsLayout.MaxPagesPerProcess)
+        {
+            return OsLayout.UnmappedPage;
+        }
+        return ReadWord(osMemoryBase + OsLayout.PageTableAddress(processIndex) + page * OsLayout.PageTableEntryBytes);
+    }
+
     // Word read/write against a plain byte[] (e.g. a register-file snapshot),
     // independent of the memory array.
     private static int ReadWordFrom(byte[] buffer, int offset)
@@ -818,11 +924,57 @@ public partial class Hardware
         }
         InstructionExecuted?.Invoke(this, new InstructionExecutedArgs { Address = ip, Opcode = bytes[0], B1 = bytes[1], B2 = bytes[2], B3 = bytes[3] });
         instructionCount++;
+        cycles++; // baseline of one observational cycle per executed (non-atomic) instruction
         if (OsManaged && instructionCount >= SchedulerInstructionCount)
         {
             instructionCount = 0;
             DispatchOsRoutine(IvtContextSwitch);
         }
+    }
+
+    // ---- branch prediction (observational) -------------------------------
+
+    // Set by Instruction.Execute before each handler runs, so a branch handler can
+    // tell the predictor which instruction address it is scoring.
+    public void SetCurrentInstructionAddress(int address)
+    {
+        currentInstructionAddress = address;
+    }
+
+    // Scores a conditional branch (JZ/JNZ/JS/JNS) against the predictor. Only
+    // user-mode program branches are measured: OS routines (interrupts masked) and the
+    // shared syscall handler (Kernel mode) are skipped so the stats reflect the
+    // workload, not the scheduler's loops. A misprediction adds an observational cycle
+    // penalty. This never changes control flow — the caller still jumps on `taken`.
+    public void RecordBranch(bool taken)
+    {
+        if (level != PrivilegeLevel.User)
+        {
+            return;
+        }
+        bool predicted = predictor.Predict(currentInstructionAddress);
+        bool hit = predictor.Record(currentInstructionAddress, taken);
+        if (!hit)
+        {
+            cycles += MispredictPenalty;
+        }
+        BranchPredicted?.Invoke(this, new BranchPredictedArgs
+        {
+            Address = currentInstructionAddress,
+            Predicted = predicted,
+            Actual = taken,
+            Hit = hit
+        });
+    }
+
+    public BranchPredictor GetBranchPredictor()
+    {
+        return predictor;
+    }
+
+    public long GetCycles()
+    {
+        return cycles;
     }
 
     public void LoadProcess(Process process, byte[] program)
@@ -943,6 +1095,10 @@ public partial class Hardware
         int requiredMemory    = ReadWord(entryAddress + ProcessEntryRequiredMemory);
         int requiredStackSize = ReadWord(entryAddress + ProcessEntryRequiredStackSize);
         SetProcessLayout(programAddress, programSize, requiredMemory, requiredStackSize);
+        // Seed the page table for the process about to run, so the MMU can translate its
+        // user-mode accesses. The mapped extent covers the whole allocated block.
+        int totalSize = programSize + requiredMemory + requiredStackSize + KernelStackSize;
+        SeedPageTable(entryAddress, programAddress, totalSize);
     }
 
     // OSRET: the OS's return-to-process primitive. Reads the target level from the
