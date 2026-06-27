@@ -70,6 +70,7 @@ public static class OsRoutines
         int exec          = OsLayout.CodeBase + asm.CodeLength; EmitExec(asm);
         int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
         int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
+        int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
@@ -100,6 +101,7 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtExec * 4,               exec);
         WriteWord(image, Hardware.IvtWait * 4,               wait);
         WriteWord(image, Hardware.IvtSyscall * 4,            syscall);
+        WriteWord(image, Hardware.IvtPageFault * 4,          pageFault);
         return image;
     }
 
@@ -228,6 +230,49 @@ public static class OsRoutines
         EntryAddress(asm, ECX, EBX);
         StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryExitStatus); // fault status = -1
         asm.Jmp("exit_body");
+    }
+
+    // IvtPageFault: demand-paging fault handler (Phase 2). Entered with the faulting page
+    // number in EAX when a user data access touches a non-resident page. Makes the page
+    // resident by pointing its PTE at the page's physical home in the process's allocated
+    // block (Phase 1 backing), then reschedules — the faulting instruction re-runs and now
+    // translates. The faulting context (with its IP rewound to the faulting instruction)
+    // was captured on entry; SAVEREGS persists it so the process can resume.
+    private static void EmitPageFault(Assembler asm)
+    {
+        // PageSize and the per-process page-table stride are powers of two; shift by their
+        // log2 (computed at emit time) instead of multiplying.
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
+
+        asm.Mov(R(R12), R(EAX));                    // R12 = faulting page (helpers clobber EAX)
+
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                   // ECX = current index (resume_mlfq anchor)
+        EntryAddress(asm, ECX, EBX);                // EBX = faulting process's entry
+        asm.SaveRegs(R(EBX));                        // persist faulting context (IP rewound)
+
+        // physBase = entry.ProgramAddress + faultingPage * PageSize
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R8);
+        asm.Mov(R(R9), R(R12));
+        asm.MovImm(R(R10), pageShift);
+        asm.Shl(R(R9), R(R10));
+        asm.Add(R(R9), R(R8));                        // R9 = page's physical home
+
+        // pteAddress = PageTableBase + index * PageTableBytesPerProcess + faultingPage * 4
+        asm.Mov(R(R11), R(ECX));
+        asm.MovImm(R(R10), tableStrideShift);
+        asm.Shl(R(R11), R(R10));
+        Imm16(asm, R13, OsLayout.PageTableBase);
+        asm.Add(R(R11), R(R13));
+        asm.Mov(R(R13), R(R12));
+        asm.MovImm(R(R10), pteShift);
+        asm.Shl(R(R13), R(R10));
+        asm.Add(R(R11), R(R13));                      // R11 = &PTE[index][faultingPage]
+
+        asm.Store(R(R11), R(R9));                     // PTE := physBase (now resident)
+        asm.Jmp("resume_mlfq");
     }
 
     // exit_body: tear down the running process (entry in EBX, ExitStatus already set).

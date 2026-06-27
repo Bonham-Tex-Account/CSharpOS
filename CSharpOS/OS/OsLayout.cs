@@ -73,7 +73,12 @@ public static class OsLayout
     public const int PageSize = 256;                  // == BuddyDefaultMinBlock
     public const int MaxPagesPerProcess = 64;         // 64 * 256 = 16 KiB of mapped virtual space per process
     public const int PageTableEntryBytes = 4;
+    // PTE sentinels. >= 0 is a resident page's physical base. UnmappedPage marks a page
+    // outside the process (the MMU falls back to linear / lets bounds traps handle it).
+    // NonResidentPage marks a page that belongs to the process but is not currently
+    // resident — touching it raises a demand page fault (Phase 2).
     public const int UnmappedPage = -1;
+    public const int NonResidentPage = -2;
     public const int PageTableBytesPerProcess = MaxPagesPerProcess * PageTableEntryBytes;
     public const int PageTableBase = PrivilegedStackTop;
     public const int PageTableRegionSize = MaxProcesses * PageTableBytesPerProcess;

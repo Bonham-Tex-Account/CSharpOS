@@ -12,7 +12,9 @@
       "Bash(git merge *)",
       "Bash(git stash *)",
       "Bash(git checkout *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(python -c 'import sys,json *)",
+      "Bash(PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python -c ' *)"
     ]
   }
 }
