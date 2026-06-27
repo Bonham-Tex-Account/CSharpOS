@@ -3,10 +3,10 @@ using CSharpOS;
 namespace OSTests;
 
 /// <summary>
-/// Phase A of the OS-as-process work: I/O (IN/OUT) traps into an ISA kernel in the
-/// process's kernel section; HLT and invalid opcodes are atomic privileged
-/// terminations. Covers the trap mechanism, IRET, privilege gating, preemption,
-/// and end-to-end syscalls through BasicOS's kernel image.
+/// I/O (IN/OUT) in user mode traps into the shared ISA syscall handler in the OS
+/// region, using a per-process trap frame on the process's kernel stack; HLT and
+/// invalid opcodes are atomic terminations. Covers the trap mechanism, IRET,
+/// privilege gating, preemption, and end-to-end syscalls through the shared handler.
 /// </summary>
 public class SyscallTests : IDisposable
 {
@@ -99,7 +99,7 @@ public class SyscallTests : IDisposable
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
         Assert.Equal(100, hw.GetProgramBase());                 // user program
         hw.SetPrivilegeLevel(PrivilegeLevel.Kernel);
-        Assert.Equal(108, hw.GetProgramBase());                 // kernel section (after program)
+        Assert.Equal(0, hw.GetProgramBase());                   // kernel code addresses the OS region absolutely
         hw.SetPrivilegeLevel(PrivilegeLevel.Privileged);
         Assert.Equal(0, hw.GetProgramBase());                   // privileged OS code => absolute
     }
@@ -111,7 +111,12 @@ public class SyscallTests : IDisposable
     {
         FakeOS os = new FakeOS();
         Hardware hw = HardwareWithLayout(os, 0, 4);
-        int section = 4; // ProgramAddress + ProgramSize
+        // The trap frame lives at the base of this process's kernel stack region:
+        // programAddress + programSize + user memory + user stack.
+        int frameBase = 0 + 4 + LayoutUserMemory + LayoutUserStack;
+        // EnterKernel jumps to the shared syscall handler whose address is in IVT[IvtSyscall].
+        int handlerAddress = 777;
+        Test.WriteWord(hw, Hardware.IvtSyscall * 4, handlerAddress);
         hw.WriteRegisterAt(0, 99); // EAX is the operand of OUT EAX
         hw.SetInstructionPointer(0);
         hw.WriteBytes(0, Test.Word(Instruction.OUT, 0, 0, 0));
@@ -119,17 +124,16 @@ public class SyscallTests : IDisposable
         hw.Run(); // Run advances IP to 4 before OUT executes
 
         Assert.Equal(PrivilegeLevel.Kernel, hw.GetPrivilegeLevel());
-        Assert.Equal(section + Hardware.KernelHeaderSize, hw.GetInstructionPointer());
+        Assert.Equal(handlerAddress, hw.GetInstructionPointer());
         // trap-info: opcode, operand byte-offset (EAX => 0), return IP (after OUT => 4)
-        Assert.Equal(Instruction.OUT, hw.ReadBytes(section + Hardware.KernelTrapInfoOffset)[0]);
-        Assert.Equal(0, ReadWord(hw, section + Hardware.KernelTrapInfoOffset + 4));
-        Assert.Equal(4, ReadWord(hw, section + Hardware.KernelTrapInfoOffset + 8));
-        // user EAX saved into the kernel-section save area
-        Assert.Equal(99, ReadWord(hw, section + Hardware.KernelSaveAreaOffset));
-        // running on the process's kernel stack; ESP is an offset from the kernel
-        // section base (position-independent model), so subtract that base (section).
-        int kernelStackTop = section + Hardware.KernelHeaderSize + LayoutUserMemory + LayoutUserStack + Hardware.KernelStackSize;
-        Assert.Equal(kernelStackTop - section, hw.ReadRegister(RegisterName.ESP));
+        Assert.Equal(Instruction.OUT, hw.ReadBytes(frameBase + Hardware.KernelTrapInfoOffset)[0]);
+        Assert.Equal(0, ReadWord(hw, frameBase + Hardware.KernelTrapInfoOffset + 4));
+        Assert.Equal(4, ReadWord(hw, frameBase + Hardware.KernelTrapInfoOffset + 8));
+        // user EAX saved into the trap frame's save area
+        Assert.Equal(99, ReadWord(hw, frameBase + Hardware.KernelSaveAreaOffset));
+        // Kernel addresses absolutely (base 0): EBP = frame base, ESP = kernel stack top.
+        Assert.Equal(frameBase, hw.ReadRegister(RegisterName.EBP));
+        Assert.Equal(frameBase + Hardware.KernelStackSize, hw.ReadRegister(RegisterName.ESP));
     }
 
     [Fact]
@@ -151,13 +155,13 @@ public class SyscallTests : IDisposable
     {
         FakeOS os = new FakeOS();
         Hardware hw = HardwareWithLayout(os, 0, 4);
-        int section = 4;
+        int frameBase = 0 + 4 + LayoutUserMemory + LayoutUserStack; // kernel stack base = trap frame
         hw.WriteRegisterAt(0, 7);      // user EAX
         hw.SetInstructionPointer(40);  // the user instruction to resume at
         hw.EnterKernel(Instruction.IN, 0);
 
         // Kernel writes an IN result into the operand's save-area slot (EAX => 0).
-        hw.WriteBytes(section + Hardware.KernelSaveAreaOffset, new byte[] { 55, 0, 0, 0 });
+        hw.WriteBytes(frameBase + Hardware.KernelSaveAreaOffset, new byte[] { 55, 0, 0, 0 });
 
         hw.Iret();
 

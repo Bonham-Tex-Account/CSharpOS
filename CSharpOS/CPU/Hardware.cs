@@ -14,7 +14,11 @@ namespace CSharpOS;
 public partial class Hardware
 {
     // ---- public constants ------------------------------------------------
-    public const int KernelStackSize = 64;
+    // The per-process kernel stack region. It holds the syscall trap frame (the saved
+    // user register file + trap info = KernelHeaderSize bytes) at its base, with a small
+    // handler stack above. Sized to fit the frame; the user stack top is still
+    // TotalSize - KernelStackSize, so the ISA spawn/exec ESP formula stays unchanged.
+    public const int KernelStackSize = KernelHeaderSize + 64;
     public const int KernelSaveAreaOffset = 0;
     public const int KernelTrapInfoOffset = 96;
     public const int KernelTrapInfoSize = 16;
@@ -92,7 +96,11 @@ public partial class Hardware
     public const int IvtExec               = 11;
     public const int IvtWait               = 12;
     public const int IvtSpawn              = 13;
-    public const int IvtSlotCount          = 14;
+    // The shared syscall (IN/OUT) handler's entry address. Unlike the dispatched slots,
+    // EnterKernel jumps here directly without masking interrupts, so the handler stays
+    // preemptible; only its address is stored here (wired up by BuildOsImage).
+    public const int IvtSyscall            = 14;
+    public const int IvtSlotCount          = 15;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // ---- public events ---------------------------------------------------
@@ -127,6 +135,15 @@ public partial class Hardware
     private int instructionCount;
     private int instructionPointer;
     private PrivilegeLevel level;
+
+    // Hardware interrupt-enable flag (the real CPU's IF). When false, the run loop
+    // neither preempts at the quantum nor dispatches pending interrupts, so the code
+    // runs atomically. Cleared on OS-routine (IVT) entry and restored on OSRET/IRET;
+    // a syscall trap into the kernel leaves it set, so the syscall handler stays
+    // preemptible. Default true (user/kernel code is interruptible). Because atomic
+    // OS routines never nest or get preempted, every resumable saved context is
+    // interruptible, so this flag needs no per-process storage.
+    private bool interruptsEnabled = true;
     private bool trapTaken;
 
     // Suppresses observability events (PrivilegeChanged, OsRoutineEntered) while an
@@ -176,8 +193,6 @@ public partial class Hardware
     private int currentProcessKernelStackSize;
     private int currentProcessInstructionStart;
     private int currentProcessInstructionSize;
-    private int currentProcessKernelSectionStart;
-    private int currentProcessKernelSectionSize;
 
     private Dictionary<byte, List<Trap>> trapTable = new Dictionary<byte, List<Trap>>();
 
@@ -225,6 +240,10 @@ public partial class Hardware
     public void SetInstructionPointer(int address) { instructionPointer = address; }
     public PrivilegeLevel GetPrivilegeLevel() { return level; }
     public void SetPrivilegeLevel(PrivilegeLevel value) { level = value; }
+    /// <summary>Whether maskable interrupts are enabled (the CPU's IF flag). False while an atomic OS routine runs.</summary>
+    public bool InterruptsEnabled() { return interruptsEnabled; }
+    /// <summary>Low-level test seam: forces the interrupt-enable flag, to simulate being inside (false) or outside (true) an atomic OS routine.</summary>
+    public void SetInterruptsEnabled(bool value) { interruptsEnabled = value; }
 
     // The foreground process, which owns the live keyboard and screen. The host sets
     // this (e.g. Tab to cycle focus); -1 means none.
@@ -309,6 +328,7 @@ public partial class Hardware
             OsRoutineEntered?.Invoke(this, new OsRoutineArgs { Slot = slot, Name = NameForRoutineSlot(slot) });
         }
         SetLevel(PrivilegeLevel.Privileged);
+        interruptsEnabled = false; // OS routines run atomically: no preemption, no interrupt dispatch
         instructionPointer = routineAddress;
         trapTaken = true;
     }
@@ -345,10 +365,10 @@ public partial class Hardware
         return false;
     }
 
-    // Program-relative addressing follows the privilege level: user code runs
-    // relative to its program image, kernel code relative to its kernel section,
-    // and privileged OS code addresses memory absolutely (base 0) so it can reach
-    // the OS region and any process's memory.
+    // Program-relative addressing follows the privilege level: user code runs relative
+    // to its program image, while kernel code (the shared syscall handler and the OS
+    // routines) addresses memory absolutely (base 0) so it can reach the OS region and
+    // any process's memory.
     public int GetProgramBase()
     {
         return GetProgramBaseFor(level);
@@ -367,7 +387,9 @@ public partial class Hardware
         {
             return currentProcessInstructionStart;
         }
-        return currentProcessKernelSectionStart;
+        // Kernel and Privileged both address the OS region absolutely (base 0): the
+        // syscall handler is shared OS code and the OS routines live in the OS region.
+        return 0;
     }
 
     public byte[] ReadBytes(int address)
@@ -459,8 +481,7 @@ public partial class Hardware
             new MemoryRange { Start = currentProcessMemoryStart,      Size = currentProcessMemorySize },
             new MemoryRange { Start = currentProcessStackStart,       Size = currentProcessStackSize },
             new MemoryRange { Start = currentProcessKernelStackStart, Size = currentProcessKernelStackSize },
-            new MemoryRange { Start = currentProcessInstructionStart, Size = currentProcessInstructionSize },
-            new MemoryRange { Start = currentProcessKernelSectionStart, Size = currentProcessKernelSectionSize }
+            new MemoryRange { Start = currentProcessInstructionStart, Size = currentProcessInstructionSize }
         };
 
         ranges.Sort((MemoryRange a, MemoryRange b) => a.Start.CompareTo(b.Start));
@@ -760,9 +781,9 @@ public partial class Hardware
             return;
         }
 
-        if (level == PrivilegeLevel.Privileged)
+        if (!interruptsEnabled)
         {
-            StepInstruction(); // run the in-progress OS routine, one instruction per tick
+            StepInstruction(); // run the in-progress atomic OS routine, one instruction per tick
             return;
         }
         if (TryDispatchPendingInterrupt())
@@ -793,9 +814,9 @@ public partial class Hardware
             trapTaken = false;
             return;
         }
-        if (OsManaged && level == PrivilegeLevel.Privileged)
+        if (OsManaged && !interruptsEnabled)
         {
-            return; // an OS-routine instruction
+            return; // an atomic OS-routine instruction: not counted, no event, never preempted
         }
         InstructionExecuted?.Invoke(this, new InstructionExecutedArgs { Address = ip, Opcode = bytes[0], B1 = bytes[1], B2 = bytes[2], B3 = bytes[3] });
         instructionCount++;
@@ -811,10 +832,6 @@ public partial class Hardware
         WriteBytes(process.ProgramAddress, program);
         process.ProgramSize = program.Length;
         SetProcessLayout(process.ProgramAddress, program.Length, process.RequiredMemory, process.RequiredStackSize);
-        if (os.KernelImage.Length > 0)
-        {
-            WriteBytes(currentProcessKernelSectionStart + KernelHeaderSize, os.KernelImage);
-        }
         InitializeStackPointer(process);
     }
 
@@ -825,17 +842,16 @@ public partial class Hardware
         SetProcessLayout(process.ProgramAddress, process.ProgramSize, process.RequiredMemory, process.RequiredStackSize);
     }
 
-    // Layout: [program][kernel section][memory][user stack][kernel stack].
-    // The register-state block and mode slot live at the front of the memory
-    // region (RegisterStateAddress == currentProcessMemoryStart).
+    // Layout: [program][memory][user stack][kernel stack]. The syscall handler is now
+    // shared OS code (no per-process copy), so there is no kernel section; the kernel
+    // stack holds the syscall trap frame at its base. The register-state block and mode
+    // slot live at the front of the memory region (RegisterStateAddress == currentProcessMemoryStart).
     private void SetProcessLayout(int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
         processLayoutLoaded = true;
         currentProcessInstructionStart  = programAddress;
         currentProcessInstructionSize   = programSize;
-        currentProcessKernelSectionStart = programAddress + programSize;
-        currentProcessKernelSectionSize  = KernelHeaderSize + os.KernelImage.Length;
-        currentProcessMemoryStart = currentProcessKernelSectionStart + currentProcessKernelSectionSize;
+        currentProcessMemoryStart = programAddress + programSize;
         currentProcessMemorySize  = requiredMemory;
         currentProcessStackStart  = currentProcessMemoryStart + requiredMemory;
         currentProcessStackSize   = requiredStackSize;
@@ -843,31 +859,37 @@ public partial class Hardware
         currentProcessKernelStackSize  = KernelStackSize;
     }
 
-    // An I/O instruction executed in user mode traps into the kernel: saves the
-    // user register file, records trap-info, and jumps to the kernel entry point.
+    // An I/O instruction executed in user mode traps into the kernel: pushes the trap
+    // frame (saved user register file + trap info) onto this process's kernel stack,
+    // points the frame-pointer register at it, and jumps to the shared syscall handler.
+    // The frame lives at the base of the kernel-stack region (per-process, so it survives
+    // a context switch or a block mid-syscall). Interrupts stay enabled: the handler is
+    // preemptible. Kernel addresses absolutely (base 0), so EBP/ESP hold real addresses.
     public void EnterKernel(byte opcode, int operandByteOffset)
     {
-        int kernelBase = currentProcessKernelSectionStart;
-        WriteBytes(kernelBase + KernelSaveAreaOffset, (byte[])registers.Clone());
-        WriteWord(kernelBase + KernelTrapInfoOffset,     opcode);
-        WriteWord(kernelBase + KernelTrapInfoOffset + 4, operandByteOffset);
+        int frameBase = currentProcessKernelStackStart;
+        WriteBytes(frameBase + KernelSaveAreaOffset, (byte[])registers.Clone());
+        WriteWord(frameBase + KernelTrapInfoOffset,     opcode);
+        WriteWord(frameBase + KernelTrapInfoOffset + 4, operandByteOffset);
         // Return IP stored relative to the user program base (position-independent).
-        WriteWord(kernelBase + KernelTrapInfoOffset + 8, instructionPointer - currentProcessInstructionStart);
+        WriteWord(frameBase + KernelTrapInfoOffset + 8, instructionPointer - currentProcessInstructionStart);
         SetLevel(PrivilegeLevel.Kernel);
-        // ESP stored as an offset from the kernel section base.
-        WriteRegister(RegisterName.ESP, (currentProcessKernelStackStart + currentProcessKernelStackSize) - kernelBase);
-        instructionPointer = kernelBase + KernelHeaderSize;
+        WriteRegister(RegisterName.EBP, frameBase);                                        // frame pointer (absolute)
+        WriteRegister(RegisterName.ESP, currentProcessKernelStackStart + currentProcessKernelStackSize); // kernel stack top
+        instructionPointer = ReadWord(osMemoryBase + IvtSyscall * 4);                      // shared handler in the OS region
         trapTaken = true;
     }
 
-    // Returns from a kernel-mode syscall handler, restoring the saved register
-    // file (including any IN result written into it) and jumping back to user code.
+    // Returns from a kernel-mode syscall handler, restoring the saved register file
+    // (including any IN result written into the save area) from this process's kernel
+    // stack frame and jumping back to user code.
     public void Iret()
     {
-        int kernelBase = currentProcessKernelSectionStart;
-        int returnOffset = ReadWord(kernelBase + KernelTrapInfoOffset + 8); // user-relative
-        WriteRegisters(ReadRegisterState(kernelBase + KernelSaveAreaOffset));
+        int frameBase = currentProcessKernelStackStart;
+        int returnOffset = ReadWord(frameBase + KernelTrapInfoOffset + 8); // user-relative
+        WriteRegisters(ReadRegisterState(frameBase + KernelSaveAreaOffset));
         SetLevel(PrivilegeLevel.User);
+        interruptsEnabled = true; // back in user code: interruptible
         instructionPointer = currentProcessInstructionStart + returnOffset;
     }
 
@@ -956,6 +978,7 @@ public partial class Hardware
             }
         }
         SetLevel((PrivilegeLevel)privilegeLevel);
+        interruptsEnabled = true; // returning to a preemptible process: re-enable interrupts
         trapTaken = true;
     }
 
@@ -969,15 +992,24 @@ public partial class Hardware
         byte[] savedRegisters = (byte[])registers.Clone();
         int savedIp = instructionPointer;
         PrivilegeLevel savedLevel = level;
+        bool savedInterrupts = interruptsEnabled;
         bool savedTrap = trapTaken;
         bool savedRunning = processRunning;
+        // This dispatch re-captures the interrupted-context bookkeeping (via
+        // EnterOsRoutine/OSRET). Snapshot it too so a synchronous run that lands while
+        // the main loop is mid-OS-routine stays fully transparent — otherwise the
+        // interrupted routine's later SAVEREGS would persist this run's captured level.
+        PrivilegeLevel savedInterruptedLevel = interruptedLevel;
+        byte[] savedTrapFrame = trapFrame;
+        byte[]? savedPending = pendingContext;
+        int savedLastContextBase = lastContextBase;
 
         // The transitions inside a synchronous allocation run are bookkeeping, not
         // part of the visible timeline; keep them off the observability feeds.
         suppressOsEvents = true;
         DispatchOsRoutine(slot, eaxArgument);
         int guard = 0;
-        while (level == PrivilegeLevel.Privileged && guard++ < 1_000_000)
+        while (!interruptsEnabled && guard++ < 1_000_000)
         {
             int ip = instructionPointer;
             instructionPointer += 4;
@@ -988,8 +1020,13 @@ public partial class Hardware
         WriteRegisters(savedRegisters);
         instructionPointer = savedIp;
         level = savedLevel;
+        interruptsEnabled = savedInterrupts;
         trapTaken = savedTrap;
         processRunning = savedRunning;
+        interruptedLevel = savedInterruptedLevel;
+        trapFrame = savedTrapFrame;
+        pendingContext = savedPending;
+        lastContextBase = savedLastContextBase;
     }
 
     // HLT is a request to terminate with status 0: the OS Halt routine frees the

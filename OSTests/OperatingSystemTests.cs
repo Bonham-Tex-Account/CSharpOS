@@ -77,7 +77,7 @@ public class OperatingSystemTests : IDisposable
         os.LoadProcess(first);
         os.LoadProcess(second);
 
-        int perProcess = program.Length + (Hardware.KernelHeaderSize + os.KernelImage.Length)
+        int perProcess = program.Length
             + first.RequiredMemory + first.RequiredStackSize + Hardware.KernelStackSize;
         Assert.Equal(os.OsMemorySize, first.ProgramAddress);
         // The buddy allocator rounds up to the next power-of-2 block size, so the second
@@ -109,27 +109,11 @@ public class OperatingSystemTests : IDisposable
         Process process = new Process(CreateProgramFile(program), 16, 16);
         os.LoadProcess(process);
 
-        int kernelSection = Hardware.KernelHeaderSize + os.KernelImage.Length;
-        int expectedTop = process.ProgramAddress + program.Length + kernelSection
+        int expectedTop = process.ProgramAddress + program.Length
             + process.RequiredMemory + process.RequiredStackSize;
         int entry = OsLayout.ProcessEntryAddress(0);
         // ESP is stored as an offset from the program base (position-independent model).
         Assert.Equal(expectedTop - process.ProgramAddress, ReadWord(hw, entry + hw.GetRegisterOffset(RegisterName.ESP)));
-    }
-
-    [Fact]
-    public void LoadProcess_CopiesKernelImageIntoTheKernelSection()
-    {
-        byte[] image = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44 };
-        KernelImageOS os = new KernelImageOS(new StringWriter(), image);
-        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
-        byte[] program = new byte[] { 0, 0, 0, 0 };
-        Process process = new Process(CreateProgramFile(program), 16, 16);
-        os.LoadProcess(process);
-
-        int imageStart = process.ProgramAddress + program.Length + Hardware.KernelHeaderSize;
-        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD }, hw.ReadBytes(imageStart));
-        Assert.Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 }, hw.ReadBytes(imageStart + 4));
     }
 
     [Fact]

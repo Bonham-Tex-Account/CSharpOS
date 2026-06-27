@@ -69,6 +69,7 @@ public static class OsRoutines
         int fork          = OsLayout.CodeBase + asm.CodeLength; EmitFork(asm);
         int exec          = OsLayout.CodeBase + asm.CodeLength; EmitExec(asm);
         int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
+        int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
@@ -98,6 +99,7 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtFork * 4,               fork);
         WriteWord(image, Hardware.IvtExec * 4,               exec);
         WriteWord(image, Hardware.IvtWait * 4,               wait);
+        WriteWord(image, Hardware.IvtSyscall * 4,            syscall);
         return image;
     }
 
@@ -394,6 +396,43 @@ public static class OsRoutines
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EAX));
         asm.Jmp("resume_mlfq");
+    }
+
+    // IvtSyscall: the shared IN/OUT syscall handler. Entered (not dispatched) by
+    // EnterKernel, which leaves interrupts enabled (the handler is preemptible) and sets
+    // EBP = this process's trap-frame base. The frame, on the process's kernel stack,
+    // holds the saved user register file at offset 0 and trap info at KernelTrapInfoOffset.
+    // Kernel addresses absolutely (base 0), so frame fields are read at EBP + offset.
+    // Uses EBP as the frame pointer; EAX/EBX/ECX/EDX/ESI are scratch. Returns via IRET.
+    private static void EmitSyscall(Assembler asm)
+    {
+        asm.Label("syscall");
+        asm.MovImm(R(EAX), Hardware.KernelTrapInfoOffset);
+        asm.Add(R(EAX), R(EBP));
+        asm.Load(R(EBX), R(EAX));                 // EBX = faulting opcode
+
+        asm.MovImm(R(EAX), Hardware.KernelTrapInfoOffset + 4);
+        asm.Add(R(EAX), R(EBP));
+        asm.Load(R(ECX), R(EAX));                 // ECX = operand byte-offset within the save area
+        asm.Add(R(ECX), R(EBP));                  // ECX = absolute address of the operand's save slot
+
+        asm.MovImm(R(EDX), Instruction.OUT);
+        asm.Cmp(R(EBX), R(EDX));
+        asm.Jz("syscall_out");
+        asm.MovImm(R(EDX), Instruction.IN);
+        asm.Cmp(R(EBX), R(EDX));
+        asm.Jz("syscall_in");
+        asm.Iret();                               // unknown cause — return (should not happen)
+
+        asm.Label("syscall_out");
+        asm.Load(R(ESI), R(ECX));                 // ESI = user's operand value (from the save area)
+        asm.Out(R(ESI));                          // real device write (kernel level)
+        asm.Iret();
+
+        asm.Label("syscall_in");
+        asm.In(R(ESI));                           // real device read (kernel level)
+        asm.Store(R(ECX), R(ESI));                // write the result back into the save-area slot
+        asm.Iret();
     }
 
     // ---- buddy allocator ---------------------------------------------------
@@ -841,15 +880,8 @@ public static class OsRoutines
         LoadField(asm, EBX, Hardware.ProcessEntryDiskSlot, R10);
         asm.DRead(R(R9), R(R10), R(R11));
 
-        // DREAD the kernel image into the kernel section: ProgramAddress + newLen + header.
-        LoadField(asm, EBX, Hardware.ProcessEntryProgramSize, R11); // newLen
-        asm.Mov(R(R12), R(R9));
-        asm.Add(R(R12), R(R11));
-        asm.MovImm(R(EAX), Hardware.KernelHeaderSize);
-        asm.Add(R(R12), R(EAX));                   // R12 = kernel image destination
-        Imm16(asm, EAX, OsLayout.KernelImageSlotOffset);
-        asm.Load(R(R13), R(EAX));
-        asm.DRead(R(R12), R(R13), R(R14));
+        // (The syscall handler is now shared OS code, so there is no per-process kernel
+        // image to reload here.)
 
         // Reset the register file to zero (24 words), so the new program starts fresh.
         asm.MovImm(R(R13), 0);

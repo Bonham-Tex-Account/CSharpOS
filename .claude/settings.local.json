@@ -8,7 +8,11 @@
       "Bash(dotnet test *)",
       "Read(//c/Users/Tex/.claude/plans/**)",
       "Read(//c/Users/Tex/.claude/plans//**)",
-      "Bash(xargs wc -l)"
+      "Bash(xargs wc -l)",
+      "Bash(git merge *)",
+      "Bash(git stash *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)"
     ]
   }
 }
