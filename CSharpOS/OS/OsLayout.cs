@@ -60,11 +60,35 @@ public static class OsLayout
     public const int PrivilegedStackOffset = BuddyBitmapOffset + BuddyBitmapWords * 4;
     public const int PrivilegedStackTop = PrivilegedStackOffset + PrivilegedStackSize;
 
+    // ---- paging: per-process page tables (virtual memory, Phase 1) --------
+    // The MMU translates user-mode virtual addresses through the running process's page
+    // table, which lives here in the OS region. Phase 1 keeps each process in one
+    // contiguous buddy-allocated block and seeds its table linearly (page p -> the page's
+    // physical base ProgramAddress + p*PageSize), so translation yields the same physical
+    // address as the old base+offset scheme (behavior-preserving). Placed after the
+    // privileged stack so the process-table/bitmap/stack offsets above are unchanged; only
+    // TotalSize grows. A PTE holds the **physical base address** of the mapped page (exact
+    // for any block alignment), or -1 for an unmapped page. Phase 2's frame allocator can
+    // store frame*PageSize in the same field once frames are page-aligned by construction.
+    public const int PageSize = 256;                  // == BuddyDefaultMinBlock
+    public const int MaxPagesPerProcess = 64;         // 64 * 256 = 16 KiB of mapped virtual space per process
+    public const int PageTableEntryBytes = 4;
+    public const int UnmappedPage = -1;
+    public const int PageTableBytesPerProcess = MaxPagesPerProcess * PageTableEntryBytes;
+    public const int PageTableBase = PrivilegedStackTop;
+    public const int PageTableRegionSize = MaxProcesses * PageTableBytesPerProcess;
+
     // Total OS region size.
-    public const int TotalSize = PrivilegedStackTop;
+    public const int TotalSize = PageTableBase + PageTableRegionSize;
 
     public static int ProcessEntryAddress(int index)
     {
         return ProcessTableOffset + index * Hardware.ProcessEntrySize;
+    }
+
+    // Absolute address (within the OS region) of process slot `index`'s page table.
+    public static int PageTableAddress(int index)
+    {
+        return PageTableBase + index * PageTableBytesPerProcess;
     }
 }

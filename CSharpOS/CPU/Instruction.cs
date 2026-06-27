@@ -131,6 +131,9 @@ public static class Instruction
         byte b2 = bytes[2];
         byte b3 = bytes[3];
 
+        // Record the address so a conditional-branch handler can index the predictor's BHT.
+        hw.SetCurrentInstructionAddress(address);
+
         if (hw.EvaluateTraps(opcode, b1, b2, b3))
         {
             return false;

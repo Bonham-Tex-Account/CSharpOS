@@ -28,6 +28,14 @@ public sealed class Frame
     public int BlockCount { get; init; }
     public int WakeCount { get; init; }
     public int OutputCount { get; init; }
+
+    // Branch-predictor stats (observational): user-program predictions and the cycle
+    // counter (baseline + misprediction penalties).
+    public long BranchPredictions { get; init; }
+    public long BranchHits { get; init; }
+    public long BranchMisses { get; init; }
+    public double BranchAccuracy { get; init; }
+    public long Cycles { get; init; }
 }
 
 /// <summary>
@@ -102,7 +110,12 @@ public sealed class FrameHistory
             FaultCount = model.FaultCount,
             BlockCount = model.BlockCount,
             WakeCount = model.WakeCount,
-            OutputCount = model.OutputCount
+            OutputCount = model.OutputCount,
+            BranchPredictions = model.BranchPredictions,
+            BranchHits = model.BranchHits,
+            BranchMisses = model.BranchMisses,
+            BranchAccuracy = model.BranchAccuracy,
+            Cycles = model.Cycles
         };
         frames.Add(frame);
         if (frames.Count > capacity)

@@ -165,6 +165,29 @@ public sealed class VisualizerModel
     public int OutputCount { get; set; }
     public Dictionary<string, int> InstructionsByProcess { get; } = new Dictionary<string, int>();
 
+    // ---- branch predictor (observational) --------------------------------
+    // User-program branch-prediction stats and the observational cycle counter, fed by
+    // the BranchPredicted event. Cycles include the misprediction penalty.
+    public long BranchPredictions { get; set; }
+    public long BranchHits { get; set; }
+    public long BranchMisses { get; set; }
+    public long Cycles { get; set; }
+
+    public double BranchAccuracy
+    {
+        get
+        {
+            if (BranchPredictions == 0)
+            {
+                return 0.0;
+            }
+            else
+            {
+                return (double)BranchHits / BranchPredictions;
+            }
+        }
+    }
+
     public void RecordInstruction(InstructionStep step)
     {
         PreviousRegisters = Registers;
