@@ -386,21 +386,26 @@ The following are absent from the ISA and would require new opcodes and handlers
 - Signed multiplication/division overflow detection — no carry or overflow flag.
 - Conditional moves, string instructions, floating-point.
 
-### Planned: branch prediction (no new opcodes)
+### Implemented: branch prediction (no new opcodes)
 
-Design doc: `C:\Users\Tex\.claude\plans\branch-prediction.md`
+A 2-bit saturating-counter branch history table (BHT, 64 entries) wraps the existing `JZ`/`JNZ`/`JS`/`JNS` handlers via `Hardware.RecordBranch`. **No new opcodes.** The predictor scores only user-mode branches (CPU at User level, interrupts enabled); OS-routine branches are skipped. A misprediction adds `MispredictPenalty = 3` observational cycles to the hardware cycle counter. The cycle counter is independent of the MLFQ quantum, which remains instruction-count based. Prediction results are exposed through the `BranchPredicted` event; the predictor is accessible via `Hardware.GetBranchPredictor()`.
 
-Adds a 2-bit saturating-counter branch history table (BHT) around the existing `JZ`/`JNZ`/`JS`/`JNS` handlers. **No new opcodes.** Observable effect: prediction accuracy stats and a modeled misprediction cycle penalty (observational only — does not alter scheduling). All existing tests remain green because the predictor never changes control flow.
+Source files: `CSharpOS/CPU/BranchPredictor.cs`, `OSTests/BranchPredictorTests.cs`.
 
-Planned new files: `CSharpOS/CPU/BranchPredictor.cs`, `OSTests/BranchPredictorTests.cs`.
+### Implemented: demand paging (MMU page-fault trap, no new user opcode)
 
-### Planned: paging / demand-swap (adds page-fault mechanism)
+The C# `Hardware` class implements a software MMU that translates user-mode data addresses through per-process page tables stored in the OS region. Code addresses (instruction fetches) are never translated. The ISA-visible addition is a **restartable page-fault trap**: when `TryTranslateData` encounters a non-resident PTE, it rewinds the instruction pointer to the faulting instruction and dispatches `IvtPageFault = 15` (the 16th IVT slot) with the faulting page number in EAX. After the ISA handler makes the page resident, the faulting instruction re-runs transparently.
 
-Design doc: `C:\Users\Tex\.claude\plans\paging-demand-swap.md`
+Key constants:
+- `PageSize = 256` bytes (= `BuddyDefaultMinBlock`)
+- `MaxPagesPerProcess = 64` (16 KiB of mappable virtual space per process)
+- `IvtPageFault = 15`; `IvtSlotCount = 16`; `OsLayout.CodeBase = 64` (= `IvtSlotCount * 4`)
+- PTE encodings: `>= 0` resident (physical frame base); `-1` unmapped; `-2` non-resident RAM-home; `<= -3` non-resident swap-backed (`SwapPte`); `<= -4096` copy-on-write share (`CowPte`)
+- Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 512` swap slots (total: 576 slots)
 
-Adds per-process virtual address spaces with demand paging and LRU swap to the Bin disk. The ISA change is a **page-fault trap** (a restartable fault, like the I/O block) — the faulting instruction rewinds and re-runs after the page is loaded. This is an MMU-level change implemented inside `Hardware.ReadBytes`/`WriteBytes`, not a new user-visible opcode.
+See `OS-Architecture.md`, section "Virtual memory and demand paging", for the complete design.
 
-Planned new files: `CSharpOS/CPU/Mmu.cs`, `CSharpOS/CPU/PageTable.cs`, `OSTests/PagingTests.cs`, `OSTests/SwapTests.cs`.
+Source files: `CSharpOS/CPU/Hardware.cs` (MMU methods `TryTranslateData`, `SeedPageTableIfNew`, `RaisePageFault`), `BasicOSPlugin/OsRoutines.cs` (`EmitPageFault`, `EmitReleaseFrames`, `EmitFlushFrames`, `EmitZeroSwapSlots`, `EmitPairResolve`, `EmitResolveCow`, `EmitCowShare`), `OSTests/PagingTests.cs`.
 
 ---
 
