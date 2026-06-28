@@ -332,4 +332,103 @@ public class PagingTests : IDisposable
         int frame = FrameHolding(hw, 0, 1);
         Assert.Equal(OsLayout.FrameBase(frame), pte);
     }
+
+    // ---- increment 3: Bin-disk swap backing for data pages ----------------------
+
+    [Fact]
+    public void DataPages_SeededSwapBacked_CodeAndStackStayRamHome()
+    {
+        // A data-region page is seeded with a swap-slot PTE; a code page (page 0) and a
+        // stack page keep the RAM-home -2 sentinel.
+        (Hardware hw, Process process, int index) = LoadAndLayout(512, 512);
+
+        // Page 0 is code (the 4-byte image) -> RAM-home.
+        Assert.Equal(OsLayout.NonResidentPage, hw.PageTableEntry(index, 0));
+
+        // A page whose start lies in the data region is swap-backed: its PTE decodes to the
+        // page's deterministic swap slot.
+        int dataPage = process.ProgramSize / OsLayout.PageSize + 1; // first full page past the code, inside data
+        int pte = hw.PageTableEntry(index, dataPage);
+        Assert.True(OsLayout.IsSwapPte(pte), $"data page {dataPage} PTE {pte} should be swap-backed");
+        Assert.Equal(OsLayout.SwapSlot(index, dataPage), OsLayout.SwapSlotFromPte(pte));
+
+        // The last user page is in the stack region -> RAM-home.
+        int stackPage = UserPageCount(process) - 1;
+        Assert.Equal(OsLayout.NonResidentPage, hw.PageTableEntry(index, stackPage));
+    }
+
+    [Fact]
+    public void DataPageFault_BringsItIntoAFrameTaggedWithItsSwapSlot()
+    {
+        Assembler asm = new Assembler();
+        EmitStorePage(asm, 4, 5); // page 4 sits in the data region (reqMemory 2048 = 8 pages)
+        asm.Hlt();
+
+        (Hardware hw, List<int> _) = BuildAndRun(asm.Build(), 2048, 512);
+
+        int frame = FrameHolding(hw, 0, 4);
+        Assert.True(frame >= 0, "the data page should be resident in a frame");
+        Assert.Equal(OsLayout.SwapSlot(0, 4), hw.FrameSwap(frame)); // frame knows its swap backing
+    }
+
+    [Fact]
+    public void DirtyDataPage_WrittenBackToDisk_SurvivesEvictionAndReload()
+    {
+        // Same round-trip as the inc-2 write-back test, but the backing store is now a Bin
+        // disk swap slot: the evicted dirty page is DWRITE-n to disk and DREAD back.
+        int n = OsLayout.FrameCount;
+        Assembler asm = new Assembler();
+        EmitStorePage(asm, 1, 66);            // data page 1 dirtied with 66
+        for (int p = 2; p <= n; p++)
+        {
+            EmitStorePage(asm, p, p);
+        }
+        EmitStorePage(asm, n + 1, 99);        // forces page 1 out to its swap slot
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX); // faults page 1 back in from disk
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        (Hardware hw, List<int> outputs) = BuildAndRun(asm.Build(), 2048, 512);
+
+        Assert.Contains(66, outputs); // value round-tripped through the disk swap slot
+    }
+
+    [Fact]
+    public void ForkedChild_InheritsTheParentsDataPagesThroughSwap()
+    {
+        // The parent writes a data page, then forks. The child must see that value in the
+        // inherited page — fork flushes the parent's dirty frame to its swap slot and
+        // deep-copies the parent's swap slots into the child's.
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 55);
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Store(RegisterName.EBX, RegisterName.EAX); // data page 1 = 55 (parent, pre-fork)
+        asm.Fork();
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("child");
+        asm.Hlt();                                     // parent: exit (no output)
+        asm.Label("child");
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX);  // read the inherited data page
+        asm.Out(RegisterName.EAX);                     // should be 55
+        asm.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 2048, 512));
+        List<int> outputs = new List<int>();
+        // Two processes (parent + forked child) output on different devices, so complete the
+        // specific device that produced each output (else the child blocks forever on stdout).
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(e.Device); };
+        int steps = 0;
+        while (os.HasProcesses && steps < 50000)
+        {
+            hw.Run();
+            steps++;
+        }
+
+        Assert.Contains(55, outputs); // child inherited the parent's swapped data page
+    }
 }

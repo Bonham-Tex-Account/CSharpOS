@@ -76,6 +76,7 @@ public static class OsRoutines
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
         EmitReleaseFrames(asm); // shared subroutine "release_frames"; ends with Ret
         EmitFlushFrames(asm);   // shared subroutine "flush_frames"; ends with Ret
+        EmitZeroSwapSlots(asm); // shared subroutine "zero_swap_slots"; ends with Ret
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);
@@ -245,8 +246,14 @@ public static class OsRoutines
     // context (IP rewound to the faulting instruction) was captured on entry; SAVEREGS
     // persists it so the process can resume.
     //
+    // A DATA page is backed by a Bin-disk swap slot (DREAD in / DWRITE out); a code or
+    // stack page is RAM-home (block memcpy in / out). The handler reads the faulting page's
+    // non-resident PTE to tell which: a swap PTE (<= -3) encodes the swap slot, the -2
+    // sentinel means RAM-home. The frame's core-map Swap field records the backing so the
+    // later eviction of that frame writes it back to the right place.
+    //
     // Persistent registers across the handler: R12 = faulting page, R13 = current index,
-    // R14 = the faulting page's block home, R15 = the chosen frame index.
+    // R14 = the faulting page's swap slot (or -1 when RAM-home), R15 = the chosen frame.
     private static void EmitPageFault(Assembler asm)
     {
         // PageSize, the page-table stride, and the PTE size are powers of two; shift by
@@ -262,12 +269,24 @@ public static class OsRoutines
         EntryAddress(asm, R13, EBX);                // EBX = faulting process's entry
         asm.SaveRegs(R(EBX));                        // persist faulting context (IP rewound)
 
-        // home = entry.ProgramAddress + faultingPage * PageSize  (the page's block home)
-        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R14);
-        asm.Mov(R(R8), R(R12));
-        asm.MovImm(R(EAX), pageShift);
-        asm.Shl(R(R8), R(EAX));
-        asm.Add(R(R14), R(R8));                      // R14 = home
+        // Decode the faulting page's backing from its non-resident PTE: a swap PTE (pte+bias
+        // <= 0, i.e. pte <= -3) gives swapSlot = -pte - bias in R14; the RAM-home sentinel
+        // (-2) leaves R14 = -1.
+        EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift); // R9 = &PTE[cur][page]
+        asm.Load(R(R8), R(R9));                       // R8 = pte
+        asm.Mov(R(R11), R(R8));
+        asm.MovImm(R(EAX), OsLayout.SwapPteBias);
+        asm.Add(R(R11), R(EAX));                      // R11 = pte + bias
+        asm.MovImm(R(EAX), 1);
+        asm.Cmp(R(R11), R(EAX));
+        asm.Js("pf_src_swap");                        // pte + bias < 1  =>  swap-backed
+        asm.MovImm(R(R14), 0);
+        asm.Dec(R(R14));                              // R14 = -1  (RAM-home marker)
+        asm.Jmp("pf_src_done");
+        asm.Label("pf_src_swap");
+        asm.MovImm(R(R14), 0);
+        asm.Sub(R(R14), R(R11));                      // R14 = -(pte + bias) = swap slot
+        asm.Label("pf_src_done");
 
         // --- find a free frame (Occupied == 0) ---
         asm.MovImm(R(ESI), 0);                       // ESI = f
@@ -307,45 +326,98 @@ public static class OsRoutines
         asm.Inc(R(ESI));
         asm.Jmp("pf_lru_scan");
 
-        // --- evict the victim frame R15 (it is occupied) ---
+        // --- evict the victim frame R15 (it is occupied); branch on its backing ---
         asm.Label("pf_evict");
         FrameEntryAddress(asm, R15, R9);             // R9 = &frame[victim]
+        LoadField(asm, R9, OsLayout.FrameSwapField, R8); // R8 = victim swap slot (-1 if RAM-home)
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Js("pf_evict_ram");                      // R8 < 0: RAM-home victim
+
+        // -- swap-backed victim: DWRITE the frame back to its swap slot if dirty --
         LoadField(asm, R9, OsLayout.FrameDirtyField, R10);
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R10), R(EAX));
-        asm.Jz("pf_evict_unmap");                    // clean: drop without write-back
-        // dirty: write the frame back to its home
-        FrameBaseAddress(asm, R15, R8, pageShift);   // R8 = frame physical base (src)
-        LoadField(asm, R9, OsLayout.FrameHomeField, R11); // R11 = home (dst)
-        EmitPageCopy(asm, R8, R11, "pf_wb", R10);    // copy PageSize bytes (word value in R10)
+        asm.Jz("pf_evict_swap_unmap");               // clean: drop without write-back
+        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (src)
+        asm.MovImm16(R(R10), OsLayout.PageSize);     // R10 = length
+        asm.DWrite(R(R8), R(R11), R(R10));           // swap slot <- frame
+        asm.Label("pf_evict_swap_unmap");
+        // owner PTE := SwapPte(swapSlot) = -(swapSlot + bias)
+        FrameEntryAddress(asm, R15, R9);
+        LoadField(asm, R9, OsLayout.FrameSwapField, R8);       // R8 = swap slot
+        LoadField(asm, R9, OsLayout.FrameOwnerProcField, ESI); // ESI = oldProc
+        LoadField(asm, R9, OsLayout.FrameOwnerPageField, EDI); // EDI = oldPage
+        EmitPteAddress(asm, ESI, EDI, R11, EDX, tableStrideShift, pteShift); // R11 = &PTE
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(R10), OsLayout.SwapPteBias);
+        asm.Add(R(EAX), R(R10));                      // EAX = swapSlot + bias
+        asm.MovImm(R(R10), 0);
+        asm.Sub(R(R10), R(EAX));                      // R10 = -(swapSlot + bias) = swap PTE
+        asm.Store(R(R11), R(R10));
+        asm.Jmp("pf_fill");
 
-        asm.Label("pf_evict_unmap");
-        // flip the evicted page's owner PTE back to non-resident
-        FrameEntryAddress(asm, R15, R9);             // recompute &frame[victim]
-        LoadField(asm, R9, OsLayout.FrameOwnerProcField, R8);  // R8 = oldProc
-        LoadField(asm, R9, OsLayout.FrameOwnerPageField, R10); // R10 = oldPage
-        EmitPteAddress(asm, R8, R10, R11, EDX, tableStrideShift, pteShift); // R11 = &PTE[oldProc][oldPage]
+        // -- RAM-home victim: copy the frame back to its block home if dirty --
+        asm.Label("pf_evict_ram");
+        LoadField(asm, R9, OsLayout.FrameDirtyField, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jz("pf_evict_ram_unmap");                // clean: drop without write-back
+        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (src)
+        FrameEntryAddress(asm, R15, R9);
+        LoadField(asm, R9, OsLayout.FrameHomeField, R8);  // R8 = home (dst)
+        EmitPageCopy(asm, R11, R8, "pf_wbr", R10);   // frame -> home
+        asm.Label("pf_evict_ram_unmap");
+        FrameEntryAddress(asm, R15, R9);
+        LoadField(asm, R9, OsLayout.FrameOwnerProcField, ESI); // ESI = oldProc
+        LoadField(asm, R9, OsLayout.FrameOwnerPageField, EDI); // EDI = oldPage
+        EmitPteAddress(asm, ESI, EDI, R11, EDX, tableStrideShift, pteShift); // R11 = &PTE
         asm.MovImm(R(EAX), 0);
         asm.Dec(R(EAX));
         asm.Dec(R(EAX));                              // EAX = NonResidentPage (-2)
         asm.Store(R(R11), R(EAX));
+        asm.Jmp("pf_fill");
 
-        // --- fill: copy the faulting page from its home into frame R15 ---
+        // --- fill frame R15 from the faulting page's backing (DREAD for swap, copy for RAM) ---
         asm.Label("pf_fill");
-        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame physical base (dst)
-        asm.Mov(R(R8), R(R14));                       // R8 = home (src)
-        EmitPageCopy(asm, R8, R11, "pf_fl", R10);    // copy home -> frame
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R14), R(EAX));
+        asm.Js("pf_fill_ram");                       // R14 < 0: RAM-home
 
-        // --- record the new occupant in the core map ---
-        FrameEntryAddress(asm, R15, R9);             // R9 = &frame[R15]
+        // -- swap fill: DREAD the swap slot into the frame --
+        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (dst)
+        asm.DRead(R(R11), R(R14), R(ECX));           // frame <- swap slot (ECX = length, ignored)
+        FrameEntryAddress(asm, R15, R9);             // record the occupant (swap-backed)
         StoreFieldImm(asm, R9, OsLayout.FrameOccupiedField, 1);
         StoreFieldReg(asm, R9, OsLayout.FrameOwnerProcField, R13);
         StoreFieldReg(asm, R9, OsLayout.FrameOwnerPageField, R12);
-        StoreFieldReg(asm, R9, OsLayout.FrameHomeField, R14);
+        StoreFieldImm(asm, R9, OsLayout.FrameHomeField, 0);
         StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0);
-        StoreFieldImm(asm, R9, OsLayout.FrameLastUseField, 0); // the MMU stamps it on the retry
+        StoreFieldImm(asm, R9, OsLayout.FrameLastUseField, 0);
+        StoreFieldReg(asm, R9, OsLayout.FrameSwapField, R14);
+        asm.Jmp("pf_map");
+
+        // -- RAM fill: copy the page's block home into the frame --
+        asm.Label("pf_fill_ram");
+        EntryAddress(asm, R13, EBX);                 // EBX = entry
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R8); // R8 = ProgramAddress
+        asm.Mov(R(R10), R(R12));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shl(R(R10), R(EAX));
+        asm.Add(R(R8), R(R10));                       // R8 = home = ProgramAddress + page*PageSize
+        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (dst)
+        EmitPageCopy(asm, R8, R11, "pf_flr", R10);   // home -> frame
+        FrameEntryAddress(asm, R15, R9);             // record the occupant (RAM-home)
+        StoreFieldImm(asm, R9, OsLayout.FrameOccupiedField, 1);
+        StoreFieldReg(asm, R9, OsLayout.FrameOwnerProcField, R13);
+        StoreFieldReg(asm, R9, OsLayout.FrameOwnerPageField, R12);
+        StoreFieldReg(asm, R9, OsLayout.FrameHomeField, R8);
+        StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0);
+        StoreFieldImm(asm, R9, OsLayout.FrameLastUseField, 0);
+        StoreFieldMinusOne(asm, R9, OsLayout.FrameSwapField);
 
         // --- map the faulting page resident -> the frame base ---
+        asm.Label("pf_map");
         EmitPteAddress(asm, R13, R12, R10, EDX, tableStrideShift, pteShift); // R10 = &PTE[cur][page]
         FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base
         asm.Store(R(R10), R(R11));                    // PTE := frame base (now resident)
@@ -412,15 +484,56 @@ public static class OsRoutines
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R10), R(EAX));
         asm.Jz("ff_next");                            // clean: nothing to write back
+        // dirty: write the frame back to its backing — a swap slot (DWRITE) or RAM home.
+        LoadField(asm, R9, OsLayout.FrameSwapField, R11); // R11 = swap slot (-1 if RAM-home)
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R11), R(EAX));
+        asm.Js("ff_ram");                             // R11 < 0: RAM-home frame
         FrameBaseAddress(asm, ESI, R8, pageShift);    // R8 = frame base (src)
+        asm.MovImm16(R(R10), OsLayout.PageSize);      // R10 = length
+        asm.DWrite(R(R11), R(R8), R(R10));            // swap slot <- frame
+        asm.Jmp("ff_clean");
+        asm.Label("ff_ram");
+        FrameBaseAddress(asm, ESI, R8, pageShift);    // R8 = frame base (src)
+        FrameEntryAddress(asm, ESI, R9);
         LoadField(asm, R9, OsLayout.FrameHomeField, R11); // R11 = home (dst)
         EmitPageCopy(asm, R8, R11, "ff_wb", R10);     // copy frame -> home
+        asm.Label("ff_clean");
         FrameEntryAddress(asm, ESI, R9);              // recompute (copy clobbered scratch)
         StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0); // now clean
         asm.Label("ff_next");
         asm.Inc(R(ESI));
         asm.Jmp("ff_scan");
         asm.Label("ff_done");
+        asm.Ret();
+    }
+
+    // zero_swap_slots: writes a zero page into every swap slot belonging to the current
+    // process, so a slot reused by a later process (or this process after exec) never
+    // serves stale data. DWRITEs the always-zero OS scratch page into each slot. CALL/RET
+    // subroutine (needs the privileged stack); preserves EBX.
+    private static void EmitZeroSwapSlots(Assembler asm)
+    {
+        asm.Label("zero_swap_slots");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R8), R(EAX));                      // R8 = my index
+        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
+        asm.Mul(R(R8), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.SwapBase);
+        asm.Add(R(R8), R(EAX));                       // R8 = my swap-slot base
+        asm.MovImm16(R(R10), OsLayout.PageSize);      // R10 = length
+        asm.MovImm16(R(R11), OsLayout.ZeroPageBase);  // R11 = zero source page
+        asm.MovImm(R(ESI), 0);                        // ESI = page index
+        asm.Label("zs_scan");
+        asm.MovImm(R(EAX), OsLayout.MaxPagesPerProcess);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("zs_done");
+        asm.Mov(R(EDX), R(R8));
+        asm.Add(R(EDX), R(ESI));                       // EDX = slot
+        asm.DWrite(R(EDX), R(R11), R(R10));           // slot <- zero page
+        asm.Inc(R(ESI));
+        asm.Jmp("zs_scan");
+        asm.Label("zs_done");
         asm.Ret();
     }
 
@@ -498,6 +611,9 @@ public static class OsRoutines
         // Reclaim this process's physical frames (no write-back — its memory is gone), so
         // they cannot later be evicted into freed/reused RAM. EBX (entry) is preserved.
         asm.Call("release_frames");
+        // Zero this process's swap slots so a slot reused by a later process never serves
+        // the dead process's stale data.
+        asm.Call("zero_swap_slots");
 
         // Scan for a parent blocked in wait() on this PID.
         LoadField(asm, EBX, Hardware.ProcessEntryPid, R8);   // R8 = my Pid
@@ -946,10 +1062,11 @@ public static class OsRoutines
         EntryAddress(asm, ECX, R8);                // R8 = parent entry
         asm.SaveRegs(R(R8));                        // parent entry now holds current regs/EIP/level
 
-        // Flush the parent's dirty pages from their frames back to their block homes, so the
-        // flat memcpy below (which copies the parent's home RAM) sees the parent's live data.
+        // Flush the parent's dirty pages from their frames back to their backings (RAM home
+        // or swap slot), so the copies below see the parent's live data.
         SetupPrivilegedStack(asm);
         asm.Call("flush_frames");
+        EntryAddress(asm, ECX, R8);                // restore R8 = parent entry (flush clobbered it)
 
         // Find a free child slot: a Terminated slot in [0, count), else a fresh slot if
         // the table is not full; otherwise fork fails.
@@ -987,6 +1104,38 @@ public static class OsRoutines
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryRequiredStackSize);
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryTotalSize);
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryDiskSlot);
+
+        // Deep-copy the parent's swap slots into the child's so the child inherits the
+        // parent's data pages. flush_frames (run at fork entry) already wrote the parent's
+        // dirty data frames back to its swap slots, so each parent slot holds live data.
+        // Each page p is transferred parent-slot -> scratch page -> child-slot. ECX = parent
+        // index, ESI = child index (both preserved); R8/R9 (parent/child entry) preserved.
+        asm.Mov(R(R10), R(ECX));
+        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
+        asm.Mul(R(R10), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.SwapBase);
+        asm.Add(R(R10), R(EAX));                   // R10 = parent swap-slot base
+        asm.Mov(R(R11), R(ESI));
+        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
+        asm.Mul(R(R11), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.SwapBase);
+        asm.Add(R(R11), R(EAX));                   // R11 = child swap-slot base
+        asm.MovImm16(R(R12), OsLayout.PageSize);   // R12 = transfer length
+        asm.MovImm16(R(R13), OsLayout.SwapScratchBase); // R13 = scratch page address
+        asm.MovImm(R(EDI), 0);                     // EDI = page index
+        asm.Label("fk_swap");
+        asm.MovImm(R(EAX), OsLayout.MaxPagesPerProcess);
+        asm.Cmp(R(EDI), R(EAX));
+        asm.Jns("fk_swap_done");
+        asm.Mov(R(EDX), R(R10));
+        asm.Add(R(EDX), R(EDI));                    // EDX = parent slot
+        asm.DRead(R(R13), R(EDX), R(R14));         // scratch <- parent slot
+        asm.Mov(R(EDX), R(R11));
+        asm.Add(R(EDX), R(EDI));                    // EDX = child slot
+        asm.DWrite(R(EDX), R(R13), R(R12));        // child slot <- scratch
+        asm.Inc(R(EDI));
+        asm.Jmp("fk_swap");
+        asm.Label("fk_swap_done");
 
         // Allocate the child's region (clobbers all registers except EBX = child entry).
         asm.Mov(R(EBX), R(R9));
@@ -1112,6 +1261,9 @@ public static class OsRoutines
         // Release the old image's physical frames (its memory is being replaced); the new
         // image faults its pages in fresh after the page table is reseeded on resume.
         asm.Call("release_frames");
+        // Zero this process's swap slots so the new image's data pages start blank rather
+        // than inheriting the old image's swapped-out data.
+        asm.Call("zero_swap_slots");
 
         // Recompute sizing from the entry (still holds old ProgramSize/TotalSize; the new
         // slot is in DiskSlot): newLen via DLEN, newTotal = oldTotal - oldProgramSize + newLen.
