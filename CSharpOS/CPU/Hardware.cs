@@ -765,11 +765,20 @@ public partial class Hardware
             physical = currentProcessInstructionStart + virtualAddress;
             return true;
         }
-        // Resident: the PTE holds the page's frame base in the physical frame pool. Bump
-        // the frame's LRU stamp (and set its dirty bit on a write) — the reference/dirty
+        // Resident: the PTE holds the page's frame base in the physical frame pool.
+        int frameIndex = (pte - OsLayout.FramePoolBase) / OsLayout.PageSize;
+        // A WRITE to a copy-on-write (read-only) frame traps: re-raise the fault so the ISA
+        // handler copies the page privately for this process; the instruction then re-runs
+        // and the write commits to the now-private frame. Reads of a COW frame pass through.
+        if (isWrite && FrameIsCow(frameIndex))
+        {
+            RaisePageFault(page);
+            physical = 0;
+            return false;
+        }
+        // Bump the frame's LRU stamp (and set its dirty bit on a write) — the reference/dirty
         // bits a hardware MMU maintains; the ISA page-fault handler reads them when it must
         // evict a victim to free a frame.
-        int frameIndex = (pte - OsLayout.FramePoolBase) / OsLayout.PageSize;
         StampFrame(frameIndex, isWrite);
         physical = pte + offset;
         return true;
@@ -830,6 +839,10 @@ public partial class Hardware
         pageSeedBase[index] = programAddress;
         pageSeedExtent[index] = userExtent;
 
+        // A forked child (cowPartner >= 0) shares the parent's data-page snapshot copy-on-
+        // write: its data PTEs reference the PARTNER's swap slots with the COW encoding. A
+        // freshly loaded/exec'd process (no partner) gets private swap data pages.
+        int cowPartner = CowPartner(index);
         int pageCount = (userExtent + OsLayout.PageSize - 1) / OsLayout.PageSize;
         int tableBase = osMemoryBase + OsLayout.PageTableAddress(index);
         for (int p = 0; p < OsLayout.MaxPagesPerProcess; p++)
@@ -841,7 +854,14 @@ public partial class Hardware
             }
             else if (OsLayout.IsDataPage(p, programSize, requiredMemory))
             {
-                pte = OsLayout.SwapPte(OsLayout.SwapSlot(index, p)); // swap-backed data page
+                if (cowPartner >= 0)
+                {
+                    pte = OsLayout.CowPte(OsLayout.SwapSlot(cowPartner, p)); // shared COW data page
+                }
+                else
+                {
+                    pte = OsLayout.SwapPte(OsLayout.SwapSlot(index, p)); // private swap-backed data page
+                }
             }
             else
             {
@@ -894,6 +914,15 @@ public partial class Hardware
     public int FrameLastUse(int frame) { return ReadFrameField(frame, OsLayout.FrameLastUseField); }
     // The swap slot a frame is backed by, or -1 when it holds a RAM-home (code/stack) page.
     public int FrameSwap(int frame) { return ReadFrameField(frame, OsLayout.FrameSwapField); }
+    // True when a frame is a copy-on-write read-only share (a write to it traps to copy).
+    public bool FrameCow(int frame) { return ReadFrameField(frame, OsLayout.FrameCowField) != 0; }
+    private bool FrameIsCow(int frame) { return ReadFrameField(frame, OsLayout.FrameCowField) != 0; }
+
+    // Process `processIndex`'s copy-on-write partner (the other end of a fork share), or -1.
+    public int CowPartner(int processIndex)
+    {
+        return ReadWord(osMemoryBase + OsLayout.CowPartnerAddress(processIndex));
+    }
 
     // Number of frames in the pool currently holding a page.
     public int ResidentFrameCount()

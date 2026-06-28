@@ -93,6 +93,12 @@ public abstract class OperatingSystem : IOperatingSystem
         {
             hw.Disk.Store(OsLayout.SwapBase + s, zeroPage);
         }
+
+        // No process starts with a copy-on-write partner.
+        for (int i = 0; i < OsLayout.MaxProcesses; i++)
+        {
+            WriteWord(hw, OsLayout.CowPartnerAddress(i), -1);
+        }
     }
 
     // Returns the largest power of 2 that is <= n. Assumes n > 0.
