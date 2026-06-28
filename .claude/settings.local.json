@@ -15,7 +15,9 @@
       "Bash(git add *)",
       "Bash(python -c 'import sys,json *)",
       "Bash(PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python -c ' *)",
-      "Bash(dotnet run *)"
+      "Bash(dotnet run *)",
+      "Bash(python3 -c ' *)",
+      "Bash(node -e ' *)"
     ]
   }
 }
