@@ -98,10 +98,11 @@ public static class OsLayout
     public const int FrameOccupiedField  = 0;   // 0 = free, 1 = holds a page
     public const int FrameOwnerProcField = 4;   // owning process-table index
     public const int FrameOwnerPageField = 8;   // owning virtual page number
-    public const int FrameHomeField      = 12;  // physical base of the page's block home
+    public const int FrameHomeField      = 12;  // physical base of a RAM-home page's block home
     public const int FrameDirtyField     = 16;  // 0 = clean (drop on evict), 1 = needs write-back
     public const int FrameLastUseField   = 20;  // LRU stamp (the MMU bumps it on each access)
-    public const int FrameTableEntryBytes = 24;
+    public const int FrameSwapField      = 24;  // swap slot this frame is backed by, or -1 for a RAM-home frame
+    public const int FrameTableEntryBytes = 28;
     public const int FrameTableBase = PageTableBase + PageTableRegionSize;
     public const int FrameTableSize = FrameCount * FrameTableEntryBytes;
     // The frame pool: FrameCount contiguous PageSize frames. Frame f's physical base is
@@ -109,8 +110,31 @@ public static class OsLayout
     public const int FramePoolBase = FrameTableBase + FrameTableSize;
     public const int FramePoolSize = FrameCount * PageSize;
 
+    // ---- paging Phase 2 increment 3: Bin-disk swap backing for DATA pages ----
+    // A page in the process's DATA region (between the program image and the user stack)
+    // is backed by a dedicated Bin-disk swap slot instead of its RAM-block home: it DREADs
+    // in on fault and DWRITEs back on dirty eviction, so the data heap can live on disk and
+    // need not occupy RAM beyond its frame. Code pages (fetched untranslated) and stack
+    // pages (the kernel stack is pinned) keep their RAM-block home. Each (process, page)
+    // gets a fixed, deterministically-computed swap slot — no allocator. The swap region
+    // sits above the disk's image slots; spawn/exec zero a process's data slots and fork
+    // copies them, so a data slot is always occupied before its first DREAD.
+    public const int SwapSlotsPerProcess = MaxPagesPerProcess;
+    public const int SwapSlotCount = MaxProcesses * SwapSlotsPerProcess;
+    public const int SwapBase = Hardware.DefaultDiskSlots;   // swap slots follow the image slots
+    // A non-resident DATA page's PTE encodes its swap slot as -(slot + SwapPteBias); a
+    // non-resident RAM-home page is NonResidentPage (-2); unmapped is -1. The bias keeps
+    // every swap encoding <= -3, distinct from the -1 / -2 sentinels.
+    public const int SwapPteBias = 3;
+
+    // Two OS scratch pages (PageSize each), appended after the frame pool: a zero page
+    // (never written, used as the DWRITE source when zeroing a slot) and a transfer page
+    // (DREAD target then DWRITE source when fork deep-copies a parent slot to a child slot).
+    public const int ZeroPageBase = FramePoolBase + FramePoolSize;
+    public const int SwapScratchBase = ZeroPageBase + PageSize;
+
     // Total OS region size.
-    public const int TotalSize = FramePoolBase + FramePoolSize;
+    public const int TotalSize = SwapScratchBase + PageSize;
 
     public static int ProcessEntryAddress(int index)
     {
@@ -133,5 +157,26 @@ public static class OsLayout
     public static int FrameBase(int frame)
     {
         return FramePoolBase + frame * PageSize;
+    }
+
+    // The fixed Bin-disk swap slot backing process `processIndex`'s virtual page `page`.
+    public static int SwapSlot(int processIndex, int page)
+    {
+        return SwapBase + processIndex * SwapSlotsPerProcess + page;
+    }
+
+    // The non-resident PTE encoding for a swap-backed page on `swapSlot`, and its inverse.
+    public static int SwapPte(int swapSlot) { return -(swapSlot + SwapPteBias); }
+    public static int SwapSlotFromPte(int pte) { return -pte - SwapPteBias; }
+    public static bool IsSwapPte(int pte) { return pte <= -SwapPteBias; }
+
+    // True when virtual page `page` of a process whose image is `programSize` bytes and
+    // whose data region is `requiredMemory` bytes falls in the swap-backed DATA region
+    // (its page start lies within [programSize, programSize + requiredMemory)). Code and
+    // stack pages return false (they keep their RAM-block home).
+    public static bool IsDataPage(int page, int programSize, int requiredMemory)
+    {
+        int pageStart = page * PageSize;
+        return pageStart >= programSize && pageStart < programSize + requiredMemory;
     }
 }

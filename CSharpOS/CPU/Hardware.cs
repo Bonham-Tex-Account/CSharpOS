@@ -248,9 +248,11 @@ public partial class Hardware
     private readonly ConcurrentQueue<Interrupt> pendingInterrupts = new ConcurrentQueue<Interrupt>();
 
     // ---- constructor -----------------------------------------------------
-    // Convenience constructor: gives the machine a default-sized disk.
+    // Convenience constructor: gives the machine a default-sized disk. The disk holds the
+    // image slots [0, DefaultDiskSlots) plus the paging swap region above them, so a
+    // page's deterministic swap slot (OsLayout.SwapSlot) is always in range.
     public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os)
-        : this(memorySize, registerNames, os, new Bin(DefaultDiskSlots, DefaultDiskSlotSize))
+        : this(memorySize, registerNames, os, new Bin(DefaultDiskSlots + OsLayout.SwapSlotCount, DefaultDiskSlotSize))
     {
     }
 
@@ -749,15 +751,17 @@ public partial class Hardware
         }
 
         int pte = ReadWord(osMemoryBase + OsLayout.PageTableAddress(index) + page * OsLayout.PageTableEntryBytes);
-        if (pte == OsLayout.NonResidentPage)
+        if (pte <= OsLayout.NonResidentPage)
         {
+            // Non-resident: a RAM-home page (-2) or a swap-backed data page (<= -3). The
+            // ISA handler reads the PTE to decide how to fault it in (RAM copy vs DREAD).
             RaisePageFault(page);
             physical = 0;
             return false;
         }
         if (pte < 0)
         {
-            // Unmapped page (outside the process): linear fallback.
+            // Unmapped page (-1, outside the process): linear fallback.
             physical = currentProcessInstructionStart + virtualAddress;
             return true;
         }
@@ -807,11 +811,13 @@ public partial class Hardware
     // (Re)seeds the page table for the process in slot `index` when that slot is first
     // used for a process with this (base, extent) — every user-accessible page starts
     // **non-resident** (so its first data touch faults in via IvtPageFault); pages beyond
-    // the process are unmapped. Guarded so it runs once per process creation, not on every
-    // resume (which would clobber resident pages back to non-resident — a fault storm).
-    // Run from SetLayoutFromEntry, the universal pre-resume gate, so loaded/forked/exec'd
-    // processes all get seeded. Uses raw writes to avoid event spam.
-    private void SeedPageTableIfNew(int index, int programAddress, int userExtent)
+    // the process are unmapped. A page in the DATA region is seeded swap-backed (its PTE
+    // encodes its Bin-disk swap slot); code and stack pages are seeded RAM-home (the -2
+    // sentinel). Guarded so it runs once per process creation, not on every resume (which
+    // would clobber resident pages back to non-resident — a fault storm). Run from
+    // SetLayoutFromEntry, the universal pre-resume gate, so loaded/forked/exec'd processes
+    // all get seeded. Uses raw writes to avoid event spam.
+    private void SeedPageTableIfNew(int index, int programAddress, int programSize, int requiredMemory, int userExtent)
     {
         if (!OsManaged || index < 0 || index >= OsLayout.MaxProcesses)
         {
@@ -829,13 +835,17 @@ public partial class Hardware
         for (int p = 0; p < OsLayout.MaxPagesPerProcess; p++)
         {
             int pte;
-            if (p < pageCount)
+            if (p >= pageCount)
             {
-                pte = OsLayout.NonResidentPage;
+                pte = OsLayout.UnmappedPage;
+            }
+            else if (OsLayout.IsDataPage(p, programSize, requiredMemory))
+            {
+                pte = OsLayout.SwapPte(OsLayout.SwapSlot(index, p)); // swap-backed data page
             }
             else
             {
-                pte = OsLayout.UnmappedPage;
+                pte = OsLayout.NonResidentPage; // RAM-home code/stack page
             }
             WriteWordRaw(tableBase + p * OsLayout.PageTableEntryBytes, pte);
         }
@@ -882,6 +892,8 @@ public partial class Hardware
     public int FrameOwnerPage(int frame) { return ReadFrameField(frame, OsLayout.FrameOwnerPageField); }
     public bool FrameDirty(int frame) { return ReadFrameField(frame, OsLayout.FrameDirtyField) != 0; }
     public int FrameLastUse(int frame) { return ReadFrameField(frame, OsLayout.FrameLastUseField); }
+    // The swap slot a frame is backed by, or -1 when it holds a RAM-home (code/stack) page.
+    public int FrameSwap(int frame) { return ReadFrameField(frame, OsLayout.FrameSwapField); }
 
     // Number of frames in the pool currently holding a page.
     public int ResidentFrameCount()
@@ -1227,7 +1239,7 @@ public partial class Hardware
         // program + data + user stack (the kernel stack beyond it is addressed absolutely).
         int index = (entryAddress - osMemoryBase - OsLayout.ProcessTableOffset) / ProcessEntrySize;
         int userExtent = programSize + requiredMemory + requiredStackSize;
-        SeedPageTableIfNew(index, programAddress, userExtent);
+        SeedPageTableIfNew(index, programAddress, programSize, requiredMemory, userExtent);
     }
 
     // OSRET: the OS's return-to-process primitive. Reads the target level from the

@@ -84,6 +84,15 @@ public abstract class OperatingSystem : IOperatingSystem
             WriteWord(hw, OsLayout.BuddyBitmapOffset + w * 4, 0);
         }
         WriteWord(hw, OsLayout.BuddyBitmapOffset, 1); // root = free
+
+        // Pre-occupy the paging swap region with zero pages, so a data page's first DREAD
+        // always finds an occupied slot (and reads zeros). The ISA exit/exec routines
+        // re-zero a process's slots on teardown so a reused slot never serves stale data.
+        byte[] zeroPage = new byte[OsLayout.PageSize];
+        for (int s = 0; s < OsLayout.SwapSlotCount; s++)
+        {
+            hw.Disk.Store(OsLayout.SwapBase + s, zeroPage);
+        }
     }
 
     // Returns the largest power of 2 that is <= n. Assumes n > 0.
