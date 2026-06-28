@@ -77,6 +77,9 @@ public static class OsRoutines
         EmitReleaseFrames(asm); // shared subroutine "release_frames"; ends with Ret
         EmitFlushFrames(asm);   // shared subroutine "flush_frames"; ends with Ret
         EmitZeroSwapSlots(asm); // shared subroutine "zero_swap_slots"; ends with Ret
+        EmitPairResolve(asm);   // shared subroutine "pair_resolve"; ends with Ret
+        EmitResolveCow(asm);    // shared subroutine "resolve_cow"; ends with Ret
+        EmitCowShare(asm);      // shared subroutine "cow_share"; ends with Ret
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);
@@ -105,6 +108,14 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtWait * 4,               wait);
         WriteWord(image, Hardware.IvtSyscall * 4,            syscall);
         WriteWord(image, Hardware.IvtPageFault * 4,          pageFault);
+
+        // Default every process's copy-on-write partner to -1 (none) in the image itself, so
+        // even minimal hand-seeded test images (which skip SeedOsData) never see a process
+        // exit as if it had a COW partner — a 0 here would mean "partner is slot 0".
+        for (int i = 0; i < OsLayout.MaxProcesses; i++)
+        {
+            WriteWord(image, OsLayout.CowPartnerAddress(i), -1);
+        }
         return image;
     }
 
@@ -269,11 +280,30 @@ public static class OsRoutines
         EntryAddress(asm, R13, EBX);                // EBX = faulting process's entry
         asm.SaveRegs(R(EBX));                        // persist faulting context (IP rewound)
 
-        // Decode the faulting page's backing from its non-resident PTE: a swap PTE (pte+bias
-        // <= 0, i.e. pte <= -3) gives swapSlot = -pte - bias in R14; the RAM-home sentinel
-        // (-2) leaves R14 = -1.
+        // Read the faulting PTE. A RESIDENT entry (>= 0) means the MMU re-raised the fault
+        // for a write to a copy-on-write frame -> resolve the page privately and resume.
         EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift); // R9 = &PTE[cur][page]
         asm.Load(R(R8), R(R9));                       // R8 = pte
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Jns("pf_cow_write");                      // pte >= 0: resident COW write fault
+
+        // Non-resident demand fault. Decode the backing into R14:
+        //   COW page (pte <= -SwapCowBias): R14 = shared swap slot (DREAD read-only).
+        //   private swap page (pte <= -3):  R14 = own swap slot.
+        //   RAM-home page (-2):             R14 = -1.
+        asm.MovImm16(R(EAX), OsLayout.SwapCowBias);
+        asm.MovImm(R(EBX), 0);
+        asm.Sub(R(EBX), R(EAX));                      // EBX = -SwapCowBias
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jns("pf_src_notcow");                     // pte >= -bias: not COW
+        asm.MovImm(R(EAX), 0);
+        asm.Sub(R(EAX), R(R8));
+        asm.MovImm16(R(EBX), OsLayout.SwapCowBias);
+        asm.Sub(R(EAX), R(EBX));                      // EAX = -pte - SwapCowBias = shared slot
+        asm.Mov(R(R14), R(EAX));
+        asm.Jmp("pf_src_done");
+        asm.Label("pf_src_notcow");
         asm.Mov(R(R11), R(R8));
         asm.MovImm(R(EAX), OsLayout.SwapPteBias);
         asm.Add(R(R11), R(EAX));                      // R11 = pte + bias
@@ -343,17 +373,26 @@ public static class OsRoutines
         asm.MovImm16(R(R10), OsLayout.PageSize);     // R10 = length
         asm.DWrite(R(R8), R(R11), R(R10));           // swap slot <- frame
         asm.Label("pf_evict_swap_unmap");
-        // owner PTE := SwapPte(swapSlot) = -(swapSlot + bias)
+        // owner PTE := the non-resident encoding for this slot, preserving COW: a COW victim
+        // goes back to CowPte (still shared), a private victim to SwapPte.
         FrameEntryAddress(asm, R15, R9);
         LoadField(asm, R9, OsLayout.FrameSwapField, R8);       // R8 = swap slot
         LoadField(asm, R9, OsLayout.FrameOwnerProcField, ESI); // ESI = oldProc
         LoadField(asm, R9, OsLayout.FrameOwnerPageField, EDI); // EDI = oldPage
+        LoadField(asm, R9, OsLayout.FrameCowField, ECX);       // ECX = COW flag
         EmitPteAddress(asm, ESI, EDI, R11, EDX, tableStrideShift, pteShift); // R11 = &PTE
-        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(ECX), R(EAX));
+        asm.Jz("pf_eu_swapbias");
+        asm.MovImm16(R(R10), OsLayout.SwapCowBias);
+        asm.Jmp("pf_eu_havebias");
+        asm.Label("pf_eu_swapbias");
         asm.MovImm(R(R10), OsLayout.SwapPteBias);
-        asm.Add(R(EAX), R(R10));                      // EAX = swapSlot + bias
+        asm.Label("pf_eu_havebias");
+        asm.Mov(R(EAX), R(R8));
+        asm.Add(R(EAX), R(R10));                      // EAX = slot + bias
         asm.MovImm(R(R10), 0);
-        asm.Sub(R(R10), R(EAX));                      // R10 = -(swapSlot + bias) = swap PTE
+        asm.Sub(R(R10), R(EAX));                      // R10 = -(slot + bias)
         asm.Store(R(R11), R(R10));
         asm.Jmp("pf_fill");
 
@@ -395,6 +434,21 @@ public static class OsRoutines
         StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0);
         StoreFieldImm(asm, R9, OsLayout.FrameLastUseField, 0);
         StoreFieldReg(asm, R9, OsLayout.FrameSwapField, R14);
+        // FrameCow = 1 when this page's (still-current) PTE is a COW share, so a later write
+        // traps to resolve it; a private swap page is writable (0).
+        EmitPteAddress(asm, R13, R12, EDI, EBX, tableStrideShift, pteShift);
+        asm.Load(R(EAX), R(EDI));                     // EAX = original (pre-map) PTE
+        asm.MovImm16(R(EBX), OsLayout.SwapCowBias);
+        asm.MovImm(R(R10), 0);
+        asm.Sub(R(R10), R(EBX));                      // R10 = -SwapCowBias
+        asm.Cmp(R(EAX), R(R10));
+        asm.Jns("pf_rec_notcow");                     // pte >= -bias: not COW
+        FrameEntryAddress(asm, R15, R9);
+        StoreFieldImm(asm, R9, OsLayout.FrameCowField, 1);
+        asm.Jmp("pf_map");
+        asm.Label("pf_rec_notcow");
+        FrameEntryAddress(asm, R15, R9);
+        StoreFieldImm(asm, R9, OsLayout.FrameCowField, 0);
         asm.Jmp("pf_map");
 
         // -- RAM fill: copy the page's block home into the frame --
@@ -415,6 +469,7 @@ public static class OsRoutines
         StoreFieldImm(asm, R9, OsLayout.FrameDirtyField, 0);
         StoreFieldImm(asm, R9, OsLayout.FrameLastUseField, 0);
         StoreFieldMinusOne(asm, R9, OsLayout.FrameSwapField);
+        StoreFieldImm(asm, R9, OsLayout.FrameCowField, 0); // RAM-home pages are never COW
 
         // --- map the faulting page resident -> the frame base ---
         asm.Label("pf_map");
@@ -423,6 +478,17 @@ public static class OsRoutines
         asm.Store(R(R10), R(R11));                    // PTE := frame base (now resident)
 
         asm.Mov(R(ECX), R(R13));                      // resume_mlfq anchor = current index
+        asm.Jmp("resume_mlfq");
+
+        // --- resident copy-on-write write fault: resolve the page privately, then resume ---
+        // The MMU re-raised the fault because the running process wrote a read-only COW
+        // frame. pair_resolve gives both sharers private copies and makes this process's
+        // frame writable; the faulting instruction then re-runs and the write commits.
+        asm.Label("pf_cow_write");
+        SetupPrivilegedStack(asm);
+        asm.Call("pair_resolve");                     // resolves current process's page R12
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                     // resume_mlfq anchor = current index
         asm.Jmp("resume_mlfq");
     }
 
@@ -537,6 +603,284 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // Copies the contents of swap slot `srcSlotReg` to swap slot `dstSlotReg` via the OS
+    // transfer page (DREAD src -> scratch, DWRITE scratch -> dst). Clobbers EAX and
+    // `lenScratch`/`addrScratch`; preserves the two slot registers.
+    private static void EmitSwapCopy(Assembler asm, byte srcSlotReg, byte dstSlotReg, byte lenScratch, byte addrScratch)
+    {
+        asm.MovImm16(R(addrScratch), OsLayout.SwapScratchBase);
+        asm.DRead(R(addrScratch), R(srcSlotReg), R(lenScratch));   // scratch <- src slot
+        asm.MovImm16(R(lenScratch), OsLayout.PageSize);
+        asm.DWrite(R(dstSlotReg), R(addrScratch), R(lenScratch));  // dst slot <- scratch
+    }
+
+    // pair_resolve: resolve the current process's copy-on-write DATA page R12 against its
+    // partner Y. Both ends end up with a private copy of the shared snapshot: the current
+    // process becomes private+writable (resident frame de-COW'd, or a private swap PTE), and
+    // the partner's page is invalidated (its frame freed, PTE pointed at its own slot) so it
+    // re-faults from its now-private slot. Leaf CALL/RET; takes page in R12, preserves R12/R15.
+    private static void EmitPairResolve(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
+
+        asm.Label("pair_resolve");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R8), R(EAX));                                   // R8 = X (current)
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));
+        asm.MovImm16(R(EBX), OsLayout.CowPartnerBase);
+        asm.Add(R(EAX), R(EBX));
+        asm.Load(R(R9), R(EAX));                                   // R9 = Y (partner)
+        // Xslot = SwapBase + X*SwapSlotsPerProcess + p ; Yslot likewise.
+        asm.Mov(R(R10), R(R8));
+        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
+        asm.Mul(R(R10), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.SwapBase);
+        asm.Add(R(R10), R(EAX));
+        asm.Add(R(R10), R(R12));                                   // R10 = Xslot
+        asm.Mov(R(R11), R(R9));
+        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
+        asm.Mul(R(R11), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.SwapBase);
+        asm.Add(R(R11), R(EAX));
+        asm.Add(R(R11), R(R12));                                   // R11 = Yslot
+        // Read X's PTE to find the shared slot S and whether X is resident (EDI = X frame, or -1).
+        EmitPteAddress(asm, R8, R12, ESI, EBX, tableStrideShift, pteShift); // ESI = &PTE[X][p]
+        asm.Load(R(EDX), R(ESI));                                  // EDX = X pte
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(EDX), R(EAX));
+        asm.Js("pr_xnonres");
+        // X resident COW: frame = (pte - pool) >> pageShift ; S = frame.Swap
+        asm.Mov(R(EDI), R(EDX));
+        asm.MovImm16(R(EAX), OsLayout.FramePoolBase);
+        asm.Sub(R(EDI), R(EAX));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shr(R(EDI), R(EAX));                                   // EDI = X frame index
+        FrameEntryAddress(asm, EDI, EBX);
+        LoadField(asm, EBX, OsLayout.FrameSwapField, R13);         // R13 = S
+        asm.Jmp("pr_haves");
+        asm.Label("pr_xnonres");
+        asm.MovImm(R(EAX), 0);
+        asm.Sub(R(EAX), R(EDX));
+        asm.MovImm16(R(EBX), OsLayout.SwapCowBias);
+        asm.Sub(R(EAX), R(EBX));                                   // EAX = -pte - bias = S
+        asm.Mov(R(R13), R(EAX));                                   // R13 = S
+        asm.MovImm(R(EDI), 0);
+        asm.Dec(R(EDI));                                           // EDI = -1 (X not resident)
+        asm.Label("pr_haves");
+        // Materialise: copy S into Xslot and Yslot where they differ from S.
+        asm.Cmp(R(R10), R(R13));
+        asm.Jz("pr_skipx");
+        EmitSwapCopy(asm, R13, R10, EAX, EBX);
+        asm.Label("pr_skipx");
+        asm.Cmp(R(R11), R(R13));
+        asm.Jz("pr_skipy");
+        EmitSwapCopy(asm, R13, R11, EAX, EBX);
+        asm.Label("pr_skipy");
+        // Finalise X: resident -> de-COW its frame + point backing at Xslot; else private PTE.
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(EDI), R(EAX));
+        asm.Js("pr_xfin_nonres");
+        FrameEntryAddress(asm, EDI, EBX);
+        StoreFieldImm(asm, EBX, OsLayout.FrameCowField, 0);
+        StoreFieldReg(asm, EBX, OsLayout.FrameSwapField, R10);
+        asm.Jmp("pr_xfin_done");
+        asm.Label("pr_xfin_nonres");
+        EmitPteAddress(asm, R8, R12, ESI, EBX, tableStrideShift, pteShift);
+        asm.Mov(R(EAX), R(R10));
+        asm.MovImm(R(EBX), OsLayout.SwapPteBias);
+        asm.Add(R(EAX), R(EBX));
+        asm.MovImm(R(EBX), 0);
+        asm.Sub(R(EBX), R(EAX));
+        asm.Store(R(ESI), R(EBX));                                 // PTE[X][p] = SwapPte(Xslot)
+        asm.Label("pr_xfin_done");
+        // Finalise Y: free Y's resident frame for page p (if any), then point PTE[Y][p] at Yslot.
+        asm.MovImm(R(ESI), 0);
+        asm.Label("pr_yscan");
+        asm.MovImm(R(EAX), OsLayout.FrameCount);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("pr_ydone");
+        FrameEntryAddress(asm, ESI, EBX);
+        LoadField(asm, EBX, OsLayout.FrameOccupiedField, EAX);
+        asm.MovImm(R(EBP), 0);
+        asm.Cmp(R(EAX), R(EBP));
+        asm.Jz("pr_ynext");
+        LoadField(asm, EBX, OsLayout.FrameOwnerProcField, EAX);
+        asm.Cmp(R(EAX), R(R9));
+        asm.Jnz("pr_ynext");
+        LoadField(asm, EBX, OsLayout.FrameOwnerPageField, EAX);
+        asm.Cmp(R(EAX), R(R12));
+        asm.Jnz("pr_ynext");
+        StoreFieldImm(asm, EBX, OsLayout.FrameOccupiedField, 0);   // free Y's resident copy
+        asm.Label("pr_ynext");
+        asm.Inc(R(ESI));
+        asm.Jmp("pr_yscan");
+        asm.Label("pr_ydone");
+        EmitPteAddress(asm, R9, R12, ESI, EBX, tableStrideShift, pteShift);
+        asm.Mov(R(EAX), R(R11));
+        asm.MovImm(R(EBX), OsLayout.SwapPteBias);
+        asm.Add(R(EAX), R(EBX));
+        asm.MovImm(R(EBX), 0);
+        asm.Sub(R(EBX), R(EAX));
+        asm.Store(R(ESI), R(EBX));                                 // PTE[Y][p] = SwapPte(Yslot)
+        asm.Ret();
+    }
+
+    // resolve_cow: materialise private copies of all of the current process's COW data pages
+    // (against its partner), then clear the partnership both ways. Called before fork/exit/
+    // exec so a teardown or re-fork never leaves a dangling COW share. CALL/RET; loops pages
+    // in R15 (preserved across pair_resolve) and calls pair_resolve for each COW page.
+    private static void EmitResolveCow(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
+
+        asm.Label("resolve_cow");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R8), R(EAX));                                   // R8 = X
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));
+        asm.MovImm16(R(EBX), OsLayout.CowPartnerBase);
+        asm.Add(R(EAX), R(EBX));
+        asm.Load(R(EAX), R(EAX));                                  // EAX = cowPartner[X]
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("rc_done");                                         // no partner: nothing to resolve
+        asm.MovImm(R(R15), 0);                                     // R15 = page index
+        asm.Label("rc_scan");
+        asm.MovImm(R(EAX), OsLayout.MaxPagesPerProcess);
+        asm.Cmp(R(R15), R(EAX));
+        asm.Jns("rc_clear");
+        EmitPteAddress(asm, R8, R15, EDI, EBX, tableStrideShift, pteShift);
+        asm.Load(R(EDX), R(EDI));                                  // EDX = PTE[X][p]
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(EDX), R(EAX));
+        asm.Js("rc_nonres");
+        // resident: COW only if its frame's COW flag is set
+        asm.Mov(R(ESI), R(EDX));
+        asm.MovImm16(R(EAX), OsLayout.FramePoolBase);
+        asm.Sub(R(ESI), R(EAX));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shr(R(ESI), R(EAX));
+        FrameEntryAddress(asm, ESI, EBX);
+        LoadField(asm, EBX, OsLayout.FrameCowField, EAX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("rc_next");                                         // resident but not COW
+        asm.Jmp("rc_resolve");
+        asm.Label("rc_nonres");
+        // non-resident COW iff pte <= -SwapCowBias
+        asm.MovImm16(R(EAX), OsLayout.SwapCowBias);
+        asm.MovImm(R(EBX), 0);
+        asm.Sub(R(EBX), R(EAX));                                   // EBX = -SwapCowBias
+        asm.Cmp(R(EDX), R(EBX));
+        asm.Jns("rc_next");                                        // pte >= -bias: not COW
+        asm.Label("rc_resolve");
+        asm.Mov(R(R12), R(R15));
+        asm.Call("pair_resolve");
+        asm.Label("rc_next");
+        asm.Inc(R(R15));
+        asm.Jmp("rc_scan");
+        asm.Label("rc_clear");
+        // Clear both ends of the partnership (all shared pages are now private).
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R8), R(EAX));
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));
+        asm.MovImm16(R(EBX), OsLayout.CowPartnerBase);
+        asm.Add(R(EAX), R(EBX));                                   // EAX = &cowPartner[X]
+        asm.Load(R(R9), R(EAX));                                   // R9 = Y
+        asm.MovImm(R(EBX), 0);
+        asm.Dec(R(EBX));
+        asm.Store(R(EAX), R(EBX));                                 // cowPartner[X] = -1
+        asm.Mov(R(EAX), R(R9));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));
+        asm.MovImm16(R(EBX), OsLayout.CowPartnerBase);
+        asm.Add(R(EAX), R(EBX));                                   // EAX = &cowPartner[Y]
+        asm.MovImm(R(EBX), 0);
+        asm.Dec(R(EBX));
+        asm.Store(R(EAX), R(EBX));                                 // cowPartner[Y] = -1
+        asm.Label("rc_done");
+        asm.Ret();
+    }
+
+    // cow_share: convert the current process's (the forking parent's) DATA pages to copy-on-
+    // write so a freshly forked child can share their snapshot read-only. A resident data
+    // frame is marked COW (read-only; the parent's next write traps); a non-resident private
+    // swap page is re-encoded from SwapPte to CowPte (same slot, now shared). Code/stack
+    // (RAM-home) pages are untouched. Run after flush_frames so the slots are current.
+    // CALL/RET leaf; uses R8 = index, ESI = page loop.
+    private static void EmitCowShare(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
+
+        asm.Label("cow_share");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R8), R(EAX));                                   // R8 = index
+        asm.MovImm(R(ESI), 0);                                     // ESI = page
+        asm.Label("cs_scan");
+        asm.MovImm(R(EAX), OsLayout.MaxPagesPerProcess);
+        asm.Cmp(R(ESI), R(EAX));
+        asm.Jns("cs_done");
+        EmitPteAddress(asm, R8, ESI, EDI, EBX, tableStrideShift, pteShift); // EDI = &PTE
+        asm.Load(R(EDX), R(EDI));                                  // EDX = pte
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(EDX), R(EAX));
+        asm.Js("cs_nonres");
+        // resident: mark COW iff it is a data frame (frame.Swap >= 0)
+        asm.Mov(R(R9), R(EDX));
+        asm.MovImm16(R(EAX), OsLayout.FramePoolBase);
+        asm.Sub(R(R9), R(EAX));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shr(R(R9), R(EAX));                                    // R9 = frame index
+        FrameEntryAddress(asm, R9, EBX);
+        LoadField(asm, EBX, OsLayout.FrameSwapField, EAX);         // EAX = frame.Swap
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(EAX), R(R10));
+        asm.Js("cs_next");                                         // Swap < 0: RAM-home, skip
+        FrameEntryAddress(asm, R9, EBX);
+        StoreFieldImm(asm, EBX, OsLayout.FrameCowField, 1);        // mark resident data frame COW
+        asm.Jmp("cs_next");
+        asm.Label("cs_nonres");
+        // already COW? pte <= -SwapCowBias -> skip
+        asm.MovImm(R(EAX), 0);
+        asm.Sub(R(EAX), R(EDX));                                   // EAX = -pte
+        asm.MovImm16(R(EBX), OsLayout.SwapCowBias);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jns("cs_next");                                        // -pte >= bias: already COW
+        // RAM-home (-2) / unmapped (-1)? pte >= -2 -> skip
+        asm.MovImm(R(EBX), 0);
+        asm.Dec(R(EBX));
+        asm.Dec(R(EBX));                                           // EBX = -2
+        asm.Cmp(R(EDX), R(EBX));
+        asm.Jns("cs_next");                                        // pte >= -2: not a swap data page
+        // private swap data page: slot = -pte - SwapPteBias; PTE = -(slot + SwapCowBias)
+        asm.MovImm(R(EAX), 0);
+        asm.Sub(R(EAX), R(EDX));
+        asm.MovImm(R(EBX), OsLayout.SwapPteBias);
+        asm.Sub(R(EAX), R(EBX));                                   // EAX = slot
+        asm.MovImm16(R(EBX), OsLayout.SwapCowBias);
+        asm.Add(R(EAX), R(EBX));                                   // EAX = slot + SwapCowBias
+        asm.MovImm(R(EBX), 0);
+        asm.Sub(R(EBX), R(EAX));                                   // EBX = -(slot + SwapCowBias) = CowPte
+        EmitPteAddress(asm, R8, ESI, EDI, EAX, tableStrideShift, pteShift);
+        asm.Store(R(EDI), R(EBX));
+        asm.Label("cs_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("cs_scan");
+        asm.Label("cs_done");
+        asm.Ret();
+    }
+
     // Computes the absolute address of frame `frameReg`'s core-map entry into `dest`
     // (= FrameTableBase + frame * FrameTableEntryBytes). Clobbers EAX and `dest`.
     private static void FrameEntryAddress(Assembler asm, byte frameReg, byte dest)
@@ -608,12 +952,19 @@ public static class OsRoutines
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated); // hide from scans
         SetupPrivilegedStack(asm);
         asm.Call("free_sub");
+        // Materialise any copy-on-write share first, so the partner keeps a private copy of
+        // the shared pages before this process frees its frames and zeroes its slots.
+        asm.Call("resolve_cow");
         // Reclaim this process's physical frames (no write-back — its memory is gone), so
         // they cannot later be evicted into freed/reused RAM. EBX (entry) is preserved.
         asm.Call("release_frames");
         // Zero this process's swap slots so a slot reused by a later process never serves
         // the dead process's stale data.
         asm.Call("zero_swap_slots");
+        // resolve_cow clobbered EBX; reload it = this (current) process's entry.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(EBX), R(EAX));
+        EntryAddress(asm, EBX, EBX);
 
         // Scan for a parent blocked in wait() on this PID.
         LoadField(asm, EBX, Hardware.ProcessEntryPid, R8);   // R8 = my Pid
@@ -1062,11 +1413,15 @@ public static class OsRoutines
         EntryAddress(asm, ECX, R8);                // R8 = parent entry
         asm.SaveRegs(R(R8));                        // parent entry now holds current regs/EIP/level
 
-        // Flush the parent's dirty pages from their frames back to their backings (RAM home
-        // or swap slot), so the copies below see the parent's live data.
+        // Prepare copy-on-write sharing: resolve any pre-existing COW (so this fork starts
+        // from a clean private state), flush the parent's dirty frames to their backings (so
+        // the snapshot slots are current), then convert the parent's data pages to COW. The
+        // child will share these read-only via the page table; a write later resolves them.
         SetupPrivilegedStack(asm);
+        asm.Call("resolve_cow");
         asm.Call("flush_frames");
-        EntryAddress(asm, ECX, R8);                // restore R8 = parent entry (flush clobbered it)
+        asm.Call("cow_share");
+        EntryAddress(asm, ECX, R8);                // restore R8 = parent entry (subroutines clobbered it)
 
         // Find a free child slot: a Terminated slot in [0, count), else a fresh slot if
         // the table is not full; otherwise fork fails.
@@ -1105,37 +1460,22 @@ public static class OsRoutines
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryTotalSize);
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryDiskSlot);
 
-        // Deep-copy the parent's swap slots into the child's so the child inherits the
-        // parent's data pages. flush_frames (run at fork entry) already wrote the parent's
-        // dirty data frames back to its swap slots, so each parent slot holds live data.
-        // Each page p is transferred parent-slot -> scratch page -> child-slot. ECX = parent
-        // index, ESI = child index (both preserved); R8/R9 (parent/child entry) preserved.
+        // Record the copy-on-write partnership: parent and child each point at the other.
+        // The child's page table then seeds its data pages COW (sharing the parent's slots,
+        // see SeedPageTableIfNew); the parent's were converted by cow_share above. A write by
+        // either side later traps and resolves just that page. ECX = parent, ESI = child.
         asm.Mov(R(R10), R(ECX));
-        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
+        asm.MovImm(R(EAX), 4);
         asm.Mul(R(R10), R(EAX));
-        asm.MovImm16(R(EAX), OsLayout.SwapBase);
-        asm.Add(R(R10), R(EAX));                   // R10 = parent swap-slot base
-        asm.Mov(R(R11), R(ESI));
-        asm.MovImm(R(EAX), OsLayout.SwapSlotsPerProcess);
-        asm.Mul(R(R11), R(EAX));
-        asm.MovImm16(R(EAX), OsLayout.SwapBase);
-        asm.Add(R(R11), R(EAX));                   // R11 = child swap-slot base
-        asm.MovImm16(R(R12), OsLayout.PageSize);   // R12 = transfer length
-        asm.MovImm16(R(R13), OsLayout.SwapScratchBase); // R13 = scratch page address
-        asm.MovImm(R(EDI), 0);                     // EDI = page index
-        asm.Label("fk_swap");
-        asm.MovImm(R(EAX), OsLayout.MaxPagesPerProcess);
-        asm.Cmp(R(EDI), R(EAX));
-        asm.Jns("fk_swap_done");
-        asm.Mov(R(EDX), R(R10));
-        asm.Add(R(EDX), R(EDI));                    // EDX = parent slot
-        asm.DRead(R(R13), R(EDX), R(R14));         // scratch <- parent slot
-        asm.Mov(R(EDX), R(R11));
-        asm.Add(R(EDX), R(EDI));                    // EDX = child slot
-        asm.DWrite(R(EDX), R(R13), R(R12));        // child slot <- scratch
-        asm.Inc(R(EDI));
-        asm.Jmp("fk_swap");
-        asm.Label("fk_swap_done");
+        asm.MovImm16(R(EAX), OsLayout.CowPartnerBase);
+        asm.Add(R(R10), R(EAX));
+        asm.Store(R(R10), R(ESI));                  // cowPartner[parent] = child
+        asm.Mov(R(R10), R(ESI));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R10), R(EAX));
+        asm.MovImm16(R(EAX), OsLayout.CowPartnerBase);
+        asm.Add(R(R10), R(EAX));
+        asm.Store(R(R10), R(ECX));                  // cowPartner[child] = parent
 
         // Allocate the child's region (clobbers all registers except EBX = child entry).
         asm.Mov(R(EBX), R(R9));
@@ -1258,12 +1598,19 @@ public static class OsRoutines
         // TotalSize that free_sub reads (DiskSlot, which we changed, is not read by it).
         SetupPrivilegedStack(asm);
         asm.Call("free_sub");
+        // Materialise any COW share so a fork partner keeps its copy before exec wipes this
+        // process's pages.
+        asm.Call("resolve_cow");
         // Release the old image's physical frames (its memory is being replaced); the new
         // image faults its pages in fresh after the page table is reseeded on resume.
         asm.Call("release_frames");
         // Zero this process's swap slots so the new image's data pages start blank rather
         // than inheriting the old image's swapped-out data.
         asm.Call("zero_swap_slots");
+        // resolve_cow clobbered EBX; reload it = this (current) process's entry.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(EBX), R(EAX));
+        EntryAddress(asm, EBX, EBX);
 
         // Recompute sizing from the entry (still holds old ProgramSize/TotalSize; the new
         // slot is in DiskSlot): newLen via DLEN, newTotal = oldTotal - oldProgramSize + newLen.

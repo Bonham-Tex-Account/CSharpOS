@@ -431,4 +431,92 @@ public class PagingTests : IDisposable
 
         Assert.Contains(55, outputs); // child inherited the parent's swapped data page
     }
+
+    // ---- Phase 3: copy-on-write fork (data pages) -------------------------------
+
+    // Runs a two-process (fork) program to completion, completing output per-device so a
+    // forked child (on its own stdout device) is never left blocked.
+    private List<int> RunForkProgram(byte[] code, int requiredMemory, int requiredStackSize)
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        os.LoadProcess(new Process(CreateProgramFile(code), requiredMemory, requiredStackSize));
+        List<int> outputs = new List<int>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { outputs.Add(e.Value); hw.RaiseOutputComplete(e.Device); };
+        int steps = 0;
+        while (os.HasProcesses && steps < 100000)
+        {
+            hw.Run();
+            steps++;
+        }
+        return outputs;
+    }
+
+    [Fact]
+    public void Cow_ChildWrite_StaysPrivate_ParentUnaffected()
+    {
+        // Parent sets data page 1 = 10, forks (page shared copy-on-write), the child writes
+        // 20 to it. COW must give the child a private copy: child sees 20, parent still 10.
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 10);
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Store(RegisterName.EBX, RegisterName.EAX);     // page 1 = 10
+        asm.Fork();
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("child");
+        // parent: wait for the child, then read page 1 (must still be 10)
+        asm.Wait(RegisterName.EAX);                         // EAX = child pid
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX);
+        asm.Out(RegisterName.EAX);                          // expect 10
+        asm.Hlt();
+        asm.Label("child");
+        asm.MovImm(RegisterName.EAX, 20);
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Store(RegisterName.EBX, RegisterName.EAX);      // child writes 20 -> COW copy
+        asm.Load(RegisterName.EAX, RegisterName.EBX);
+        asm.Out(RegisterName.EAX);                          // expect 20
+        asm.Hlt();
+
+        List<int> outputs = RunForkProgram(asm.Build(), 2048, 512);
+
+        Assert.Contains(20, outputs); // child saw its own write
+        Assert.Contains(10, outputs); // parent's page was not affected by the child's write
+    }
+
+    [Fact]
+    public void Cow_ParentWrite_StaysPrivate_ChildSeesSnapshot()
+    {
+        // Parent sets data page 1 = 10, forks, then the parent writes 99. The child must
+        // still see the fork-time snapshot (10); the parent sees its own write (99).
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, 10);
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Store(RegisterName.EBX, RegisterName.EAX);     // page 1 = 10
+        asm.Fork();
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("child");
+        // parent: save child pid, write 99, wait, then read (must be 99)
+        asm.Mov(RegisterName.EDX, RegisterName.EAX);        // EDX = child pid
+        asm.MovImm(RegisterName.EAX, 99);
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Store(RegisterName.EBX, RegisterName.EAX);      // parent writes 99 -> COW copy
+        asm.Wait(RegisterName.EDX);
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX);
+        asm.Out(RegisterName.EAX);                          // expect 99
+        asm.Hlt();
+        asm.Label("child");
+        asm.MovImm16(RegisterName.EBX, 1 * OsLayout.PageSize + 8);
+        asm.Load(RegisterName.EAX, RegisterName.EBX);
+        asm.Out(RegisterName.EAX);                          // expect 10 (snapshot)
+        asm.Hlt();
+
+        List<int> outputs = RunForkProgram(asm.Build(), 2048, 512);
+
+        Assert.Contains(10, outputs); // child kept the fork-time snapshot
+        Assert.Contains(99, outputs); // parent saw its own private write
+    }
 }

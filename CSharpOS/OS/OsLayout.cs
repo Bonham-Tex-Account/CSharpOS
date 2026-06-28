@@ -15,8 +15,9 @@ public static class OsLayout
     public const int CodeBase = Hardware.IvtSize;
     // The assembled OS routines (scheduler, allocator, disk, and the spawning family:
     // spawn/fork/exec/wait/exit) sit between CodeBase and DataBase; BuildOsImage guards
-    // against overrun. Raised to 8192 once the spawning routines were added.
-    public const int DataBase = 8192;
+    // against overrun. Raised to 8192 once the spawning routines were added, then to 12288
+    // once the paging family (page-fault handler + frame/swap/COW subroutines) was added.
+    public const int DataBase = 12288;
 
     // ---- scheduler state header (4-byte fields at the data section base) ---
     public const int ProcessCountOffset    = DataBase + 0;
@@ -102,7 +103,8 @@ public static class OsLayout
     public const int FrameDirtyField     = 16;  // 0 = clean (drop on evict), 1 = needs write-back
     public const int FrameLastUseField   = 20;  // LRU stamp (the MMU bumps it on each access)
     public const int FrameSwapField      = 24;  // swap slot this frame is backed by, or -1 for a RAM-home frame
-    public const int FrameTableEntryBytes = 28;
+    public const int FrameCowField       = 28;  // 1 = copy-on-write share (read-only; a write traps to copy)
+    public const int FrameTableEntryBytes = 32;
     public const int FrameTableBase = PageTableBase + PageTableRegionSize;
     public const int FrameTableSize = FrameCount * FrameTableEntryBytes;
     // The frame pool: FrameCount contiguous PageSize frames. Frame f's physical base is
@@ -133,8 +135,27 @@ public static class OsLayout
     public const int ZeroPageBase = FramePoolBase + FramePoolSize;
     public const int SwapScratchBase = ZeroPageBase + PageSize;
 
+    // ---- paging Phase 3: copy-on-write fork (data pages) ------------------
+    // fork shares the parent's data-page snapshot with the child instead of copying it: a
+    // shared DATA page is non-resident with a COW PTE that references the shared swap slot,
+    // or resident in a write-protected COW frame. A write traps (the MMU re-raises the page
+    // fault for a resident COW frame) and the handler copies the page privately for the
+    // writer's own deterministic slot, leaving the partner with the snapshot. Because the
+    // slots are deterministic 2-way, a process resolves any existing COW (materialises its
+    // partner's private copies) before it forks/exits/execs again, so COW is only ever a
+    // clean parent<->child relationship between one fork and the next teardown.
+    //
+    // A COW PTE encodes the SHARED swap slot as -(slot + SwapCowBias); SwapCowBias sits well
+    // above the largest plain-swap magnitude (MaxSlot + SwapPteBias) so the two encodings
+    // never overlap, and stays within a 16-bit immediate so the ISA can build it.
+    public const int SwapCowBias = 4096;
+    // Per-process COW partner index (the other end of the share), or -1 for none. One word
+    // per process; appended after the scratch pages so existing offsets are unchanged.
+    public const int CowPartnerBase = SwapScratchBase + PageSize;
+    public const int CowPartnerRegionSize = MaxProcesses * 4;
+
     // Total OS region size.
-    public const int TotalSize = SwapScratchBase + PageSize;
+    public const int TotalSize = CowPartnerBase + CowPartnerRegionSize;
 
     public static int ProcessEntryAddress(int index)
     {
@@ -165,10 +186,23 @@ public static class OsLayout
         return SwapBase + processIndex * SwapSlotsPerProcess + page;
     }
 
-    // The non-resident PTE encoding for a swap-backed page on `swapSlot`, and its inverse.
+    // The non-resident PTE encoding for a privately swap-backed page on `swapSlot`, and its
+    // inverse. A COW PTE (below) is more negative, so test IsCowPte first.
     public static int SwapPte(int swapSlot) { return -(swapSlot + SwapPteBias); }
     public static int SwapSlotFromPte(int pte) { return -pte - SwapPteBias; }
-    public static bool IsSwapPte(int pte) { return pte <= -SwapPteBias; }
+    public static bool IsSwapPte(int pte) { return pte <= -SwapPteBias && !IsCowPte(pte); }
+
+    // The non-resident PTE encoding for a copy-on-write page sharing `swapSlot`, its inverse,
+    // and its test. IsCowPte holds for the COW range only (more negative than any plain swap).
+    public static int CowPte(int swapSlot) { return -(swapSlot + SwapCowBias); }
+    public static int CowSlotFromPte(int pte) { return -pte - SwapCowBias; }
+    public static bool IsCowPte(int pte) { return pte <= -SwapCowBias; }
+
+    // Absolute address of process `processIndex`'s COW-partner word.
+    public static int CowPartnerAddress(int processIndex)
+    {
+        return CowPartnerBase + processIndex * 4;
+    }
 
     // True when virtual page `page` of a process whose image is `programSize` bytes and
     // whose data region is `requiredMemory` bytes falls in the swap-backed DATA region
