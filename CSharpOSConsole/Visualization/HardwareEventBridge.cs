@@ -144,6 +144,21 @@ public sealed class HardwareEventBridge
         renderer.PrivilegeChanged(transition, model);
     }
 
+    // Called by SpectreDashboard after each execute batch so that OS-routine state
+    // changes (termination, priority writes) that happened without a ContextSwitched
+    // event are visible in the model before the next frame capture.
+    public void RefreshProcessTable()
+    {
+        if (BuddyHeapView.HasOs(hw))
+        {
+            model.HasOsImage = true;
+            model.CurrentIndex = BuddyHeapView.CurrentIndex(hw);
+            model.ProcessTable = BuddyHeapView.ReadProcessTable(hw, os.NameForBase);
+            model.FreeBlocks = BuddyHeapView.ReadFreeBlocks(hw) ?? new List<BuddyHeapView.FreeBlock>();
+            model.BuddyTree = BuddyHeapView.ReadTree(hw, os.NameForBase);
+        }
+    }
+
     private void OnProcessBlocked(object? sender, ProcessBlockedArgs e)
     {
         model.BlockCount++;

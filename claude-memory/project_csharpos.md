@@ -1,6 +1,6 @@
 ---
 name: project-csharpos
-description: "Learning project — emulated OS in C#: Hardware/OS/Process; MLFQ scheduler fully in ISA, 4 priority levels, I/O boost, periodic global boost; 493 passing tests — paging roadmap COMPLETE"
+description: "Learning project — emulated OS in C#: Hardware/OS/Process; MLFQ scheduler fully in ISA, 4 priority levels, I/O boost, periodic global boost; 493 passing tests — paging roadmap COMPLETE. Now on VisualizerImprovements branch."
 metadata: 
   node_type: memory
   type: project
