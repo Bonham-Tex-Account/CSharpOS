@@ -39,6 +39,7 @@ internal static class InstructionFunctions
 
     // ---- integral functions (instruction implementations) ----------------
 
+    // ===== MOV (MovRegReg, MovRegImm, MovRegImm16) ===========================
     internal static void MovRegReg(Hardware hw, byte b1, byte b2, byte b3)
     {
         hw.WriteRegisterAt(b1, hw.ReadRegisterAt(b2));
@@ -55,6 +56,7 @@ internal static class InstructionFunctions
         hw.WriteRegisterAt(b1, (b2 << 8) | b3);
     }
 
+    // ===== Memory (Load, Store) ==============================================
     // LOAD dest, [ptr]  — dest = 32-bit value at the (MMU-translated) address reg[ptr].
     // In user mode the pointer is a virtual address translated through the page table; in
     // kernel/OS mode it is absolute (program base 0). Translation is behavior-preserving.
@@ -86,6 +88,7 @@ internal static class InstructionFunctions
         });
     }
 
+    // ===== ALU (Add, Sub, Mul, Div, Cmp, Inc, Dec, And, Or, Xor, Not, Shl, Shr)
     internal static void Add(Hardware hw, byte b1, byte b2, byte b3)
     {
         int result = hw.ReadRegisterAt(b1) + hw.ReadRegisterAt(b2);
@@ -182,6 +185,7 @@ internal static class InstructionFunctions
         UpdateFlags(hw, result);
     }
 
+    // ===== Control Flow (Jmp, Jz, Jnz, Js, Jns, Call, Ret) ==================
     internal static void Jmp(Hardware hw, byte b1, byte b2, byte b3)
     {
         hw.SetInstructionPointer(hw.GetProgramBase() + ((b1 << 8) | b2));
@@ -270,6 +274,7 @@ internal static class InstructionFunctions
         hw.SetInstructionPointer(programBase + returnOffset);
     }
 
+    // ===== I/O (Out, In) =====================================================
     // OUT is privileged: in user mode it traps into the kernel (which performs
     // the real device write); the operand byte-offset locates the value in the
     // saved register file.
@@ -295,6 +300,7 @@ internal static class InstructionFunctions
         hw.KernelInput(b1);
     }
 
+    // ===== OS Primitives (Hlt, Iret) =========================================
     internal static void Hlt(Hardware hw, byte b1, byte b2, byte b3)
     {
         hw.Halt();
@@ -305,6 +311,7 @@ internal static class InstructionFunctions
         hw.Iret();
     }
 
+    // ===== Context Management (SaveRegs, LoadRegs, SetLayout, OsRet) =========
     // SAVEREGS [ptr]  — saves the full register file (with the live IP folded into
     // the EIP slot) to the absolute address in reg[b1]. Privileged-only.
     internal static void SaveRegs(Hardware hw, byte b1, byte b2, byte b3)
@@ -333,6 +340,7 @@ internal static class InstructionFunctions
         hw.OsReturn(hw.ReadRegisterAt(b1));
     }
 
+    // ===== Disk (DRead, DWrite, DLen) =========================================
     // DREAD dest, slot, lenOut — copies disk slot reg[slot] into RAM at the absolute
     // address reg[dest], writing the byte count into reg[lenOut]. The disk is an
     // OS/kernel boundary, so this traps as invalid if executed in user mode.
@@ -377,6 +385,7 @@ internal static class InstructionFunctions
         hw.WriteRegisterAt(b2, hw.DiskLength(slot));
     }
 
+    // ===== Process (Fork, Exec, Wait, Exit, SetFocus) ========================
     // FORK — duplicate the running process; traps into the privileged OS fork routine,
     // which delivers the child's PID to the parent (in EAX) and 0 to the child.
     internal static void Fork(Hardware hw, byte b1, byte b2, byte b3)
