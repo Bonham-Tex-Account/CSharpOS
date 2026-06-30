@@ -357,6 +357,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 |------|------|:-------------:|-------|
 | 2026-06-29 | Build all CLAUDE.md reference files | ~143K (fork) | Cold scan of full source; one-time cost |
 | 2026-06-29 | Add section markers to OsRoutines/Hardware/InstructionFunctions/SpectreDashboard | ~115K (fork) | 71 markers across 4 files; CLAUDE.md tables updated with line numbers |
+| 2026-06-30 | Visualizer fixes: run loop, termination display, process state refresh | ~18K (inline) | 6 targeted reads (sections by line offset); no full-file scans needed |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 
