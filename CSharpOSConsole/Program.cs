@@ -1,7 +1,11 @@
+using System.Text;
 using CSharpOS;
 using CSharpOSConsole;
 using CSharpOSConsole.Visualization;
 using OperatingSystem = CSharpOS.OperatingSystem;
+
+Console.OutputEncoding = Encoding.UTF8;
+Console.InputEncoding = Encoding.UTF8;
 
 // Resolve OS plugin path: --os-plugin <path> overrides the default.
 string pluginPath = Path.Combine(AppContext.BaseDirectory, "BasicOSPlugin.dll");
@@ -54,6 +58,7 @@ while (true)
     Console.WriteLine("  7) Fill & drain the heap (mixed-size jobs fill memory, then drain — watch reclaim/merging)");
     Console.WriteLine("  8) Scheduler + memory (counter + average run while short jobs churn the heap)");
     Console.WriteLine("  9) Shell (interactive: type a command id to fork/exec a program — fork/exec/wait/setfocus)");
+    Console.WriteLine(" 10) Two guessing games (Tab to switch focus, test process switching)");
     Console.WriteLine("  q) Quit");
     Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows scrub history, 'o' toggle program I/O, 'q' quit run)");
     Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, digits + Enter send it a number)");
@@ -135,6 +140,13 @@ while (true)
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
             RunShell(mode, detail);
+            break;
+        }
+        case "10":
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunShared(new List<StagedProgram> { guess, guess }, mode, detail);
             break;
         }
         default:

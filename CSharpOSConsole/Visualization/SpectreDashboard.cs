@@ -126,7 +126,7 @@ public sealed class SpectreDashboard
         List<int> live = new List<int>();
         foreach (BuddyHeapView.ProcessRow row in model.ProcessTable)
         {
-            if (row.State != ProcessState.Terminated)
+            if (row.State != ProcessState.Terminated && row.State != ProcessState.Zombie)
             {
                 live.Add(row.Index);
             }
@@ -161,21 +161,18 @@ public sealed class SpectreDashboard
                 RenderInto(layout);
                 ctx.Refresh();
 
-                while (os.HasProcesses || pendingLoads.Count > 0)
+                while (true)
                 {
                     InjectPendingLoads();
-                    if (!os.HasProcesses)
+
+                    // If idle and more work is queued, load the next one immediately so
+                    // the run keeps going (and the heap churns).
+                    if (!os.HasProcesses && pendingLoads.Count > 0)
                     {
-                        // Idle but more work is queued: load the next one right away so
-                        // the run keeps going (and the heap churns).
-                        if (pendingLoads.Count > 0)
-                        {
-                            LoadNextPending();
-                            RenderInto(layout);
-                            ctx.Refresh();
-                            continue;
-                        }
-                        break;
+                        LoadNextPending();
+                        RenderInto(layout);
+                        ctx.Refresh();
+                        continue;
                     }
 
                     StepAction action = interaction.NextAction();
@@ -185,34 +182,45 @@ public sealed class SpectreDashboard
                     }
                     if (action == StepAction.Execute)
                     {
-                        // Only user/kernel instructions count toward the stride; OS
-                        // (Privileged-mode) instructions run at full speed in the inner loop.
-                        // Without this, a 70-instruction context-switch routine would charge
-                        // the 100ms NextAction delay 70 times = ~7-second freeze per switch.
-                        // osGuard caps the spin when all processes are blocked on I/O.
-                        int stepsToRun = interaction.Paused ? 1 : renderStride;
-                        int userSteps = 0;
-                        int osGuard = 0;
-                        while (userSteps < stepsToRun && os.HasProcesses && osGuard < 10000)
+                        if (os.HasProcesses)
                         {
-                            int before = model.InstructionCount;
-                            hw.Run();
-                            if (model.InstructionCount > before)
+                            // Only user/kernel instructions count toward the stride; OS
+                            // (Privileged-mode) instructions run at full speed in the inner loop.
+                            // Without this, a 70-instruction context-switch routine would charge
+                            // the 100ms NextAction delay 70 times = ~7-second freeze per switch.
+                            // osGuard caps the spin when all processes are blocked on I/O.
+                            int stepsToRun = interaction.Paused ? 1 : renderStride;
+                            int userSteps = 0;
+                            int osGuard = 0;
+                            while (userSteps < stepsToRun && os.HasProcesses && osGuard < 10000)
                             {
-                                frames.Capture(model);
-                                userSteps++;
-                                osGuard = 0;
+                                int before = model.InstructionCount;
+                                hw.Run();
+                                if (model.InstructionCount > before)
+                                {
+                                    frames.Capture(model);
+                                    userSteps++;
+                                    osGuard = 0;
+                                }
+                                else
+                                {
+                                    osGuard++;
+                                }
                             }
-                            else
+                            // Yield at the render boundary (not per OS step) when idle.
+                            if (!os.HasRunningProcess)
                             {
-                                osGuard++;
+                                Thread.Sleep(15);
                             }
                         }
-                        // Yield at the render boundary (not per OS step) when idle.
-                        if (os.HasProcesses && !os.HasRunningProcess)
-                        {
-                            Thread.Sleep(15);
-                        }
+                        // Refresh after every batch: OS routines that ran inside the
+                        // osGuard spin (termination, priority writes) update memory but
+                        // don't fire ContextSwitched, so the model would otherwise lag.
+                        // Always capture so the live-edge frame reflects the refreshed model
+                        // even when no user instruction ran (e.g. one process terminated
+                        // while the other is blocked waiting for input).
+                        bridge.RefreshProcessTable();
+                        frames.Capture(model);
                         RenderInto(layout);
                         ctx.Refresh();
                     }
@@ -795,6 +803,10 @@ public sealed class SpectreDashboard
         if (!frames.AtLiveEdge)
         {
             state = "[yellow]reviewing history[/]";
+        }
+        else if (!os.HasProcesses && pendingLoads.Count == 0)
+        {
+            state = "[red]finished — ← → to review, q to quit[/]";
         }
         else if (interaction.Paused)
         {
