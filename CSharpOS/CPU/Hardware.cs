@@ -320,6 +320,7 @@ public partial class Hardware
     public int GetOsMemoryBase() { return osMemoryBase; }
     public int GetOsMemorySize() { return osMemorySize; }
 
+    // ===== IVT Dispatch (DispatchOsRoutine, EnterOsRoutine) ==================
     // Enters an OS routine via its IVT slot: snapshots the interrupted process's
     // context, raises to Privileged, and jumps to the routine. The routine returns
     // to a process with OSRET. Replaces direct os.X(hw) method calls.
@@ -377,6 +378,7 @@ public partial class Hardware
         trapTaken = true;
     }
 
+    // ===== Traps (LoadTraps, EvaluateTraps) ==================================
     public void LoadTraps(List<Trap> traps)
     {
         trapTable = new Dictionary<byte, List<Trap>>();
@@ -409,6 +411,7 @@ public partial class Hardware
         return false;
     }
 
+    // ===== Program Base (GetProgramBase, GetProgramBaseFor) ==================
     // Program-relative addressing follows the privilege level: user code runs relative
     // to its program image, while kernel code (the shared syscall handler and the OS
     // routines) addresses memory absolutely (base 0) so it can reach the OS region and
@@ -432,6 +435,7 @@ public partial class Hardware
         return 0;
     }
 
+    // ===== Memory + Register Access (ReadBytes, WriteBytes, ReadRegisterAt...) =
     public byte[] ReadBytes(int address)
     {
         return new byte[] { memory[address], memory[address + 1], memory[address + 2], memory[address + 3] };
@@ -498,6 +502,7 @@ public partial class Hardware
         return state;
     }
 
+    // ===== Process Ranges (IsAddressInProcessRanges, GetCurrentProcessRanges) =
     public bool IsAddressInProcessRanges(int address)
     {
         if (!processLayoutLoaded)
@@ -603,6 +608,7 @@ public partial class Hardware
         return DeviceFor(id);
     }
 
+    // ===== Disk (DiskRead, DiskWrite, DiskLength, Disk property) =============
     // The disk's backing store: the Bin behind the block device at DiskDeviceId.
     public Bin Disk
     {
@@ -645,6 +651,7 @@ public partial class Hardware
         return Disk.GetLength(slot);
     }
 
+    // ===== Device Internals (FdDevice, FocusedInputDevice, waiters) ==========
     // Resolves the running process's file descriptor to a device id. Falls back to
     // CurrentDeviceId() (the process index) with no OS image or no running process,
     // so the bare-hardware harness and the idle state behave exactly as before.
@@ -694,6 +701,7 @@ public partial class Hardware
         return processIndex;
     }
 
+    // ===== Word Memory Helpers (ReadWord, WriteWord, WriteWordRaw) ===========
     private int ReadWord(int address)
     {
         byte[] bytes = ReadBytes(address);
@@ -943,6 +951,7 @@ public partial class Hardware
         return ReadWord(osMemoryBase + OsLayout.FrameTableEntry(frame) + field);
     }
 
+    // ===== Buffer Word Helpers (ReadWordFrom, WriteWordInto) =================
     // Word read/write against a plain byte[] (e.g. a register-file snapshot),
     // independent of the memory array.
     private static int ReadWordFrom(byte[] buffer, int offset)
@@ -958,6 +967,7 @@ public partial class Hardware
         buffer[offset + 3] = (byte)((value >> 24) & 0xFF);
     }
 
+    // ===== Run Loop Internals (TryDispatch, BlockCurrent, InitStack) =========
     // Dispatches one pending device interrupt per call: applies its hardware effect
     // (buffer the input / free the output device) and enters the matching wake
     // routine. Returns false when no interrupt is pending.
@@ -1145,6 +1155,7 @@ public partial class Hardware
         return cycles;
     }
 
+    // ===== Process Loading (LoadProcess, LoadProcessLayout, SetProcessLayout) =
     public void LoadProcess(Process process, byte[] program)
     {
         WriteBytes(process.ProgramAddress, program);
@@ -1177,6 +1188,7 @@ public partial class Hardware
         currentProcessKernelStackSize  = KernelStackSize;
     }
 
+    // ===== Kernel Entry / Exit (EnterKernel, Iret, CaptureInterruptedContext) =
     // An I/O instruction executed in user mode traps into the kernel: pushes the trap
     // frame (saved user register file + trap info) onto this process's kernel stack,
     // points the frame-pointer register at it, and jumps to the shared syscall handler.
@@ -1246,6 +1258,7 @@ public partial class Hardware
         WriteWord(address + ProcessEntryLevel, (int)interruptedLevel);
     }
 
+    // ===== Context Commit (LoadRegistersFrom, SetLayoutFromEntry, OsReturn) ==
     // LOADREGS: stages a process-table entry's saved register file for OSRET to
     // commit. Does not touch the live registers, so the routine keeps its scratch.
     public void LoadRegistersFrom(int address)
@@ -1308,6 +1321,7 @@ public partial class Hardware
 
     public bool IsProcessRunning() { return processRunning; }
 
+    // ===== RunOsRoutineSynchronously =========================================
     // Runs an OS routine to completion synchronously, used for the C#-initiated load
     // path (allocation). The live CPU state is preserved around the routine, which
     // only touches scratch registers and OS memory, so a running process is undisturbed.
@@ -1353,6 +1367,7 @@ public partial class Hardware
         lastContextBase = savedLastContextBase;
     }
 
+    // ===== Process Lifecycle (Halt, Exit, Wait, SetFocus, Fork, Exec) ========
     // HLT is a request to terminate with status 0: the OS Halt routine frees the
     // process's memory, reaps it or hands its status to a waiting parent, and schedules
     // the next. Without an OS image, just stop (raise to Privileged).
@@ -1447,6 +1462,7 @@ public partial class Hardware
         trapTaken = true;
     }
 
+    // ===== TrapInvalidInstruction ============================================
     // An invalid opcode is a fault that terminates the process. Hardware fires the
     // observability event (with the trap's reason, if any), then the OS
     // InvalidInstruction routine tears the process down and schedules the next.
@@ -1475,6 +1491,7 @@ public partial class Hardware
         return null;
     }
 
+    // ===== Kernel I/O (KernelInput, KernelOutput) ============================
     // Kernel-mode input: deliver a value from the running process's stdin device
     // (fd 0), or block the process on that device until its input interrupt wakes it
     // (the IN instruction re-runs on resume). The process is recorded in the device's
@@ -1507,6 +1524,7 @@ public partial class Hardware
         device.OutputBusy = true;
     }
 
+    // ===== Interrupt Raising (RaiseInputInterrupt, RaiseOutputComplete) ======
     // Raises an input interrupt from the live keyboard: delivered to the focused
     // (foreground) process's stdin device, or device 0 when nothing is focused.
     public void RaiseInputInterrupt(int value)

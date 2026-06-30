@@ -17,7 +17,14 @@
       "Bash(PYTHONIOENCODING=utf-8 PYTHONUTF8=1 python -c ' *)",
       "Bash(dotnet run *)",
       "Bash(python3 -c ' *)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(grep -n \"public\\\\|private\\\\|// ----\\\\|^\\\\s*{$\" \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\VisualStudio2026\\\\CSharpOS\\\\CSharpOSConsole\\\\Visualization\\\\SpectreDashboard.cs\")",
+      "Bash(mkdir -p \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\ClaudeConfig\")",
+      "Bash(cp \"C:\\\\Users\\\\Tex\\\\.claude\\\\CLAUDE.md\" \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\ClaudeConfig\\\\CLAUDE.md\")",
+      "Bash(cp -r \"C:\\\\Users\\\\Tex\\\\.claude\\\\projects\\\\C--Users-Tex-OneDrive-Documents-VisualStudio2026-CSharpOS\\\\memory\" \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\ClaudeConfig\\\\memory-CSharpOS\")",
+      "Bash(gh auth *)",
+      "PowerShell(gh auth *)",
+      "PowerShell(Get-Command *)"
     ]
   }
 }

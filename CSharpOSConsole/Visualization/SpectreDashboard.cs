@@ -70,6 +70,7 @@ public sealed class SpectreDashboard
         hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => hw.RaiseOutputComplete(e.Device);
     }
 
+    // ===== Focus + I/O Helpers (ToggleIo, SubmitInput, CycleFocus, EnsureFocus)
     private void ToggleIo()
     {
         model.ShowProgramIo = !model.ShowProgramIo;
@@ -139,6 +140,7 @@ public sealed class SpectreDashboard
     /// CPU would otherwise go idle). Drives allocation/termination churn so the buddy
     /// tree and memory map stay active.
     /// </summary>
+    // ===== Staggered Loading + Run Loop (ScheduleStaggeredLoads, Run, Inject) =
     public void ScheduleStaggeredLoads(IEnumerable<Process> processes, int everyNInstructions)
     {
         foreach (Process process in processes)
@@ -254,6 +256,7 @@ public sealed class SpectreDashboard
     /// full dashboard once to the supplied console. Exercises the entire build pipeline
     /// without a live display or keyboard.
     /// </summary>
+    // ===== Headless Testing Seams (RenderSnapshot, RenderSummary) ============
     public void RenderSnapshot(IAnsiConsole console, int maxSteps)
     {
         frames.Capture(model);
@@ -321,6 +324,7 @@ public sealed class SpectreDashboard
 
     // ---- layout ------------------------------------------------------------
 
+    // ===== Layout + Top-Level Render (BuildLayout, RenderInto, Panel) ========
     private static Layout BuildLayout()
     {
         return new Layout("root").SplitRows(
@@ -463,6 +467,7 @@ public sealed class SpectreDashboard
 
     // ---- process table + scheduler queues ---------------------------------
 
+    // ===== MLFQ + Buddy Panels (BuildProcessAndQueues, BuildQueues, BuildBuddyTree)
     private IRenderable BuildProcessAndQueues(Frame frame)
     {
         if (!frame.HasOsImage)
@@ -581,6 +586,7 @@ public sealed class SpectreDashboard
 
     // ---- registers ---------------------------------------------------------
 
+    // ===== Registers + Heap Panels (BuildRegisters, BuildHeap, BuildMapBar...) =
     private static IRenderable BuildRegisters(Frame frame)
     {
         if (frame.Registers == null)
@@ -734,6 +740,7 @@ public sealed class SpectreDashboard
 
     private const int ScreenLines = 8;
 
+    // ===== Screen + Status (BuildScreen, FocusedName, BuildStatus) ===========
     private IRenderable BuildScreen()
     {
         List<IRenderable> lines = new List<IRenderable>();

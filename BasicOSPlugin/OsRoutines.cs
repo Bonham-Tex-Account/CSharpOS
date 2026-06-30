@@ -121,6 +121,7 @@ public static class OsRoutines
 
     // ---- scheduling routines (unchanged) ------------------------------------
 
+    // ===== EmitContextSwitch =================================================
     private static void EmitContextSwitch(Assembler asm)
     {
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
@@ -204,6 +205,7 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
+    // ===== EmitSchedule ======================================================
     private static void EmitSchedule(Assembler asm)
     {
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
@@ -211,6 +213,7 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
+    // ===== EmitBlock =========================================================
     private static void EmitBlock(Assembler asm)
     {
         asm.Mov(R(EDX), R(EAX));
@@ -223,6 +226,7 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
+    // ===== EmitHalt ==========================================================
     // Halt (HLT / EXIT) and InvalidInstruction both terminate the running process via the
     // shared exit_body: free its memory, then either hand its exit status to a parent
     // waiting in wait(), keep it as a Zombie until the parent waits, or reap it outright
@@ -237,6 +241,7 @@ public static class OsRoutines
         asm.Jmp("exit_body");
     }
 
+    // ===== EmitInvalidInstruction ============================================
     private static void EmitInvalidInstruction(Assembler asm)
     {
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
@@ -246,6 +251,7 @@ public static class OsRoutines
         asm.Jmp("exit_body");
     }
 
+    // ===== EmitPageFault =====================================================
     // IvtPageFault: demand-paging fault handler (Phase 2, increment 2). Entered with the
     // faulting page number in EAX when a user data access touches a non-resident page.
     // Makes the page resident by mapping it into a physical frame from the small shared
@@ -492,6 +498,7 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
+    // ===== EmitReleaseFrames =================================================
     // release_frames: free every frame owned by the current process (Occupied := 0), with
     // NO write-back — the process is exiting or replacing its memory, so the page contents
     // are discarded. Prevents a dead process's frame from later being evicted into RAM that
@@ -523,6 +530,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitFlushFrames ===================================================
     // flush_frames: write every DIRTY frame owned by the current process back to its home
     // and clear its dirty bit (the page stays resident in its frame). Used by fork before
     // it flat-memcpys the parent's home RAM, so the copy sees the parent's live data.
@@ -574,6 +582,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitZeroSwapSlots =================================================
     // zero_swap_slots: writes a zero page into every swap slot belonging to the current
     // process, so a slot reused by a later process (or this process after exec) never
     // serves stale data. DWRITEs the always-zero OS scratch page into each slot. CALL/RET
@@ -603,6 +612,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitSwapCopy (helper) =============================================
     // Copies the contents of swap slot `srcSlotReg` to swap slot `dstSlotReg` via the OS
     // transfer page (DREAD src -> scratch, DWRITE scratch -> dst). Clobbers EAX and
     // `lenScratch`/`addrScratch`; preserves the two slot registers.
@@ -614,6 +624,7 @@ public static class OsRoutines
         asm.DWrite(R(dstSlotReg), R(addrScratch), R(lenScratch));  // dst slot <- scratch
     }
 
+    // ===== EmitPairResolve ===================================================
     // pair_resolve: resolve the current process's copy-on-write DATA page R12 against its
     // partner Y. Both ends end up with a private copy of the shared snapshot: the current
     // process becomes private+writable (resident frame de-COW'd, or a private swap PTE), and
@@ -729,6 +740,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitResolveCow ====================================================
     // resolve_cow: materialise private copies of all of the current process's COW data pages
     // (against its partner), then clear the partnership both ways. Called before fork/exit/
     // exec so a teardown or re-fork never leaves a dangling COW share. CALL/RET; loops pages
@@ -811,6 +823,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitCowShare ======================================================
     // cow_share: convert the current process's (the forking parent's) DATA pages to copy-on-
     // write so a freshly forked child can share their snapshot read-only. A resident data
     // frame is marked COW (read-only; the parent's next write traps); a non-resident private
@@ -881,6 +894,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== FrameEntryAddress (helper) ========================================
     // Computes the absolute address of frame `frameReg`'s core-map entry into `dest`
     // (= FrameTableBase + frame * FrameTableEntryBytes). Clobbers EAX and `dest`.
     private static void FrameEntryAddress(Assembler asm, byte frameReg, byte dest)
@@ -892,6 +906,7 @@ public static class OsRoutines
         asm.Add(R(dest), R(EAX));
     }
 
+    // ===== FrameBaseAddress (helper) =========================================
     // Computes the absolute physical base of frame `frameReg` into `dest`
     // (= FramePoolBase + frame * PageSize). Clobbers EAX and `dest`.
     private static void FrameBaseAddress(Assembler asm, byte frameReg, byte dest, int pageShift)
@@ -903,6 +918,7 @@ public static class OsRoutines
         asm.Add(R(dest), R(EAX));
     }
 
+    // ===== EmitPteAddress (helper) ===========================================
     // Computes &PTE[procReg][pageReg] into `dest` (= PageTableBase + proc*stride + page*4).
     // Clobbers EAX, `dest`, and `scratch`.
     private static void EmitPteAddress(Assembler asm, byte procReg, byte pageReg, byte dest, byte scratch, int strideShift, int pteShift)
@@ -918,6 +934,7 @@ public static class OsRoutines
         asm.Add(R(dest), R(scratch));
     }
 
+    // ===== EmitPageCopy (helper) =============================================
     // Emits a word-by-word copy of PageSize bytes from [srcReg] to [dstReg]. `valReg` holds
     // each word in flight. Clobbers EAX, EDI, and `valReg`; preserves srcReg/dstReg. Label
     // names are derived from `prefix`, so each call site must pass a unique prefix.
@@ -940,6 +957,7 @@ public static class OsRoutines
         asm.Label(prefix + "_d");
     }
 
+    // ===== EmitExitBody ======================================================
     // exit_body: tear down the running process (entry in EBX, ExitStatus already set).
     // Frees its memory, then resolves who collects its status:
     //   - a parent currently blocked in wait() on this PID -> deliver status, wake it,
@@ -1070,6 +1088,7 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
+    // ===== EmitWait ==========================================================
     // IvtWait: block the caller until child PID (in EAX) terminates. If that child is
     // already a zombie, reap it and return its status immediately; otherwise mark the
     // caller Blocked on ChildProcess and switch away — exit_body wakes it later.
@@ -1121,6 +1140,7 @@ public static class OsRoutines
         asm.Jmp("resume_mlfq");
     }
 
+    // ===== EmitSyscall =======================================================
     // IvtSyscall: the shared IN/OUT syscall handler. Entered (not dispatched) by
     // EnterKernel, which leaves interrupts enabled (the handler is preemptible) and sets
     // EBP = this process's trap-frame base. The frame, on the process's kernel stack,
@@ -1160,6 +1180,7 @@ public static class OsRoutines
 
     // ---- buddy allocator ---------------------------------------------------
 
+    // ===== EmitBuddyAlloc ====================================================
     // BuddyAlloc: allocate memory for the staged process-table entry (address in EAX).
     // Reads entry.TotalSize, walks the buddy tree to find the smallest free block that
     // fits, splits ancestors as needed, records the base address in entry.ProgramAddress.
@@ -1184,6 +1205,7 @@ public static class OsRoutines
         asm.OsRet(R(EAX));
     }
 
+    // ===== EmitAllocSub ======================================================
     // alloc_sub: the buddy allocator as a CALL/RET subroutine. Expects EBX = entry;
     // finds the smallest free block fitting entry.TotalSize, splits ancestors as
     // needed, and records the base in entry.ProgramAddress (or -1 if none fits).
@@ -1327,6 +1349,7 @@ public static class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitDiskLoad ======================================================
     // DiskLoad: copy a process's program image from its disk slot into the RAM the
     // allocator reserved for it. Entered (via IvtDiskLoad) with the process-table
     // entry address in EAX, after a successful IvtAllocate set ProgramAddress. Keeps
@@ -1342,6 +1365,7 @@ public static class OsRoutines
         asm.OsRet(R(EAX));
     }
 
+    // ===== EmitSpawn =========================================================
     // IvtSpawn: create a process from scratch (boot creation). Entered with the
     // process-table entry address in EAX; the host pre-seeds ProgramSize,
     // RequiredMemory, RequiredStackSize, TotalSize and DiskSlot. Allocates the region,
@@ -1397,6 +1421,7 @@ public static class OsRoutines
         asm.OsRet(R(EAX));
     }
 
+    // ===== EmitFork ==========================================================
     // IvtFork: duplicate the running (parent) process. Entered via a user FORK trap.
     // Creates a child in a free slot: copies the parent's sizing fields, buddy-allocs
     // the child's region, ISA-memcpys the parent's RAM into it, copies the parent's
@@ -1580,6 +1605,7 @@ public static class OsRoutines
         asm.Jmp("fk_resume");
     }
 
+    // ===== EmitExec ==========================================================
     // IvtExec: replace the running process's image with the program in the disk slot
     // delivered in EAX. Frees the old region, reallocates for the new program's size,
     // DREADs the new image plus the (disk-staged) kernel image, resets the register file
@@ -1684,6 +1710,7 @@ public static class OsRoutines
     private const int StdIn  = Hardware.StdIn;
     private const int StdOut = Hardware.StdOut;
 
+    // ===== ForkCopyField (helper) ============================================
     // Copies one 4-byte field from the source entry to the destination entry.
     private static void ForkCopyField(Assembler asm, byte srcEntry, byte dstEntry, int fieldOffset)
     {
@@ -1691,6 +1718,7 @@ public static class OsRoutines
         StoreFieldReg(asm, dstEntry, fieldOffset, R10);
     }
 
+    // ===== EmitBuddyFree =====================================================
     // BuddyFree: mark the terminated process's memory block as free in the buddy tree
     // and merge with its buddy recursively while the buddy is also free. Expects
     // EBX = process-table entry (already marked Terminated). Ends with Jmp("resume_mlfq").
@@ -1802,6 +1830,7 @@ public static class OsRoutines
     // Scratch registers clobbered: EAX, EBP, R14, R15.
     // After EmitReadBit: ZF is set if the bit is 0 (node NOT free).
 
+    // ===== EmitComputeBitAddress (helper) ====================================
     // Computes word_addr → EBP, mask (1 << bit_in_word) → R15, bit_in_word → EAX.
     // Clobbers EAX, EBP, R14, R15.
     private static void EmitComputeBitAddress(Assembler asm, byte nodeReg)
@@ -1832,6 +1861,7 @@ public static class OsRoutines
         asm.Shl(R(R15), R(EAX));                          // R15 = mask
     }
 
+    // ===== EmitReadBit =======================================================
     // ReadBit: ZF set if bit(nodeReg) == 0. Clobbers EAX, EBP, R14, R15.
     private static void EmitReadBit(Assembler asm, byte nodeReg)
     {
@@ -1840,6 +1870,7 @@ public static class OsRoutines
         asm.And(R(R14), R(R15));                           // R14 &= mask; ZF set if bit=0
     }
 
+    // ===== EmitSetBit ========================================================
     // SetBit: set bit(nodeReg) = 1 (mark free). Clobbers EAX, EBP, R14, R15.
     private static void EmitSetBit(Assembler asm, byte nodeReg)
     {
@@ -1849,6 +1880,7 @@ public static class OsRoutines
         asm.Store(R(EBP), R(R14));
     }
 
+    // ===== EmitClearBit ======================================================
     // ClearBit: set bit(nodeReg) = 0 (mark used). Clobbers EAX, EBP, R14, R15.
     private static void EmitClearBit(Assembler asm, byte nodeReg)
     {
@@ -1861,12 +1893,14 @@ public static class OsRoutines
 
     // ---- wake routines (unchanged) ----------------------------------------
 
+    // ===== EmitWakeEntry =====================================================
     private static void EmitWakeEntry(Assembler asm, int reason)
     {
         asm.MovImm(R(EBP), reason);
         asm.Jmp("wk_body");
     }
 
+    // ===== EmitWakeBody ======================================================
     private static void EmitWakeBody(Assembler asm)
     {
         asm.Label("wk_body");
@@ -1904,6 +1938,7 @@ public static class OsRoutines
 
     // ---- MLFQ scheduler tail (unchanged) -----------------------------------
 
+    // ===== EmitResumeMlfq ====================================================
     private static void EmitResumeMlfq(Assembler asm)
     {
         asm.Label("resume_mlfq");
@@ -1969,6 +2004,7 @@ public static class OsRoutines
 
     // ---- emit helpers -------------------------------------------------------
 
+    // ===== Emit Helpers (R, Imm16, EntryAddress, LoadField, StoreField, etc.) =
     private static RegisterName R(byte index) { return (RegisterName)index; }
 
     private static void Imm16(Assembler asm, byte dest, int value)
