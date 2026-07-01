@@ -377,6 +377,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-06-30 | OUTS + INS string I/O: 18 files modified, 2 new tests, option 12 demo | ~35K (inline) | Resumed from context summary; full implementation in one session |
 | 2026-06-30 | Process tree panel + option 11 spawn demo | ~22K (inline) | ProcessRow Pid/ParentPid, BuildProcessTree, SpawnChildren (3 children), WAIT-clobbers-EAX bug found via OsRoutines read |
 | 2026-06-30 | INK + INPOLL raw key input: IvtSlotCount 16→17, WaitReason.KeyInput=5, 3 new syscall tests, 5 revised arrow-key tests | ~20K (inline) | CodeBase 64→68; arrow keys route to process when running, scrub history when paused |
+| 2026-06-30 | Key routing fix + F1 passthrough toggle: command keys (a/s/o/q) no longer leak to process; F1 toggles full keyboard passthrough to process buffer | ~10K (inline) | Resumed from context summary; 6 new passthrough tests; 506 total. PR merged to master. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 
