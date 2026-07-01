@@ -30,11 +30,13 @@ public sealed class InteractionController
     private readonly Action toggleIo;
     private readonly Action cycleFocus;
     private readonly Action<int> submitInput;
+    private readonly Action<string>? submitStringInput;
     private bool paused;
     private string inputLine = "";
 
     public InteractionController(FrameHistory frames, bool interactive, int delayMs,
-        Action toggleIo, Action cycleFocus, Action<int> submitInput)
+        Action toggleIo, Action cycleFocus, Action<int> submitInput,
+        Action<string>? submitStringInput = null)
     {
         this.frames = frames;
         this.interactive = interactive;
@@ -42,6 +44,7 @@ public sealed class InteractionController
         this.toggleIo = toggleIo;
         this.cycleFocus = cycleFocus;
         this.submitInput = submitInput;
+        this.submitStringInput = submitStringInput;
     }
 
     public bool Paused
@@ -83,12 +86,17 @@ public sealed class InteractionController
         }
         if (key.Key == ConsoleKey.Enter)
         {
-            // Submit the accumulated number to the focused process, if any.
+            // Submit the accumulated input to the focused process: as an integer if all
+            // digits, otherwise as a string line (for processes waiting on INS).
             if (inputLine.Length > 0)
             {
                 if (int.TryParse(inputLine, out int value))
                 {
                     submitInput(value);
+                }
+                else
+                {
+                    submitStringInput?.Invoke(inputLine);
                 }
                 inputLine = "";
             }
@@ -102,32 +110,37 @@ public sealed class InteractionController
             }
             return StepAction.Redraw;
         }
-        if (key.KeyChar >= '0' && key.KeyChar <= '9')
+        // Printable characters: digits always extend the input line; letters and other
+        // printable chars also extend it. Command shortcuts (a/s/o/q) only activate when
+        // the input line is empty, so typing text doesn't accidentally trigger them.
+        if (key.KeyChar >= ' ' && key.KeyChar <= '~')
         {
+            char lower = char.ToLowerInvariant(key.KeyChar);
+            if (inputLine.Length == 0)
+            {
+                if (lower == 'a')
+                {
+                    paused = false;
+                    frames.JumpToLiveEdge();
+                    return StepAction.Redraw;
+                }
+                if (lower == 's')
+                {
+                    paused = true;
+                    return StepAction.Redraw;
+                }
+                if (lower == 'o')
+                {
+                    toggleIo();
+                    return StepAction.Redraw;
+                }
+                if (lower == 'q')
+                {
+                    return StepAction.Quit;
+                }
+            }
             inputLine += key.KeyChar;
             return StepAction.Redraw;
-        }
-
-        char c = char.ToLowerInvariant(key.KeyChar);
-        if (c == 'a')
-        {
-            paused = false;
-            frames.JumpToLiveEdge();
-            return StepAction.Redraw;
-        }
-        if (c == 's')
-        {
-            paused = true;
-            return StepAction.Redraw;
-        }
-        if (c == 'o')
-        {
-            toggleIo();
-            return StepAction.Redraw;
-        }
-        if (c == 'q')
-        {
-            return StepAction.Quit;
         }
         return StepAction.Redraw;
     }

@@ -32,6 +32,8 @@ StagedProgram counter = new StagedProgram("counter", Programs.CounterToTen(), Re
 StagedProgram average = new StagedProgram("average", Programs.AverageOfList(), RequiredMemory, RequiredStackSize);
 StagedProgram guess = new StagedProgram("guess", Programs.GuessingGame(), RequiredMemory, RequiredStackSize);
 StagedProgram spawn = new StagedProgram("spawner", Programs.SpawnChildren(), RequiredMemory, RequiredStackSize);
+(byte[] stringsImage, int stringsMemory) = Programs.StringsDemo();
+StagedProgram strings = new StagedProgram("strings", stringsImage, stringsMemory, RequiredStackSize);
 
 // Short, non-interactive, self-terminating jobs of varied lifetimes, used by the
 // churn modes to keep the buddy allocator / memory map busy. The churn loop assigns
@@ -61,9 +63,10 @@ while (true)
     Console.WriteLine("  9) Shell (interactive: type a command id to fork/exec a program — fork/exec/wait/setfocus)");
     Console.WriteLine(" 10) Two guessing games (Tab to switch focus, test process switching)");
     Console.WriteLine(" 11) Spawn tree (parent forks two children — watch parent-child tree in Process tree panel)");
+    Console.WriteLine(" 12) String I/O demo (type a name in the Screen panel, press Enter — OUTS/INS in action)");
     Console.WriteLine("  q) Quit");
     Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows scrub history, 'o' toggle program I/O, 'q' quit run)");
-    Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, digits + Enter send it a number)");
+    Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, type text + Enter sends it as int or string)");
     Console.Write("Select: ");
 
     string? choice = Console.ReadLine();
@@ -156,6 +159,13 @@ while (true)
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
             RunShared(new List<StagedProgram> { spawn }, mode, detail);
+            break;
+        }
+        case "12":
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunShared(new List<StagedProgram> { strings }, mode, detail);
             break;
         }
         default:

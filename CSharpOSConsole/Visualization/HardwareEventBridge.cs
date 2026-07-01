@@ -114,7 +114,14 @@ public sealed class HardwareEventBridge
         model.OutputCount++;
         // Append to the producing process's own screen buffer (the shared screen shows
         // the focused one). Also mirror into the OS/kernel stream when I/O display is on.
-        model.RecordOutput(e.SourceProcess, e.Value);
+        if (e.StringValue != null)
+        {
+            model.RecordOutput(e.SourceProcess, e.StringValue);
+        }
+        else
+        {
+            model.RecordOutput(e.SourceProcess, e.Value);
+        }
         if (model.ShowProgramIo)
         {
             renderer.ProgramOutput(e.Value);

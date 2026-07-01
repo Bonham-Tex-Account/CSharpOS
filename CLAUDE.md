@@ -101,6 +101,8 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x44 | DREAD | DRead | b1=dest, b2=slot, b3=lenOut; privileged (User→trap) |
 | 0x45 | DWRITE | DWrite | b1=slot, b2=src, b3=len; privileged (User→trap) |
 | 0x46 | DLEN | DLen | b1=slot, b2=lenOut; privileged (User→trap) |
+| 0x47 | OUTS | Outs | b1=ptr-reg (virt addr), b2=len-reg; reads len words→low byte as char→string output; stops at null word; User→EnterKernel(OUTS, b1*4, b2*4) |
+| 0x48 | INS | Ins | b1=ptr-reg (virt addr), b2=maxLen-reg; blocks WaitReason.StringInput; writes chars as words + null; User→EnterKernel(INS, b1*4, b2*4) |
 
 ---
 
@@ -317,6 +319,7 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | Input | 1 | Waiting on `IN` (stdin buffered by device) |
 | Output | 2 | Waiting on `OUT` (output device busy) |
 | ChildProcess | 3 | Blocked in `WAIT(pid)` for a child to terminate |
+| StringInput | 4 | Waiting on `INS` (string line on stdin string queue) |
 
 ### PrivilegeLevel
 | Value | Numeric |
@@ -358,6 +361,8 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-06-29 | Build all CLAUDE.md reference files | ~143K (fork) | Cold scan of full source; one-time cost |
 | 2026-06-29 | Add section markers to OsRoutines/Hardware/InstructionFunctions/SpectreDashboard | ~115K (fork) | 71 markers across 4 files; CLAUDE.md tables updated with line numbers |
 | 2026-06-30 | Visualizer fixes: run loop, termination display, process state refresh | ~18K (inline) | 6 targeted reads (sections by line offset); no full-file scans needed |
+| 2026-06-30 | OUTS + INS string I/O: 18 files modified, 2 new tests, option 12 demo | ~35K (inline) | Resumed from context summary; full implementation in one session |
+| 2026-06-30 | Process tree panel + option 11 spawn demo | ~22K (inline) | ProcessRow Pid/ParentPid, BuildProcessTree, SpawnChildren (3 children), WAIT-clobbers-EAX bug found via OsRoutines read |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

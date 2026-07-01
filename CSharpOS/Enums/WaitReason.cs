@@ -9,5 +9,7 @@ public enum WaitReason
     Input,
     Output,
     /// <summary>Blocked in wait(pid), waiting for a child process to terminate.</summary>
-    ChildProcess
+    ChildProcess,
+    /// <summary>Blocked in INS, waiting for a string line on stdin.</summary>
+    StringInput
 }

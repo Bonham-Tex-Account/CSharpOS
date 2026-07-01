@@ -67,6 +67,13 @@ public static class Instruction
     // Disk slot content length (used by EXEC to size the new image's allocation).
     public const byte DLEN        = 0x46;
 
+    // ---- string I/O ----------------------------------------------------------
+    // OUTS [ptr], len — read len words from virtual ptr, output low byte of each
+    // as a string. INS [ptr], maxLen — block on stdin until a line arrives, then
+    // write each char as a zero-extended word into ptr[0..len-1], null-terminate.
+    public const byte OUTS        = 0x47;
+    public const byte INS         = 0x48;
+
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
@@ -114,6 +121,8 @@ public static class Instruction
         opcodeTable[WAIT]        = InstructionFunctions.Wait;
         opcodeTable[EXIT]        = InstructionFunctions.Exit;
         opcodeTable[SETFOCUS]    = InstructionFunctions.SetFocus;
+        opcodeTable[OUTS]        = InstructionFunctions.Outs;
+        opcodeTable[INS]         = InstructionFunctions.Ins;
     }
 
     // ---- integral functions ----------------------------------------------

@@ -89,6 +89,8 @@ public class DisassemblerTests
         Assert.Equal("IRET", Disassembler.Decode(Instruction.IRET, 0, 0, 0));
         Assert.Equal("OUT EAX", Disassembler.Decode(Instruction.OUT, Idx(RegisterName.EAX), 0, 0));
         Assert.Equal("IN EAX", Disassembler.Decode(Instruction.IN, Idx(RegisterName.EAX), 0, 0));
+        Assert.Equal("OUTS [EAX], ECX", Disassembler.Decode(Instruction.OUTS, Idx(RegisterName.EAX), Idx(RegisterName.ECX), 0));
+        Assert.Equal("INS [EAX], ECX", Disassembler.Decode(Instruction.INS, Idx(RegisterName.EAX), Idx(RegisterName.ECX), 0));
     }
 
     [Fact]

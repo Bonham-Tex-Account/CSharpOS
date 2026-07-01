@@ -46,6 +46,8 @@ public static class Disassembler
             case Instruction.RET:           return "RET";
             case Instruction.OUT:           return $"OUT {Reg(b1)}";
             case Instruction.IN:            return $"IN {Reg(b1)}";
+            case Instruction.OUTS:          return $"OUTS [{Reg(b1)}], {Reg(b2)}";
+            case Instruction.INS:           return $"INS [{Reg(b1)}], {Reg(b2)}";
             case Instruction.HLT:           return "HLT";
             case Instruction.IRET:          return "IRET";
             case Instruction.SAVEREGS:      return $"SAVEREGS [{Reg(b1)}]";

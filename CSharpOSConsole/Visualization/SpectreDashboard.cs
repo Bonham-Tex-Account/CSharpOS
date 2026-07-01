@@ -61,7 +61,7 @@ public sealed class SpectreDashboard
         // is inert (non-interactive, no delay).
         Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
         bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer, detail);
-        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput);
+        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput);
 
         // The dashboard owns the single shared screen, so it also drives output
         // completion: the console transfers instantly, so each OUT is acknowledged at
@@ -83,6 +83,12 @@ public sealed class SpectreDashboard
     private void SubmitInput(int value)
     {
         hw.RaiseInputInterrupt(value);
+    }
+
+    // Submits a typed string to the focused process's stdin string buffer.
+    private void SubmitStringInput(string value)
+    {
+        hw.RaiseStringInputInterrupt(value);
     }
 
     // Tab: move focus to the next live process (wrapping).
@@ -789,7 +795,7 @@ public sealed class SpectreDashboard
             lines.Add(new Markup($"[aqua]▶ P{model.FocusedProcess}[/] [grey]{name}[/]  [grey](Tab switches)[/]"));
         }
 
-        IReadOnlyList<int> outputs = model.FocusedOutput();
+        IReadOnlyList<string> outputs = model.FocusedOutput();
         if (outputs.Count == 0)
         {
             lines.Add(new Markup("[grey39](no output yet)[/]"));
@@ -800,7 +806,7 @@ public sealed class SpectreDashboard
             List<string> shown = new List<string>();
             for (int i = skip; i < outputs.Count; i++)
             {
-                shown.Add(outputs[i].ToString());
+                shown.Add(outputs[i]);
             }
             lines.Add(new Markup("[grey85]" + Markup.Escape(string.Join("  ", shown)) + "[/]"));
         }
