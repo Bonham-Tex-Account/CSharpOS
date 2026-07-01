@@ -24,7 +24,8 @@
       "Bash(cp -r \"C:\\\\Users\\\\Tex\\\\.claude\\\\projects\\\\C--Users-Tex-OneDrive-Documents-VisualStudio2026-CSharpOS\\\\memory\" \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\ClaudeConfig\\\\memory-CSharpOS\")",
       "Bash(gh auth *)",
       "PowerShell(gh auth *)",
-      "PowerShell(Get-Command *)"
+      "PowerShell(Get-Command *)",
+      "PowerShell(cd \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\VisualStudio2026\\\\CSharpOS\" && dotnet build OSTests 2>&1 | Where-Object { $_ -notmatch \"^  Determining|^  All projects|->|^  CSharp|^  Basic|^Build succeeded\" } | Select-Object -First 10)"
     ]
   }
 }

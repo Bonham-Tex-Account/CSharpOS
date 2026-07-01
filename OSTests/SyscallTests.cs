@@ -531,4 +531,80 @@ public class SyscallTests : IDisposable
         Assert.Equal(111, outBySource[0]); // P0 delivered its own value
         Assert.Equal(222, outBySource[1]); // P1 delivered its own value
     }
+
+    // ---- Raw key I/O (INK / INPOLL) ----------------------------------------
+
+    [Fact]
+    public void InkSyscall_BlocksWhenEmpty_ThenDeliversKeycode()
+    {
+        // Program: INK EAX; OUT EAX; HLT
+        // Blocks until a key interrupt arrives, then outputs the keycode.
+        Assembler asm = new Assembler();
+        asm.Ink(RegisterName.EAX);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
+        int? received = null;
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { received = e.Value; hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 64, 64));
+
+        RunSteps(os, hw, 4000);
+
+        Assert.True(os.HasProcesses);       // blocked on key input
+        Assert.False(os.HasRunningProcess);
+        Assert.Null(received);
+
+        hw.RaiseKeyInterrupt(Hardware.KeyUp);
+        RunSteps(os, hw, 4000);
+
+        Assert.False(os.HasProcesses);
+        Assert.Equal(Hardware.KeyUp, received);
+    }
+
+    [Fact]
+    public void InkPollSyscall_ReturnsMinusOneWhenEmpty()
+    {
+        // Program: INPOLL EAX; OUT EAX; HLT
+        // Non-blocking: with no key queued, EAX gets -1 immediately.
+        Assembler asm = new Assembler();
+        asm.InkPoll(RegisterName.EAX);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
+        int? received = null;
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { received = e.Value; hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 64, 64));
+
+        RunSteps(os, hw, 4000);
+
+        Assert.False(os.HasProcesses); // ran to completion (did not block)
+        Assert.Equal(-1, received);
+    }
+
+    [Fact]
+    public void InkPollSyscall_ReturnsKeyWhenAvailable()
+    {
+        // Program: INPOLL EAX; OUT EAX; HLT
+        // With a key already queued, INPOLL returns it immediately without blocking.
+        Assembler asm = new Assembler();
+        asm.InkPoll(RegisterName.EAX);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
+        int? received = null;
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { received = e.Value; hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(asm.Build()), 64, 64));
+
+        hw.RaiseKeyInterrupt(Hardware.KeyDown); // queue a key before the process runs
+        RunSteps(os, hw, 4000);
+
+        Assert.False(os.HasProcesses); // ran to completion without blocking
+        Assert.Equal(Hardware.KeyDown, received);
+    }
 }

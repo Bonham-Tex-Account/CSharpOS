@@ -103,12 +103,14 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x46 | DLEN | DLen | b1=slot, b2=lenOut; privileged (User→trap) |
 | 0x47 | OUTS | Outs | b1=ptr-reg (virt addr), b2=len-reg; reads len words→low byte as char→string output; stops at null word; User→EnterKernel(OUTS, b1*4, b2*4) |
 | 0x48 | INS | Ins | b1=ptr-reg (virt addr), b2=maxLen-reg; blocks WaitReason.StringInput; writes chars as words + null; User→EnterKernel(INS, b1*4, b2*4) |
+| 0x49 | INK | Ink | b1=dst; block until raw keypress; delivers keycode; WaitReason.KeyInput; User→EnterKernel(INK, b1*4, 0) |
+| 0x4A | INPOLL | InkPoll | b1=dst; non-blocking; delivers keycode or -1 if empty; never blocks; User→EnterKernel(INPOLL, b1*4, 0) |
 
 ---
 
 ## IVT Slot Table
 
-`IvtSlotCount=16`, `IvtSize=64`, `CodeBase=64`
+`IvtSlotCount=17`, `IvtSize=68`, `CodeBase=68`
 
 | Slot | Constant | C# addr field | Emit Method | Purpose |
 |------|----------|--------------|-------------|---------|
@@ -117,7 +119,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 2 | IvtInvalidInstruction | — | EmitInvalidInstruction | Fault → exit_body (status -1) |
 | 3 | IvtWakeInput | — | EmitWakeEntry(Input) | Wake first process waiting on input device |
 | 4 | IvtWakeOutput | — | EmitWakeEntry(Output) | Wake process after output completes |
-| 5 | IvtBlockInput | — | EmitBlock | Block current process on input |
+| 5 | IvtBlockInput | — | EmitBlock | Block current process on input/string/key (shared) |
 | 6 | IvtBlockOutput | — | EmitBlock | Block current process on output |
 | 7 | IvtSchedule | — | EmitSchedule | Pick next Ready process → resume_mlfq |
 | 8 | IvtAllocate | — | EmitBuddyAlloc | Buddy-alloc for staged entry (EAX=entry addr) |
@@ -126,10 +128,11 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 11 | IvtExec | — | EmitExec | Replace image; EAX=slot; resolve_cow+free+realloc |
 | 12 | IvtWait | — | EmitWait | Block until child PID terminates; EAX=pid |
 | 13 | IvtSpawn | — | EmitSpawn | Alloc+DREAD+seed regs (boot path) |
-| 14 | IvtSyscall | — | EmitSyscall | Shared IN/OUT handler (preemptible, Kernel mode) |
+| 14 | IvtSyscall | — | EmitSyscall | Shared IN/OUT/INK/INPOLL handler (preemptible, Kernel mode) |
 | 15 | IvtPageFault | — | EmitPageFault | Demand fault-in + COW-write resolve; EAX=page |
+| 16 | IvtWakeKey | — | EmitWakeEntry(KeyInput) | Wake first process waiting for a raw keypress |
 
-Slots 5+6 both point to the same `EmitBlock` routine. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled).
+Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled).
 
 ---
 
@@ -300,6 +303,15 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | BuddyDefaultMinBlock | 256 |
 | MaxProcesses | 8 |
 
+### Raw Key Codes (INK / INPOLL)
+ASCII 32–126 delivered as-is. Special keys use values above the ASCII range:
+| Constant | Value |
+|----------|-------|
+| Hardware.KeyUp | 256 |
+| Hardware.KeyDown | 257 |
+| Hardware.KeyLeft | 258 |
+| Hardware.KeyRight | 259 |
+
 ---
 
 ## Enums
@@ -320,6 +332,7 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | Output | 2 | Waiting on `OUT` (output device busy) |
 | ChildProcess | 3 | Blocked in `WAIT(pid)` for a child to terminate |
 | StringInput | 4 | Waiting on `INS` (string line on stdin string queue) |
+| KeyInput | 5 | Waiting on `INK` (raw keypress on stdin key queue) |
 
 ### PrivilegeLevel
 | Value | Numeric |
@@ -363,6 +376,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-06-30 | Visualizer fixes: run loop, termination display, process state refresh | ~18K (inline) | 6 targeted reads (sections by line offset); no full-file scans needed |
 | 2026-06-30 | OUTS + INS string I/O: 18 files modified, 2 new tests, option 12 demo | ~35K (inline) | Resumed from context summary; full implementation in one session |
 | 2026-06-30 | Process tree panel + option 11 spawn demo | ~22K (inline) | ProcessRow Pid/ParentPid, BuildProcessTree, SpawnChildren (3 children), WAIT-clobbers-EAX bug found via OsRoutines read |
+| 2026-06-30 | INK + INPOLL raw key input: IvtSlotCount 16→17, WaitReason.KeyInput=5, 3 new syscall tests, 5 revised arrow-key tests | ~20K (inline) | CodeBase 64→68; arrow keys route to process when running, scrub history when paused |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

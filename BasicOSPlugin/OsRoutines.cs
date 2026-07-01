@@ -43,7 +43,9 @@ public static class OsRoutines
     private const int WaitNone        = (int)WaitReason.None;
     private const int WaitChild       = (int)WaitReason.ChildProcess;
     private const int WaitInput       = (int)WaitReason.Input;
+    private const int WaitOutput      = (int)WaitReason.Output;
     private const int WaitStringInput = (int)WaitReason.StringInput;
+    private const int WaitKeyInput    = (int)WaitReason.KeyInput;
     private const int User       = (int)PrivilegeLevel.User;
     private const int EntrySize  = Hardware.ProcessEntrySize;
 
@@ -60,8 +62,9 @@ public static class OsRoutines
         int contextSwitch = OsLayout.CodeBase + asm.CodeLength; EmitContextSwitch(asm);
         int schedule      = OsLayout.CodeBase + asm.CodeLength; EmitSchedule(asm);
         int block         = OsLayout.CodeBase + asm.CodeLength; EmitBlock(asm);
-        int wakeInput     = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, (int)WaitReason.Input);
-        int wakeOutput    = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, (int)WaitReason.Output);
+        int wakeInput     = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, WaitInput);
+        int wakeOutput    = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, WaitOutput);
+        int wakeKey       = OsLayout.CodeBase + asm.CodeLength; EmitWakeEntry(asm, WaitKeyInput);
         EmitWakeBody(asm);
         int halt          = OsLayout.CodeBase + asm.CodeLength; EmitHalt(asm);
         int invalid       = OsLayout.CodeBase + asm.CodeLength; EmitInvalidInstruction(asm);
@@ -100,6 +103,7 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtBlockOutput * 4,        block);
         WriteWord(image, Hardware.IvtWakeInput * 4,          wakeInput);
         WriteWord(image, Hardware.IvtWakeOutput * 4,         wakeOutput);
+        WriteWord(image, Hardware.IvtWakeKey * 4,            wakeKey);
         WriteWord(image, Hardware.IvtHalt * 4,               halt);
         WriteWord(image, Hardware.IvtInvalidInstruction * 4, invalid);
         WriteWord(image, Hardware.IvtAllocate * 4,           allocate);
@@ -1173,6 +1177,12 @@ public static class OsRoutines
         asm.MovImm(R(EDX), Instruction.INS);
         asm.Cmp(R(EBX), R(EDX));
         asm.Jz("syscall_ins");
+        asm.MovImm(R(EDX), Instruction.INK);
+        asm.Cmp(R(EBX), R(EDX));
+        asm.Jz("syscall_ink");
+        asm.MovImm(R(EDX), Instruction.INPOLL);
+        asm.Cmp(R(EBX), R(EDX));
+        asm.Jz("syscall_inpoll");
         asm.Iret();                               // unknown cause — return (should not happen)
 
         asm.Label("syscall_out");
@@ -1205,6 +1215,18 @@ public static class OsRoutines
         asm.Add(R(EAX), R(EBP));
         asm.Load(R(EDX), R(EAX));                 // EDX = maxLen value
         asm.Ins(R(ESI), R(EDX));                  // kernel-level string input (blocks if empty)
+        asm.Iret();
+
+        // INK: block until a raw keypress; write keycode to the caller's save-area slot.
+        asm.Label("syscall_ink");
+        asm.Ink(R(ESI));                           // kernel-level key read (blocks if empty)
+        asm.Store(R(ECX), R(ESI));                 // write keycode to save-area slot
+        asm.Iret();
+
+        // INPOLL: non-blocking key read; write keycode (or -1) to the caller's save-area slot.
+        asm.Label("syscall_inpoll");
+        asm.InkPoll(R(ESI));                       // non-blocking; ESI = keycode or -1
+        asm.Store(R(ECX), R(ESI));
         asm.Iret();
     }
 

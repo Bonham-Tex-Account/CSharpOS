@@ -103,8 +103,17 @@ public partial class Hardware
     // Demand-paging fault handler (Phase 2): dispatched by the MMU when a user data
     // access touches a non-resident page; makes the page resident, then resumes.
     public const int IvtPageFault          = 15;
-    public const int IvtSlotCount          = 16;
+    public const int IvtWakeKey            = 16;
+    public const int IvtSlotCount          = 17;
     public const int IvtSize               = IvtSlotCount * 4;
+
+    // ---- raw keycode constants (for INK / INPOLL) -------------------------
+    // Printable ASCII (32–126) is delivered as-is. Special keys use values above
+    // the ASCII range so programs can distinguish them from printable characters.
+    public const int KeyUp    = 256;
+    public const int KeyDown  = 257;
+    public const int KeyLeft  = 258;
+    public const int KeyRight = 259;
 
     // ---- public events ---------------------------------------------------
     public event EventHandler<InstructionExecutedArgs>? InstructionExecuted;
@@ -716,6 +725,21 @@ public partial class Hardware
         return processIndex;
     }
 
+    private static void AddKeyWaiter(Device device, int processIndex)
+    {
+        if (!device.KeyWaiters.Contains(processIndex))
+        {
+            device.KeyWaiters.Add(processIndex);
+        }
+    }
+
+    private static int NextKeyWaiter(Device device)
+    {
+        int processIndex = device.KeyWaiters[0];
+        device.KeyWaiters.RemoveAt(0);
+        return processIndex;
+    }
+
     // ===== Word Memory Helpers (ReadWord, WriteWord, WriteWordRaw) ===========
     private int ReadWord(int address)
     {
@@ -1015,6 +1039,15 @@ public partial class Hardware
                 DispatchOsRoutine(IvtWakeInput, NextStringInputWaiter(device));
             }
         }
+        else if (interrupt.Kind == InterruptKind.KeyInputReady)
+        {
+            device.KeyInput.Enqueue(interrupt.Value);
+            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.KeyInput, Value = interrupt.Value, Device = interrupt.Device });
+            if (device.KeyWaiters.Count > 0)
+            {
+                DispatchOsRoutine(IvtWakeKey, NextKeyWaiter(device));
+            }
+        }
         else
         {
             device.OutputBusy = false;
@@ -1034,7 +1067,7 @@ public partial class Hardware
         {
             ProcessBlocked?.Invoke(this, new ProcessBlockedArgs { Reason = reason });
             int slot;
-            if (reason == WaitReason.Input || reason == WaitReason.StringInput)
+            if (reason == WaitReason.Input || reason == WaitReason.StringInput || reason == WaitReason.KeyInput)
             {
                 slot = IvtBlockInput;
             }
@@ -1642,5 +1675,45 @@ public partial class Hardware
     public void RaiseStringInputInterrupt(string value, int deviceId)
     {
         pendingInterrupts.Enqueue(new Interrupt(InterruptKind.StringInputReady, value, deviceId));
+    }
+
+    // Kernel-mode raw key input: dequeue a keycode from stdin's key buffer, or block
+    // the process until a key arrives (INK re-runs on resume).
+    public void KernelInputKey(byte register)
+    {
+        int deviceId = FdDevice(StdIn);
+        Device device = DeviceFor(deviceId);
+        if (device.KeyInput.Count == 0)
+        {
+            AddKeyWaiter(device, CurrentDeviceId());
+            BlockCurrent(WaitReason.KeyInput);
+            return;
+        }
+        WriteRegisterAt(register, device.KeyInput.Dequeue());
+    }
+
+    // Kernel-mode non-blocking key poll: dequeue a keycode if available, else write -1.
+    public void KernelInputKeyPoll(byte register)
+    {
+        int deviceId = FdDevice(StdIn);
+        Device device = DeviceFor(deviceId);
+        if (device.KeyInput.Count == 0)
+        {
+            WriteRegisterAt(register, -1);
+            return;
+        }
+        WriteRegisterAt(register, device.KeyInput.Dequeue());
+    }
+
+    // Raises a raw key interrupt for the focused process's stdin device.
+    public void RaiseKeyInterrupt(int keyCode)
+    {
+        RaiseKeyInterrupt(keyCode, FocusedInputDevice());
+    }
+
+    // Raises a raw key interrupt for a specific device.
+    public void RaiseKeyInterrupt(int keyCode, int deviceId)
+    {
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.KeyInputReady, keyCode, deviceId));
     }
 }

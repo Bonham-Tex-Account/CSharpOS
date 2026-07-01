@@ -113,10 +113,21 @@ public class FrameHistoryTests
         return (controller, frames);
     }
 
+    private static (InteractionController Controller, FrameHistory Frames) NewControllerWithKeyCapture(List<int> keyLog)
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        frames.Capture(ModelAtStep(2));
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { }, submitStringInput: null, submitKey: k => keyLog.Add(k));
+        return (controller, frames);
+    }
+
     [Fact]
-    public void LeftArrow_PausesAndStepsBack_RequestingRedraw()
+    public void LeftArrow_WhenPaused_StepsBack_RequestingRedraw()
     {
         (InteractionController controller, FrameHistory frames) = NewController(0);
+        controller.HandleKey(Char('s')); // pause first
 
         StepAction action = controller.HandleKey(Key(ConsoleKey.LeftArrow));
 
@@ -126,9 +137,24 @@ public class FrameHistoryTests
     }
 
     [Fact]
-    public void RightArrow_AtLiveEdge_RequestsExecute()
+    public void LeftArrow_WhenRunning_SendsRawKeyAndRedraws()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory frames) = NewControllerWithKeyCapture(keys);
+
+        StepAction action = controller.HandleKey(Key(ConsoleKey.LeftArrow));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.False(controller.Paused);
+        Assert.True(frames.AtLiveEdge);          // no history movement
+        Assert.Equal(new List<int> { Hardware.KeyLeft }, keys);
+    }
+
+    [Fact]
+    public void RightArrow_WhenPaused_AtLiveEdge_RequestsExecute()
     {
         (InteractionController controller, FrameHistory frames) = NewController(0);
+        controller.HandleKey(Char('s')); // pause first
         // Already at live edge -> forward must advance the emulator.
         StepAction action = controller.HandleKey(Key(ConsoleKey.RightArrow));
 
@@ -137,9 +163,23 @@ public class FrameHistoryTests
     }
 
     [Fact]
-    public void RightArrow_WhenReviewingHistory_RedrawsForward()
+    public void RightArrow_WhenRunning_SendsRawKeyAndRedraws()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory frames) = NewControllerWithKeyCapture(keys);
+
+        StepAction action = controller.HandleKey(Key(ConsoleKey.RightArrow));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.False(controller.Paused);
+        Assert.Equal(new List<int> { Hardware.KeyRight }, keys);
+    }
+
+    [Fact]
+    public void RightArrow_WhenPaused_ReviewingHistory_RedrawsForward()
     {
         (InteractionController controller, FrameHistory frames) = NewController(0);
+        controller.HandleKey(Char('s'));               // pause
         controller.HandleKey(Key(ConsoleKey.LeftArrow)); // step into past
 
         StepAction action = controller.HandleKey(Key(ConsoleKey.RightArrow));
@@ -152,7 +192,8 @@ public class FrameHistoryTests
     public void AutoKey_ResumesAndJumpsToLiveEdge()
     {
         (InteractionController controller, FrameHistory frames) = NewController(0);
-        controller.HandleKey(Key(ConsoleKey.LeftArrow));
+        controller.HandleKey(Char('s'));               // pause
+        controller.HandleKey(Key(ConsoleKey.LeftArrow)); // step into past (now paused)
         Assert.True(controller.Paused);
 
         StepAction action = controller.HandleKey(Char('a'));
@@ -262,5 +303,102 @@ public class FrameHistoryTests
 
         Assert.Equal(StepAction.Redraw, action);
         Assert.Equal(1, cycles);
+    }
+
+    // ---- keyboard passthrough (F1 toggle) -------------------------------------
+
+    [Fact]
+    public void F1_TogglesKeyPassthrough_On()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory _) = NewControllerWithKeyCapture(keys);
+        Assert.False(controller.KeyPassthrough);
+
+        StepAction action = controller.HandleKey(Key(ConsoleKey.F1));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.True(controller.KeyPassthrough);
+        Assert.Empty(keys); // F1 itself never reaches the process
+    }
+
+    [Fact]
+    public void F1_TogglesKeyPassthrough_OffAgain()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory _) = NewControllerWithKeyCapture(keys);
+        controller.HandleKey(Key(ConsoleKey.F1)); // on
+        controller.HandleKey(Key(ConsoleKey.F1)); // off
+
+        Assert.False(controller.KeyPassthrough);
+        Assert.Empty(keys);
+    }
+
+    [Fact]
+    public void Passthrough_PrintableChar_ForwardsToProcess_SkipsCommandShortcut()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory _) = NewControllerWithKeyCapture(keys);
+        controller.HandleKey(Key(ConsoleKey.F1)); // enter passthrough
+
+        // 's' would normally pause; in passthrough it goes to process instead
+        StepAction action = controller.HandleKey(Char('s'));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.False(controller.Paused); // visualizer NOT paused
+        Assert.Equal(new List<int> { (int)'s' }, keys);
+    }
+
+    [Fact]
+    public void Passthrough_Arrows_AlwaysForwardToProcess_EvenWhenPaused()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory frames) = NewControllerWithKeyCapture(keys);
+        controller.HandleKey(Char('s')); // pause
+        controller.HandleKey(Key(ConsoleKey.F1)); // enter passthrough
+
+        controller.HandleKey(Key(ConsoleKey.LeftArrow));
+        controller.HandleKey(Key(ConsoleKey.RightArrow));
+        controller.HandleKey(Key(ConsoleKey.UpArrow));
+        controller.HandleKey(Key(ConsoleKey.DownArrow));
+
+        Assert.True(frames.AtLiveEdge); // no history scrubbing occurred
+        Assert.Equal(new List<int> { Hardware.KeyLeft, Hardware.KeyRight, Hardware.KeyUp, Hardware.KeyDown }, keys);
+    }
+
+    [Fact]
+    public void Passthrough_Enter_ForwardsOnly_DoesNotSubmitInputLine()
+    {
+        List<int> keys = new List<int>();
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        List<int> submitted = new List<int>();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { submitted.Add(value); }, submitStringInput: null,
+            submitKey: k => keys.Add(k));
+
+        controller.HandleKey(Char('4'));
+        controller.HandleKey(Char('2'));
+        controller.HandleKey(Key(ConsoleKey.F1)); // enter passthrough
+
+        controller.HandleKey(Key(ConsoleKey.Enter));
+
+        // '4' and '2' were forwarded via submitKey in normal mode; 13 (Enter) was
+        // forwarded in passthrough mode. submitInput was NOT called despite inputLine="42".
+        Assert.Equal(new List<int> { (int)'4', (int)'2', 13 }, keys);
+        Assert.Empty(submitted);
+        Assert.Equal("42", controller.InputLine);
+    }
+
+    [Fact]
+    public void Passthrough_QuitKey_DoesNotQuit()
+    {
+        List<int> keys = new List<int>();
+        (InteractionController controller, FrameHistory _) = NewControllerWithKeyCapture(keys);
+        controller.HandleKey(Key(ConsoleKey.F1)); // enter passthrough
+
+        StepAction action = controller.HandleKey(Char('q'));
+
+        Assert.Equal(StepAction.Redraw, action); // not Quit
+        Assert.Equal(new List<int> { (int)'q' }, keys);
     }
 }

@@ -325,6 +325,28 @@ internal static class InstructionFunctions
         hw.KernelInputString(hw.ReadRegisterAt(b1), hw.ReadRegisterAt(b2));
     }
 
+    // INK reg — block until a raw keypress arrives; delivers keycode to reg.
+    internal static void Ink(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.EnterKernel(Instruction.INK, b1 * 4, 0);
+            return;
+        }
+        hw.KernelInputKey(b1);
+    }
+
+    // INPOLL reg — non-blocking: delivers keycode to reg, or -1 if none queued.
+    internal static void InkPoll(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.EnterKernel(Instruction.INPOLL, b1 * 4, 0);
+            return;
+        }
+        hw.KernelInputKeyPoll(b1);
+    }
+
     // ===== OS Primitives (Hlt, Iret) =========================================
     internal static void Hlt(Hardware hw, byte b1, byte b2, byte b3)
     {

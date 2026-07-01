@@ -28,6 +28,8 @@ public class Device
     public List<int> Waiters;
     public Queue<string> StringInput;
     public List<int> StringWaiters;
+    public Queue<int> KeyInput;
+    public List<int> KeyWaiters;
     public bool OutputBusy;
     // Backing store for a block device (the disk's flat slot store); null for a
     // character device.
@@ -41,6 +43,8 @@ public class Device
         Waiters = new List<int>();
         StringInput = new Queue<string>();
         StringWaiters = new List<int>();
+        KeyInput = new Queue<int>();
+        KeyWaiters = new List<int>();
         OutputBusy = false;
         Block = null;
     }
@@ -54,6 +58,8 @@ public class Device
         Waiters = new List<int>();
         StringInput = new Queue<string>();
         StringWaiters = new List<int>();
+        KeyInput = new Queue<int>();
+        KeyWaiters = new List<int>();
         OutputBusy = false;
         Block = block;
     }
