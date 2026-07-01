@@ -31,6 +31,7 @@ RegisterName[] registers = Enum.GetValues<RegisterName>();
 StagedProgram counter = new StagedProgram("counter", Programs.CounterToTen(), RequiredMemory, RequiredStackSize);
 StagedProgram average = new StagedProgram("average", Programs.AverageOfList(), RequiredMemory, RequiredStackSize);
 StagedProgram guess = new StagedProgram("guess", Programs.GuessingGame(), RequiredMemory, RequiredStackSize);
+StagedProgram spawn = new StagedProgram("spawner", Programs.SpawnChildren(), RequiredMemory, RequiredStackSize);
 
 // Short, non-interactive, self-terminating jobs of varied lifetimes, used by the
 // churn modes to keep the buddy allocator / memory map busy. The churn loop assigns
@@ -59,6 +60,7 @@ while (true)
     Console.WriteLine("  8) Scheduler + memory (counter + average run while short jobs churn the heap)");
     Console.WriteLine("  9) Shell (interactive: type a command id to fork/exec a program — fork/exec/wait/setfocus)");
     Console.WriteLine(" 10) Two guessing games (Tab to switch focus, test process switching)");
+    Console.WriteLine(" 11) Spawn tree (parent forks two children — watch parent-child tree in Process tree panel)");
     Console.WriteLine("  q) Quit");
     Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows scrub history, 'o' toggle program I/O, 'q' quit run)");
     Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, digits + Enter send it a number)");
@@ -147,6 +149,13 @@ while (true)
             VisualizerMode mode = PromptMode();
             DetailLevel detail = PromptDetail();
             RunShared(new List<StagedProgram> { guess, guess }, mode, detail);
+            break;
+        }
+        case "11":
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            RunShared(new List<StagedProgram> { spawn }, mode, detail);
             break;
         }
         default:
@@ -307,3 +316,4 @@ class StagedProgram
         Stack = stack;
     }
 }
+

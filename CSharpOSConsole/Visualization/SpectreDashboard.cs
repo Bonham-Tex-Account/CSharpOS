@@ -346,7 +346,7 @@ public sealed class SpectreDashboard
             new Layout("lower").SplitColumns(
                 new Layout("registers"),
                 new Layout("heap"),
-                new Layout("stats")),
+                new Layout("tree")),
             new Layout("status").Size(3));
     }
 
@@ -369,7 +369,7 @@ public sealed class SpectreDashboard
         layout["screen"].Update(Panel("Screen (focused I/O)", BuildScreen(), Color.Grey));
         layout["registers"].Update(Panel("Registers", BuildRegisters(frame), Color.Grey));
         layout["heap"].Update(Panel("Heap / free memory", BuildHeap(frame), Color.Grey));
-        layout["stats"].Update(Panel("Run stats", BuildStats(frame), Color.Grey));
+        layout["tree"].Update(Panel("Process tree", BuildProcessTree(frame), Color.Grey));
         layout["status"].Update(BuildStatus(frame));
     }
 
@@ -631,6 +631,53 @@ public sealed class SpectreDashboard
         return new Rows(lines);
     }
 
+    // ---- process tree (rendered inside the procs panel) --------------------
+
+    private static IRenderable BuildProcessTree(Frame frame)
+    {
+        if (!frame.HasOsImage || frame.ProcessTable.Count == 0)
+        {
+            return new Markup("[grey39](no processes)[/]");
+        }
+
+        Dictionary<int, BuddyHeapView.ProcessRow> byPid = new Dictionary<int, BuddyHeapView.ProcessRow>();
+        foreach (BuddyHeapView.ProcessRow row in frame.ProcessTable)
+        {
+            byPid[row.Pid] = row;
+        }
+
+        List<IRenderable> lines = new List<IRenderable>();
+        foreach (BuddyHeapView.ProcessRow row in frame.ProcessTable)
+        {
+            if (row.ParentPid == -1 || !byPid.ContainsKey(row.ParentPid))
+            {
+                RenderTreeNode(row, frame.ProcessTable, "", true, lines);
+            }
+        }
+        return new Rows(lines);
+    }
+
+    private static void RenderTreeNode(
+        BuddyHeapView.ProcessRow row,
+        IReadOnlyList<BuddyHeapView.ProcessRow> allRows,
+        string prefix,
+        bool isRoot,
+        List<IRenderable> lines)
+    {
+        string name = Markup.Escape(PlainTextRenderer.FriendlyName(row.Path));
+        string nodePrefix = isRoot ? "[aqua]◉[/] " : $"{prefix}[grey]└─[/] ";
+        lines.Add(new Markup($"{nodePrefix}[white]{name}[/][grey]({row.Pid})[/] {StateMarkup(row)}"));
+
+        string childPrefix = isRoot ? "  " : prefix + "   ";
+        foreach (BuddyHeapView.ProcessRow child in allRows)
+        {
+            if (child.ParentPid == row.Pid)
+            {
+                RenderTreeNode(child, allRows, childPrefix, false, lines);
+            }
+        }
+    }
+
     // ---- heap: linear memory map + free summary ---------------------------
 
     private const int MapWidth = 28;
@@ -670,8 +717,6 @@ public sealed class SpectreDashboard
         return new Rows(lines);
     }
 
-    // A proportional, address-ordered bar: each segment occupies a width proportional to
-    // its size, colored green for free and a per-owner color for allocated blocks.
     private static string BuildMapBar(List<BuddyHeapView.Segment> segments, int heapSize)
     {
         List<string> cells = new List<string>();
@@ -722,24 +767,6 @@ public sealed class SpectreDashboard
             hash = (hash * 31 + c) & 0x7FFFFFFF;
         }
         return OwnerPalette[hash % OwnerPalette.Length];
-    }
-
-    // ---- run stats ---------------------------------------------------------
-
-    private static IRenderable BuildStats(Frame frame)
-    {
-        List<IRenderable> lines = new List<IRenderable>
-        {
-            new Markup($"[grey]instructions[/] {frame.InstructionCount}"),
-            new Markup($"[grey]ctx switches[/] {frame.ContextSwitchCount}"),
-            new Markup($"[grey]faults[/] {frame.FaultCount}"),
-            new Markup($"[grey]blocks[/] {frame.BlockCount}"),
-            new Markup($"[grey]wakes[/] {frame.WakeCount}"),
-            new Markup($"[grey]outputs[/] {frame.OutputCount}"),
-            new Markup($"[grey]branches[/] {frame.BranchPredictions} [grey]acc[/] {frame.BranchAccuracy:P0} [grey]miss[/] {frame.BranchMisses}"),
-            new Markup($"[grey]cycles[/] {frame.Cycles}")
-        };
-        return new Rows(lines);
     }
 
     // ---- shared screen (focused process I/O) ------------------------------
