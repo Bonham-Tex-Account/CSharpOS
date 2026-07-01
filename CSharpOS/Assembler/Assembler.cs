@@ -179,6 +179,16 @@ public sealed partial class Assembler
         Emit(Instruction.INS, (byte)ptrReg, (byte)maxLenReg, 0);
     }
 
+    public void Ink(RegisterName reg)
+    {
+        Emit(Instruction.INK, (byte)reg, 0, 0);
+    }
+
+    public void InkPoll(RegisterName reg)
+    {
+        Emit(Instruction.INPOLL, (byte)reg, 0, 0);
+    }
+
     public void Hlt()
     {
         Emit(Instruction.HLT, 0, 0, 0);

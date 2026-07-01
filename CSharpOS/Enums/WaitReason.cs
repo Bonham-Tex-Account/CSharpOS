@@ -11,5 +11,7 @@ public enum WaitReason
     /// <summary>Blocked in wait(pid), waiting for a child process to terminate.</summary>
     ChildProcess,
     /// <summary>Blocked in INS, waiting for a string line on stdin.</summary>
-    StringInput
+    StringInput,
+    /// <summary>Blocked in INK, waiting for a raw keypress.</summary>
+    KeyInput
 }

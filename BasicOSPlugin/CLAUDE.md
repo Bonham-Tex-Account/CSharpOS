@@ -17,13 +17,14 @@
 `OsRoutines.BuildOsImage()` emits routines in this order, recording each start address:
 
 ```
-[IVT: 16 slots × 4 bytes = 64 bytes]
-[CodeBase = 64]
+[IVT: 17 slots × 4 bytes = 68 bytes]
+[CodeBase = 68]
 EmitContextSwitch    → IvtContextSwitch (slot 0)        OsRoutines.cs:124
 EmitSchedule         → IvtSchedule (slot 7)             OsRoutines.cs:208
 EmitBlock            → IvtBlockInput + IvtBlockOutput (slots 5 & 6, same address) :216
 EmitWakeEntry(Input) → IvtWakeInput (slot 3)            OsRoutines.cs:1896
 EmitWakeEntry(Output)→ IvtWakeOutput (slot 4)           OsRoutines.cs:1896
+EmitWakeEntry(KeyInput)→ IvtWakeKey (slot 16)           OsRoutines.cs:1896
 EmitWakeBody         → (shared tail, no IVT entry)      OsRoutines.cs:1903
 EmitHalt             → IvtHalt (slot 1)                 OsRoutines.cs:229
 EmitInvalidInstruction→ IvtInvalidInstruction (slot 2)  OsRoutines.cs:244

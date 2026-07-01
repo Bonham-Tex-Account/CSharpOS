@@ -61,7 +61,7 @@ public sealed class SpectreDashboard
         // is inert (non-interactive, no delay).
         Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
         bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer, detail);
-        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput);
+        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput, SubmitKey);
 
         // The dashboard owns the single shared screen, so it also drives output
         // completion: the console transfers instantly, so each OUT is acknowledged at
@@ -89,6 +89,12 @@ public sealed class SpectreDashboard
     private void SubmitStringInput(string value)
     {
         hw.RaiseStringInputInterrupt(value);
+    }
+
+    // Sends a raw keycode to the focused process's key input queue (for INK/INPOLL).
+    private void SubmitKey(int keyCode)
+    {
+        hw.RaiseKeyInterrupt(keyCode);
     }
 
     // Tab: move focus to the next live process (wrapping).
@@ -845,7 +851,9 @@ public sealed class SpectreDashboard
         {
             state = "[aqua]paused[/]";
         }
-        string keys = "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]q[/] quit";
+        string keys = interaction.KeyPassthrough
+            ? "[yellow]F1[/] [yellow bold]KEY PASSTHROUGH[/]  all keys → process  [grey](F1 to exit)[/]"
+            : "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]q[/] quit  [grey]F1[/] passthrough";
         return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]perf[/] {detail}   {keys}"))
         {
             Border = BoxBorder.None,

@@ -73,6 +73,10 @@ public static class Instruction
     // write each char as a zero-extended word into ptr[0..len-1], null-terminate.
     public const byte OUTS        = 0x47;
     public const byte INS         = 0x48;
+    // INK reg — block until a raw keypress arrives; delivers keycode to reg.
+    // INPOLL reg — non-blocking: delivers keycode to reg, or -1 if none queued.
+    public const byte INK         = 0x49;
+    public const byte INPOLL      = 0x4A;
 
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
@@ -123,6 +127,8 @@ public static class Instruction
         opcodeTable[SETFOCUS]    = InstructionFunctions.SetFocus;
         opcodeTable[OUTS]        = InstructionFunctions.Outs;
         opcodeTable[INS]         = InstructionFunctions.Ins;
+        opcodeTable[INK]         = InstructionFunctions.Ink;
+        opcodeTable[INPOLL]      = InstructionFunctions.InkPoll;
     }
 
     // ---- integral functions ----------------------------------------------

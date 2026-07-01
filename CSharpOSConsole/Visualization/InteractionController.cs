@@ -1,3 +1,5 @@
+using CSharpOS;
+
 namespace CSharpOSConsole.Visualization;
 
 /// <summary>What the run loop should do after consulting the controller.</summary>
@@ -31,12 +33,14 @@ public sealed class InteractionController
     private readonly Action cycleFocus;
     private readonly Action<int> submitInput;
     private readonly Action<string>? submitStringInput;
+    private readonly Action<int>? submitKey;
     private bool paused;
+    private bool keyPassthrough;
     private string inputLine = "";
 
     public InteractionController(FrameHistory frames, bool interactive, int delayMs,
         Action toggleIo, Action cycleFocus, Action<int> submitInput,
-        Action<string>? submitStringInput = null)
+        Action<string>? submitStringInput = null, Action<int>? submitKey = null)
     {
         this.frames = frames;
         this.interactive = interactive;
@@ -45,11 +49,17 @@ public sealed class InteractionController
         this.cycleFocus = cycleFocus;
         this.submitInput = submitInput;
         this.submitStringInput = submitStringInput;
+        this.submitKey = submitKey;
     }
 
     public bool Paused
     {
         get { return paused; }
+    }
+
+    public bool KeyPassthrough
+    {
+        get { return keyPassthrough; }
     }
 
     /// <summary>The digits typed but not yet submitted, shown as the screen's input line.</summary>
@@ -64,28 +74,79 @@ public sealed class InteractionController
     /// </summary>
     public StepAction HandleKey(ConsoleKeyInfo key)
     {
+        // F1 toggles keyboard passthrough. In passthrough mode every key is forwarded
+        // to the process buffer and visualizer shortcuts are suppressed. F1 itself is
+        // never forwarded so it always works as the escape hatch.
+        if (key.Key == ConsoleKey.F1)
+        {
+            keyPassthrough = !keyPassthrough;
+            return StepAction.Redraw;
+        }
+        if (keyPassthrough)
+        {
+            if (key.Key == ConsoleKey.UpArrow)    { submitKey?.Invoke(Hardware.KeyUp);    return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.DownArrow)  { submitKey?.Invoke(Hardware.KeyDown);  return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.LeftArrow)  { submitKey?.Invoke(Hardware.KeyLeft);  return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.RightArrow) { submitKey?.Invoke(Hardware.KeyRight); return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.Escape)     { submitKey?.Invoke(27);  return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.Tab)        { submitKey?.Invoke(9);   return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.Enter)      { submitKey?.Invoke(13);  return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.Backspace)  { submitKey?.Invoke(8);   return StepAction.Redraw; }
+            if (key.KeyChar >= ' ' && key.KeyChar <= '~')
+            {
+                submitKey?.Invoke(key.KeyChar);
+                return StepAction.Redraw;
+            }
+            return StepAction.Redraw;
+        }
+        // UpArrow/DownArrow always go to the focused process as raw keys.
+        if (key.Key == ConsoleKey.UpArrow)
+        {
+            submitKey?.Invoke(Hardware.KeyUp);
+            return StepAction.Redraw;
+        }
+        if (key.Key == ConsoleKey.DownArrow)
+        {
+            submitKey?.Invoke(Hardware.KeyDown);
+            return StepAction.Redraw;
+        }
+        // LeftArrow/RightArrow: scrub history when paused; send to process when running.
         if (key.Key == ConsoleKey.LeftArrow)
         {
-            paused = true;
-            frames.StepBack();
+            if (paused)
+            {
+                frames.StepBack();
+                return StepAction.Redraw;
+            }
+            submitKey?.Invoke(Hardware.KeyLeft);
             return StepAction.Redraw;
         }
         if (key.Key == ConsoleKey.RightArrow)
         {
-            paused = true;
-            if (frames.StepForward())
+            if (paused)
             {
-                return StepAction.Redraw;
+                if (frames.StepForward())
+                {
+                    return StepAction.Redraw;
+                }
+                return StepAction.Execute; // at the live edge: advance the emulator
             }
-            return StepAction.Execute; // at the live edge: advance the emulator
+            submitKey?.Invoke(Hardware.KeyRight);
+            return StepAction.Redraw;
         }
         if (key.Key == ConsoleKey.Tab)
         {
             cycleFocus();
             return StepAction.Redraw;
         }
+        if (key.Key == ConsoleKey.Escape)
+        {
+            submitKey?.Invoke(27);
+            return StepAction.Redraw;
+        }
         if (key.Key == ConsoleKey.Enter)
         {
+            submitKey?.Invoke(13);
             // Submit the accumulated input to the focused process: as an integer if all
             // digits, otherwise as a string line (for processes waiting on INS).
             if (inputLine.Length > 0)
@@ -104,15 +165,16 @@ public sealed class InteractionController
         }
         if (key.Key == ConsoleKey.Backspace)
         {
+            submitKey?.Invoke(8);
             if (inputLine.Length > 0)
             {
                 inputLine = inputLine.Substring(0, inputLine.Length - 1);
             }
             return StepAction.Redraw;
         }
-        // Printable characters: digits always extend the input line; letters and other
-        // printable chars also extend it. Command shortcuts (a/s/o/q) only activate when
-        // the input line is empty, so typing text doesn't accidentally trigger them.
+        // Printable characters: command shortcuts (a/s/o/q) only activate when the
+        // input line is empty and consume the key — they are NOT forwarded to the process.
+        // All other printable chars extend the input line and are forwarded via submitKey.
         if (key.KeyChar >= ' ' && key.KeyChar <= '~')
         {
             char lower = char.ToLowerInvariant(key.KeyChar);
@@ -139,6 +201,7 @@ public sealed class InteractionController
                     return StepAction.Quit;
                 }
             }
+            submitKey?.Invoke(key.KeyChar);
             inputLine += key.KeyChar;
             return StepAction.Redraw;
         }
