@@ -73,7 +73,7 @@ public class SpectreDashboardTests : IDisposable
         Assert.Contains("Kernel", text);      // kernel instruction panel
         Assert.Contains("Buddy allocator", text);
         Assert.Contains("Registers", text);
-        Assert.Contains("Run stats", text);
+        Assert.Contains("Process tree", text);
         Assert.Contains("Screen", text);      // shared focused-process I/O panel
     }
 

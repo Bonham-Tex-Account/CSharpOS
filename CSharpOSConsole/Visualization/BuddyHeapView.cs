@@ -28,6 +28,8 @@ public static class BuddyHeapView
     public sealed class ProcessRow
     {
         public int Index { get; init; }
+        public int Pid { get; init; }
+        public int ParentPid { get; init; }
         public int ProgramAddress { get; init; }
         public string? Path { get; init; }
         public ProcessState State { get; init; }
@@ -126,6 +128,8 @@ public static class BuddyHeapView
             ProcessRow row = new ProcessRow
             {
                 Index = i,
+                Pid = ReadWord(hw, entry + Hardware.ProcessEntryPid),
+                ParentPid = ReadWord(hw, entry + Hardware.ProcessEntryParentPid),
                 ProgramAddress = programAddress,
                 Path = nameForBase(programAddress),
                 State = (ProcessState)ReadWord(hw, entry + Hardware.ProcessEntryState),
