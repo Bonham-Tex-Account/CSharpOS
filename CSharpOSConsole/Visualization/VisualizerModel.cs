@@ -119,29 +119,36 @@ public sealed class VisualizerModel
     // The focused (foreground) process index — the one whose screen is shown and whose
     // stdin the live keyboard feeds. Kept in sync with Hardware.SetActiveProcess.
     public int FocusedProcess { get; set; } = -1;
-    // Each process's screen output (values it emitted via OUT), keyed by its process
-    // index. The shared screen renders only the focused process's buffer.
-    public Dictionary<int, List<int>> OutputBuffers { get; } = new Dictionary<int, List<int>>();
+    // Each process's screen output (values it emitted via OUT or OUTS), keyed by its
+    // process index. Each entry is a string: integers are stored as their ToString().
+    // The shared screen renders only the focused process's buffer.
+    public Dictionary<int, List<string>> OutputBuffers { get; } = new Dictionary<int, List<string>>();
 
-    // Appends a value to a process's own screen buffer.
+    // Appends an integer output to a process's screen buffer.
     public void RecordOutput(int sourceProcess, int value)
     {
-        if (!OutputBuffers.TryGetValue(sourceProcess, out List<int>? buffer))
+        RecordOutput(sourceProcess, value.ToString());
+    }
+
+    // Appends a string output to a process's screen buffer.
+    public void RecordOutput(int sourceProcess, string value)
+    {
+        if (!OutputBuffers.TryGetValue(sourceProcess, out List<string>? buffer))
         {
-            buffer = new List<int>();
+            buffer = new List<string>();
             OutputBuffers[sourceProcess] = buffer;
         }
         buffer.Add(value);
     }
 
     // The focused process's screen buffer, or an empty list when none.
-    public IReadOnlyList<int> FocusedOutput()
+    public IReadOnlyList<string> FocusedOutput()
     {
-        if (FocusedProcess >= 0 && OutputBuffers.TryGetValue(FocusedProcess, out List<int>? buffer))
+        if (FocusedProcess >= 0 && OutputBuffers.TryGetValue(FocusedProcess, out List<string>? buffer))
         {
             return buffer;
         }
-        return Array.Empty<int>();
+        return Array.Empty<string>();
     }
 
     public bool HasOsImage { get; set; }

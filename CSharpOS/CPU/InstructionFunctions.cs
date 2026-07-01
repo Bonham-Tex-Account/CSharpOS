@@ -274,7 +274,7 @@ internal static class InstructionFunctions
         hw.SetInstructionPointer(programBase + returnOffset);
     }
 
-    // ===== I/O (Out, In) =====================================================
+    // ===== I/O (Out, In, Outs, Ins) ==========================================
     // OUT is privileged: in user mode it traps into the kernel (which performs
     // the real device write); the operand byte-offset locates the value in the
     // saved register file.
@@ -298,6 +298,31 @@ internal static class InstructionFunctions
             return;
         }
         hw.KernelInput(b1);
+    }
+
+    // OUTS [ptr], len — output a string: read `len` words from virtual address
+    // `ptr`, taking the low byte of each as a character.
+    internal static void Outs(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.EnterKernel(Instruction.OUTS, b1 * 4, b2 * 4);
+            return;
+        }
+        hw.KernelOutputString(hw.ReadRegisterAt(b1), hw.ReadRegisterAt(b2));
+    }
+
+    // INS [ptr], maxLen — receive a string: block until a line is available on
+    // stdin, then write each character as a zero-extended word into ptr[0..n-1]
+    // and null-terminate. maxLen words may be written (including the terminator).
+    internal static void Ins(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.EnterKernel(Instruction.INS, b1 * 4, b2 * 4);
+            return;
+        }
+        hw.KernelInputString(hw.ReadRegisterAt(b1), hw.ReadRegisterAt(b2));
     }
 
     // ===== OS Primitives (Hlt, Iret) =========================================

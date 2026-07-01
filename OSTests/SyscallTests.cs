@@ -402,6 +402,99 @@ public class SyscallTests : IDisposable
         Assert.False(os.HasProcesses);
     }
 
+    // ---- String I/O (OUTS / INS) -------------------------------------------
+
+    [Fact]
+    public void OutsSyscall_FiresProgramOutputWithStringValue()
+    {
+        // OUTS writes "hi" (2 words) from the data segment, fires ProgramOutput with
+        // StringValue = "hi", then HLT.
+        const int dataOffset = 0;     // data embedded after code; resolved by two-pass
+        const int dataLen = 2;        // 2 chars
+
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, dataOffset);
+        asm.MovImm(RegisterName.ECX, dataLen);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Hlt();
+        byte[] code = asm.Build();
+
+        // Re-build with the real data offset (right after the code).
+        int realDataOffset = code.Length;
+        Assembler asm2 = new Assembler();
+        asm2.MovImm16(RegisterName.EAX, realDataOffset);
+        asm2.MovImm(RegisterName.ECX, dataLen);
+        asm2.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm2.Hlt();
+        byte[] code2 = asm2.Build();
+        byte[] image = new byte[code2.Length + dataLen * 4];
+        Array.Copy(code2, image, code2.Length);
+        image[code2.Length + 0] = (byte)'h';
+        image[code2.Length + 4] = (byte)'i';
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
+        ProgramOutputArgs? captured = null;
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { captured = e; hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(image), 64, 64));
+
+        RunSteps(os, hw, 4000);
+
+        Assert.NotNull(captured);
+        Assert.Equal("hi", captured!.StringValue);
+        Assert.False(os.HasProcesses);
+    }
+
+    [Fact]
+    public void InsSyscall_BlocksWhenEmpty_ThenEchoesStringViaOuts()
+    {
+        // Program: INS [buf], maxLen; OUTS [buf], maxLen; HLT
+        // Blocks on INS until a string interrupt arrives, then echoes the received
+        // string back via OUTS (OUTS stops at null so output matches the input).
+        const int maxWords = 8;
+
+        // Pass 1: measure code length.
+        Assembler pass1 = new Assembler();
+        pass1.MovImm16(RegisterName.EAX, 0);
+        pass1.MovImm(RegisterName.ECX, maxWords);
+        pass1.Ins(RegisterName.EAX, RegisterName.ECX);
+        pass1.MovImm16(RegisterName.EAX, 0);
+        pass1.MovImm(RegisterName.ECX, maxWords);
+        pass1.Outs(RegisterName.EAX, RegisterName.ECX);
+        pass1.Hlt();
+        int realBufOffset = pass1.Build().Length;
+
+        // Pass 2: real build with correct buffer offset.
+        Assembler asm = new Assembler();
+        asm.MovImm16(RegisterName.EAX, realBufOffset);
+        asm.MovImm(RegisterName.ECX, maxWords);
+        asm.Ins(RegisterName.EAX, RegisterName.ECX);
+        asm.MovImm16(RegisterName.EAX, realBufOffset);
+        asm.MovImm(RegisterName.ECX, maxWords);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Hlt();
+        byte[] image = asm.Build();
+
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MinMachineSize, Test.AllRegisters(), os);
+        ProgramOutputArgs? captured = null;
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) => { captured = e; hw.RaiseOutputComplete(); };
+        os.LoadProcess(new Process(CreateProgramFile(image), maxWords * 4 + 64, 64));
+
+        RunSteps(os, hw, 4000);
+
+        Assert.True(os.HasProcesses);        // blocked on string input
+        Assert.False(os.HasRunningProcess);
+        Assert.Null(captured);
+
+        hw.RaiseStringInputInterrupt("hello");
+        RunSteps(os, hw, 4000);
+
+        Assert.False(os.HasProcesses);
+        Assert.NotNull(captured);
+        Assert.Equal("hello", captured!.StringValue);
+    }
+
     [Fact]
     public void TwoProcessesBlockedMidSyscall_DoNotClobberEachOthersTrapFrames()
     {

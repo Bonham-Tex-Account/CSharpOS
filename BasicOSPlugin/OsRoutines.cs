@@ -40,8 +40,10 @@ public static class OsRoutines
     private const int Blocked    = (int)ProcessState.Blocked;
     private const int Terminated = (int)ProcessState.Terminated;
     private const int Zombie     = (int)ProcessState.Zombie;
-    private const int WaitNone   = (int)WaitReason.None;
-    private const int WaitChild  = (int)WaitReason.ChildProcess;
+    private const int WaitNone        = (int)WaitReason.None;
+    private const int WaitChild       = (int)WaitReason.ChildProcess;
+    private const int WaitInput       = (int)WaitReason.Input;
+    private const int WaitStringInput = (int)WaitReason.StringInput;
     private const int User       = (int)PrivilegeLevel.User;
     private const int EntrySize  = Hardware.ProcessEntrySize;
 
@@ -1165,6 +1167,12 @@ public static class OsRoutines
         asm.MovImm(R(EDX), Instruction.IN);
         asm.Cmp(R(EBX), R(EDX));
         asm.Jz("syscall_in");
+        asm.MovImm(R(EDX), Instruction.OUTS);
+        asm.Cmp(R(EBX), R(EDX));
+        asm.Jz("syscall_outs");
+        asm.MovImm(R(EDX), Instruction.INS);
+        asm.Cmp(R(EBX), R(EDX));
+        asm.Jz("syscall_ins");
         asm.Iret();                               // unknown cause — return (should not happen)
 
         asm.Label("syscall_out");
@@ -1175,6 +1183,28 @@ public static class OsRoutines
         asm.Label("syscall_in");
         asm.In(R(ESI));                           // real device read (kernel level)
         asm.Store(R(ECX), R(ESI));                // write the result back into the save-area slot
+        asm.Iret();
+
+        // OUTS: load ptr from save area (b1 slot = ECX), load len from +12 slot, call kernel OUTS.
+        asm.Label("syscall_outs");
+        asm.Load(R(ESI), R(ECX));                 // ESI = ptr value
+        asm.MovImm(R(EAX), Hardware.KernelTrapInfoOffset + 12);
+        asm.Add(R(EAX), R(EBP));
+        asm.Load(R(EAX), R(EAX));                 // EAX = byte-offset of len register in save area
+        asm.Add(R(EAX), R(EBP));
+        asm.Load(R(EDX), R(EAX));                 // EDX = len value
+        asm.Outs(R(ESI), R(EDX));                 // kernel-level string output
+        asm.Iret();
+
+        // INS: load ptr from save area (b1 slot = ECX), load maxLen from +12 slot, call kernel INS.
+        asm.Label("syscall_ins");
+        asm.Load(R(ESI), R(ECX));                 // ESI = ptr value
+        asm.MovImm(R(EAX), Hardware.KernelTrapInfoOffset + 12);
+        asm.Add(R(EAX), R(EBP));
+        asm.Load(R(EAX), R(EAX));                 // EAX = byte-offset of maxLen register in save area
+        asm.Add(R(EAX), R(EBP));
+        asm.Load(R(EDX), R(EAX));                 // EDX = maxLen value
+        asm.Ins(R(ESI), R(EDX));                  // kernel-level string input (blocks if empty)
         asm.Iret();
     }
 
@@ -1912,7 +1942,16 @@ public static class OsRoutines
         asm.Jnz("wk_resume");
         LoadField(asm, EBX, Hardware.ProcessEntryWaitReason, EAX);
         asm.Cmp(R(EAX), R(EDX));
+        asm.Jz("wk_do_wake");
+        // Also wake processes blocked on StringInput when this is the Input wake path:
+        // if EDX == Input AND WaitReason == StringInput → wake.
+        asm.MovImm(R(R8), WaitInput);
+        asm.Cmp(R(EDX), R(R8));
         asm.Jnz("wk_resume");
+        asm.MovImm(R(R8), WaitStringInput);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jnz("wk_resume");
+        asm.Label("wk_do_wake");
 
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
         StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);

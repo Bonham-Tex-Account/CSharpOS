@@ -7,6 +7,8 @@ namespace CSharpOS;
 public class ProgramOutputArgs : EventArgs
 {
     public int Value { get; init; }
+    /// <summary>Non-null when this output came from OUTS (string output); null for OUT (int output).</summary>
+    public string? StringValue { get; init; }
     /// <summary>The stdout device the output went to (resolved through the process's fd 1).</summary>
     public int Device { get; init; }
     /// <summary>

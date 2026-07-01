@@ -29,8 +29,8 @@ public class VisualizerModelTests
         model.RecordOutput(1, 22);
         model.RecordOutput(0, 33);
 
-        Assert.Equal(new List<int> { 11, 33 }, model.OutputBuffers[0]);
-        Assert.Equal(new List<int> { 22 }, model.OutputBuffers[1]);
+        Assert.Equal(new List<string> { "11", "33" }, model.OutputBuffers[0]);
+        Assert.Equal(new List<string> { "22" }, model.OutputBuffers[1]);
     }
 
     [Fact]
@@ -41,10 +41,10 @@ public class VisualizerModelTests
         model.RecordOutput(1, 22);
 
         model.FocusedProcess = 1;
-        Assert.Equal(new List<int> { 22 }, model.FocusedOutput());
+        Assert.Equal(new List<string> { "22" }, model.FocusedOutput());
 
         model.FocusedProcess = 0;
-        Assert.Equal(new List<int> { 11 }, model.FocusedOutput());
+        Assert.Equal(new List<string> { "11" }, model.FocusedOutput());
     }
 
     [Fact]

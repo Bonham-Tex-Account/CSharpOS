@@ -174,6 +174,51 @@ public static class Programs
 
     // Interactive guessing game. Secret = 42. Reads guesses via IN, prints a hint
     // code (1 = too low, 2 = too high) until the guess is correct, then prints it.
+    // Prompts for a name, reads it via INS, echoes it back via OUTS. Demonstrates
+    // string I/O: type text and press Enter in the screen panel to respond.
+    public static (byte[] image, int requiredMemory) StringsDemo()
+    {
+        const int inputWords = 32;
+        const string prompt = "Name? ";
+
+        // Pass 1: build with placeholder addresses to find code length.
+        byte[] pass1 = BuildStringsDemoAsm(promptAddr: 0, prompt.Length, inputAddr: 0, inputWords).Build();
+
+        // Prompt lives right after the code in the program image.
+        int promptAddr = pass1.Length;
+        // Input buffer starts after the embedded prompt (in RequiredMemory, past the image).
+        int inputAddr = promptAddr + prompt.Length * 4;
+
+        // Pass 2: rebuild with correct addresses.
+        byte[] code = BuildStringsDemoAsm(promptAddr, prompt.Length, inputAddr, inputWords).Build();
+
+        // Append the prompt string as 4-byte words (little-endian, char in low byte).
+        byte[] image = new byte[code.Length + prompt.Length * 4];
+        Array.Copy(code, image, code.Length);
+        for (int i = 0; i < prompt.Length; i++)
+        {
+            image[code.Length + i * 4] = (byte)prompt[i];
+        }
+
+        return (image, inputWords * 4);
+    }
+
+    private static Assembler BuildStringsDemoAsm(int promptAddr, int promptLen, int inputAddr, int inputWords)
+    {
+        Assembler asm = new Assembler();
+        asm.MovImm16(RegisterName.EAX, promptAddr);
+        asm.MovImm(RegisterName.ECX, promptLen);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.MovImm16(RegisterName.EAX, inputAddr);
+        asm.MovImm(RegisterName.ECX, inputWords);
+        asm.Ins(RegisterName.EAX, RegisterName.ECX);
+        asm.MovImm16(RegisterName.EAX, inputAddr);
+        asm.MovImm(RegisterName.ECX, inputWords);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Hlt();
+        return asm;
+    }
+
     public static byte[] GuessingGame()
     {
         Assembler asm = new Assembler();

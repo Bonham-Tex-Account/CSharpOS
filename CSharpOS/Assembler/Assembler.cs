@@ -169,6 +169,16 @@ public sealed partial class Assembler
         Emit(Instruction.IN, (byte)reg, 0, 0);
     }
 
+    public void Outs(RegisterName ptrReg, RegisterName lenReg)
+    {
+        Emit(Instruction.OUTS, (byte)ptrReg, (byte)lenReg, 0);
+    }
+
+    public void Ins(RegisterName ptrReg, RegisterName maxLenReg)
+    {
+        Emit(Instruction.INS, (byte)ptrReg, (byte)maxLenReg, 0);
+    }
+
     public void Hlt()
     {
         Emit(Instruction.HLT, 0, 0, 0);

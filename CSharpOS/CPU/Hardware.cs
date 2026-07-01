@@ -701,6 +701,21 @@ public partial class Hardware
         return processIndex;
     }
 
+    private static void AddStringInputWaiter(Device device, int processIndex)
+    {
+        if (!device.StringWaiters.Contains(processIndex))
+        {
+            device.StringWaiters.Add(processIndex);
+        }
+    }
+
+    private static int NextStringInputWaiter(Device device)
+    {
+        int processIndex = device.StringWaiters[0];
+        device.StringWaiters.RemoveAt(0);
+        return processIndex;
+    }
+
     // ===== Word Memory Helpers (ReadWord, WriteWord, WriteWordRaw) ===========
     private int ReadWord(int address)
     {
@@ -991,6 +1006,15 @@ public partial class Hardware
                 DispatchOsRoutine(IvtWakeInput, NextInputWaiter(device));
             }
         }
+        else if (interrupt.Kind == InterruptKind.StringInputReady)
+        {
+            device.StringInput.Enqueue(interrupt.StringValue!);
+            ProcessWoken?.Invoke(this, new ProcessWokenArgs { Reason = WaitReason.StringInput, Value = 0, Device = interrupt.Device });
+            if (device.StringWaiters.Count > 0)
+            {
+                DispatchOsRoutine(IvtWakeInput, NextStringInputWaiter(device));
+            }
+        }
         else
         {
             device.OutputBusy = false;
@@ -1010,7 +1034,7 @@ public partial class Hardware
         {
             ProcessBlocked?.Invoke(this, new ProcessBlockedArgs { Reason = reason });
             int slot;
-            if (reason == WaitReason.Input)
+            if (reason == WaitReason.Input || reason == WaitReason.StringInput)
             {
                 slot = IvtBlockInput;
             }
@@ -1197,12 +1221,20 @@ public partial class Hardware
     // preemptible. Kernel addresses absolutely (base 0), so EBP/ESP hold real addresses.
     public void EnterKernel(byte opcode, int operandByteOffset)
     {
+        EnterKernel(opcode, operandByteOffset, 0);
+    }
+
+    // Two-operand variant: stores a second operand byte-offset at trap-frame +12 so
+    // the syscall handler can reach both operands (used by OUTS and INS).
+    public void EnterKernel(byte opcode, int operandByteOffset, int secondOperandByteOffset)
+    {
         int frameBase = currentProcessKernelStackStart;
         WriteBytes(frameBase + KernelSaveAreaOffset, (byte[])registers.Clone());
-        WriteWord(frameBase + KernelTrapInfoOffset,     opcode);
-        WriteWord(frameBase + KernelTrapInfoOffset + 4, operandByteOffset);
+        WriteWord(frameBase + KernelTrapInfoOffset,      opcode);
+        WriteWord(frameBase + KernelTrapInfoOffset + 4,  operandByteOffset);
         // Return IP stored relative to the user program base (position-independent).
-        WriteWord(frameBase + KernelTrapInfoOffset + 8, instructionPointer - currentProcessInstructionStart);
+        WriteWord(frameBase + KernelTrapInfoOffset + 8,  instructionPointer - currentProcessInstructionStart);
+        WriteWord(frameBase + KernelTrapInfoOffset + 12, secondOperandByteOffset);
         SetLevel(PrivilegeLevel.Kernel);
         WriteRegister(RegisterName.EBP, frameBase);                                        // frame pointer (absolute)
         WriteRegister(RegisterName.ESP, currentProcessKernelStackStart + currentProcessKernelStackSize); // kernel stack top
@@ -1524,6 +1556,56 @@ public partial class Hardware
         device.OutputBusy = true;
     }
 
+    // Kernel-mode string output: read `len` words from user virtual address `ptr`,
+    // take the low byte of each as a character, fire ProgramOutput with the string.
+    public void KernelOutputString(int ptr, int len)
+    {
+        int deviceId = FdDevice(StdOut);
+        Device device = DeviceFor(deviceId);
+        if (device.OutputBusy)
+        {
+            BlockCurrent(WaitReason.Output);
+            return;
+        }
+        int physBase = currentProcessInstructionStart;
+        System.Text.StringBuilder sb = new System.Text.StringBuilder(len);
+        for (int i = 0; i < len; i++)
+        {
+            int word = ReadWord(physBase + ptr + i * 4);
+            if (word == 0)
+            {
+                break;
+            }
+            sb.Append((char)(word & 0xFF));
+        }
+        string s = sb.ToString();
+        ProgramOutput?.Invoke(this, new ProgramOutputArgs { Value = 0, StringValue = s, Device = deviceId, SourceProcess = CurrentDeviceId() });
+        device.OutputBusy = true;
+    }
+
+    // Kernel-mode string input: dequeue a line from stdin's string buffer or block
+    // the process until one arrives (INS re-runs on resume). The string is written
+    // word-by-word to user virtual address `ptr` (up to maxLen words), null-terminated.
+    public void KernelInputString(int ptr, int maxLen)
+    {
+        int deviceId = FdDevice(StdIn);
+        Device device = DeviceFor(deviceId);
+        if (device.StringInput.Count == 0)
+        {
+            AddStringInputWaiter(device, CurrentDeviceId());
+            BlockCurrent(WaitReason.StringInput);
+            return;
+        }
+        string s = device.StringInput.Dequeue();
+        int physBase = currentProcessInstructionStart;
+        int writeLen = Math.Min(s.Length, maxLen - 1);
+        for (int i = 0; i < writeLen; i++)
+        {
+            WriteWord(physBase + ptr + i * 4, s[i]);
+        }
+        WriteWord(physBase + ptr + writeLen * 4, 0);
+    }
+
     // ===== Interrupt Raising (RaiseInputInterrupt, RaiseOutputComplete) ======
     // Raises an input interrupt from the live keyboard: delivered to the focused
     // (foreground) process's stdin device, or device 0 when nothing is focused.
@@ -1548,5 +1630,17 @@ public partial class Hardware
     public void RaiseOutputComplete(int deviceId)
     {
         pendingInterrupts.Enqueue(new Interrupt(InterruptKind.OutputComplete, 0, deviceId));
+    }
+
+    // Raises a string input interrupt for the focused process's stdin device.
+    public void RaiseStringInputInterrupt(string value)
+    {
+        RaiseStringInputInterrupt(value, FocusedInputDevice());
+    }
+
+    // Raises a string input interrupt for a specific device.
+    public void RaiseStringInputInterrupt(string value, int deviceId)
+    {
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.StringInputReady, value, deviceId));
     }
 }
