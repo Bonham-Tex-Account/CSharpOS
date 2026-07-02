@@ -62,20 +62,24 @@ public class FsBlockAllocatorTests
 
     // ---- allocation ------------------------------------------------------
 
+    // Format reserves blocks 0 (super), 1 (bitmap) and allocates block 2 for the root
+    // directory, so the first block a caller can allocate afterward is 3.
+    private const int FirstFreeBlock = FsLayout.FirstDataBlock + 1;
+
     [Fact]
-    public void Alloc_FirstBlock_IsTheFirstDataBlock()
+    public void Alloc_FirstBlock_IsAfterTheRootDirectory()
     {
         Hardware hw = NewFsHardware();
-        Assert.Equal(FsLayout.FirstDataBlock, Alloc(hw)); // blocks 0,1 reserved → first free is 2
+        Assert.Equal(FirstFreeBlock, Alloc(hw)); // blocks 0,1 reserved + block 2 = root dir
     }
 
     [Fact]
     public void Alloc_HandsOutConsecutiveBlocksInBitmapOrder()
     {
         Hardware hw = NewFsHardware();
-        Assert.Equal(2, Alloc(hw));
         Assert.Equal(3, Alloc(hw));
         Assert.Equal(4, Alloc(hw));
+        Assert.Equal(5, Alloc(hw));
     }
 
     [Fact]
@@ -90,24 +94,24 @@ public class FsBlockAllocatorTests
     public void Free_ThenAlloc_ReusesTheFreedBlock()
     {
         Hardware hw = NewFsHardware();
-        Alloc(hw);              // 2
-        int b3 = Alloc(hw);     // 3
-        Alloc(hw);              // 4
-        Free(hw, b3);
+        Alloc(hw);              // 3
+        int b4 = Alloc(hw);     // 4
+        Alloc(hw);              // 5
+        Free(hw, b4);
 
-        Assert.Equal(b3, Alloc(hw)); // lowest free bit is 3 again
+        Assert.Equal(b4, Alloc(hw)); // lowest free bit is 4 again
     }
 
     [Fact]
     public void Alloc_UntilFull_ThenReturnsMinusOne()
     {
         Hardware hw = NewFsHardware();
-        int allocatable = FsLayout.BlockCount - FsLayout.FirstDataBlock; // 254
+        int allocatable = FsLayout.BlockCount - FsLayout.FirstDataBlock - 1; // minus the root dir
         int last = 0;
         for (int i = 0; i < allocatable; i++)
         {
             last = Alloc(hw);
-            Assert.True(last >= FsLayout.FirstDataBlock);
+            Assert.True(last >= FirstFreeBlock);
         }
         Assert.Equal(FsLayout.BlockCount - 1, last);   // last allocatable block
         Assert.Equal(-1, Alloc(hw));                   // disk full
@@ -151,19 +155,20 @@ public class FsBlockAllocatorTests
 
         Assert.Equal(FsLayout.SuperMagic, DiskWord(hw, FsLayout.SuperBlock, FsLayout.SuperMagicOffset));
         Assert.Equal(FsLayout.BlockCount, DiskWord(hw, FsLayout.SuperBlock, FsLayout.SuperBlockCountOffset));
-        Assert.Equal(FsLayout.BlockCount - FsLayout.FirstDataBlock, DiskWord(hw, FsLayout.SuperBlock, FsLayout.SuperFreeCountOffset));
-        Assert.Equal(0b11, DiskWord(hw, FsLayout.BitmapBlock, 0)); // blocks 0,1 marked used
+        Assert.Equal(FsLayout.BlockCount - FsLayout.FirstDataBlock - 1, DiskWord(hw, FsLayout.SuperBlock, FsLayout.SuperFreeCountOffset));
+        Assert.Equal(FsLayout.FirstDataBlock, DiskWord(hw, FsLayout.SuperBlock, FsLayout.SuperRootDirOffset)); // root dir at block 2
+        Assert.Equal(0b111, DiskWord(hw, FsLayout.BitmapBlock, 0)); // blocks 0,1 + root dir (2) used
     }
 
     [Fact]
     public void Alloc_AfterFlush_ShowsTheBitmapBitSetOnDisk()
     {
         Hardware hw = NewFsHardware();
-        int block = Alloc(hw); // 2
+        int block = Alloc(hw); // 3
         Flush(hw);
 
-        // Bit `block` of the bitmap word 0 should now be set (blocks 0,1,2 → 0b111).
-        int expected = (1 << 0) | (1 << 1) | (1 << block);
+        // Blocks 0,1, root dir (2), and the newly allocated block should all be set.
+        int expected = (1 << 0) | (1 << 1) | (1 << FsLayout.FirstDataBlock) | (1 << block);
         Assert.Equal(expected, DiskWord(hw, FsLayout.BitmapBlock, 0));
     }
 
@@ -171,10 +176,10 @@ public class FsBlockAllocatorTests
     public void FreedBlock_AfterFlush_IsClearedInTheOnDiskBitmap()
     {
         Hardware hw = NewFsHardware();
-        int block = Alloc(hw); // 2
+        int block = Alloc(hw); // 3
         Free(hw, block);
         Flush(hw);
 
-        Assert.Equal(0b11, DiskWord(hw, FsLayout.BitmapBlock, 0)); // back to just blocks 0,1
+        Assert.Equal(0b111, DiskWord(hw, FsLayout.BitmapBlock, 0)); // back to blocks 0,1 + root dir
     }
 }

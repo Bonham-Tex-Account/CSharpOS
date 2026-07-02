@@ -146,6 +146,12 @@ public partial class Hardware
     public const int FsOpFreeBlock    = 2; // release block EBX (clear bitmap bit, discard from cache)
     public const int FsOpChainNext    = 3; // read block EBX's next-block link → pointer
     public const int FsOpChainSetNext = 4; // set block EBX's next-block link to ECX
+    // Directory ops (Inc 4). Name args are addresses of a word-per-char, null-padded buffer.
+    public const int FsOpRootDir      = 5; // → root directory block (from superblock)
+    public const int FsOpHash         = 6; // hash the name at EBX → hash value
+    public const int FsOpLookup       = 7; // find name ECX in directory EBX → entry addr, or -1
+    public const int FsOpInsert       = 8; // add (name ECX, type EDX, firstBlock ESI) to dir EBX → entry addr, or -1 (dup/full)
+    public const int FsOpRemove       = 9; // remove name ECX from directory EBX → 0, or -1 if absent
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------
     // Printable ASCII (32–126) is delivered as-is. Special keys use values above
