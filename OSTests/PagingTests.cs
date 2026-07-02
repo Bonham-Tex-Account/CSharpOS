@@ -140,15 +140,20 @@ public class PagingTests : IDisposable
     }
 
     [Fact]
-    public void Translate_PageBeyondTableRange_FallsBackToLinear_NoFault()
+    public void Translate_PageBeyondTableRange_IsAProtectionFault_NoLinearFallback()
     {
         (Hardware hw, Process process, int index) = LoadAndLayout(512, 512);
         Test.WriteWord(hw, OsLayout.CurrentIndexOffset, index);
         hw.SetPrivilegeLevel(PrivilegeLevel.User);
 
+        bool terminated = false;
+        hw.ProcessTerminated += (object? sender, ProcessTerminatedArgs e) => terminated = true;
+
+        // A page beyond the per-process page table is outside the address space: the MMU is the
+        // sole protection mechanism now, so this is a protection fault (no linear fallback).
         int v = OsLayout.MaxPagesPerProcess * OsLayout.PageSize + 1;
-        Assert.True(hw.TryTranslateData(v, false, out int physical));
-        Assert.Equal(process.ProgramAddress + v, physical);
+        Assert.False(hw.TryTranslateData(v, false, out int physical));
+        Assert.True(terminated);
     }
 
     [Fact]

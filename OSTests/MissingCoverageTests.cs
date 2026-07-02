@@ -7,108 +7,20 @@ namespace OSTests;
 // not yet implement that behavior and can be fixed later.
 public class MissingCoverageTests
 {
-    // Layout of the single process used by BuildWithLayout. Kept as named constants
-    // so the merged-range assertions can be computed from them (plus the kernel-size
-    // constants) and stay correct if any dimension changes.
-    private const int LayoutProgramAddress = 100;
-    private const int LayoutProgramSize = 4;
-    private const int LayoutUserMemory = 64;
-    private const int LayoutUserStack = 64;
-
-    // Returns Hardware with a process layout loaded. The merged process range runs
-    // from LayoutProgramAddress to RangeEnd (exclusive):
-    //   ProgramAddress + ProgramSize + user memory + user stack + kernel stack
-    // (there is no per-process kernel section now; the handler is shared OS code).
-    private static int RangeEnd =>
-        LayoutProgramAddress + LayoutProgramSize
-        + LayoutUserMemory + LayoutUserStack + Hardware.KernelStackSize;
-
-    private static Hardware BuildWithLayout()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(1024, os);
-        Process process = new Process("ignored", LayoutUserMemory, LayoutUserStack);
-        process.ProgramAddress = LayoutProgramAddress;
-        process.ProgramSize = LayoutProgramSize;
-        hw.LoadProcessLayout(process);
-        return hw;
-    }
-
     private static int ZeroFlag(Hardware hw) => Test.ZeroFlag(hw);
     private static int SignFlag(Hardware hw) => Test.SignFlag(hw);
 
-    // ---- IsAddressInProcessRanges boundary conditions ----------------------
-
-    [Fact]
-    public void IsAddressInProcessRanges_AtRangeStart_ReturnsTrue()
-    {
-        Hardware hw = BuildWithLayout();
-        Assert.True(hw.IsAddressInProcessRanges(LayoutProgramAddress));
-    }
-
-    [Fact]
-    public void IsAddressInProcessRanges_BeforeRangeStart_ReturnsFalse()
-    {
-        Hardware hw = BuildWithLayout();
-        Assert.False(hw.IsAddressInProcessRanges(LayoutProgramAddress - 1));
-    }
-
-    [Fact]
-    public void IsAddressInProcessRanges_OneBeforeRangeEnd_ReturnsTrue()
-    {
-        Hardware hw = BuildWithLayout();
-        Assert.True(hw.IsAddressInProcessRanges(RangeEnd - 1));
-    }
-
-    [Fact]
-    public void IsAddressInProcessRanges_AtRangeEnd_ReturnsFalse()
-    {
-        Hardware hw = BuildWithLayout();
-        Assert.False(hw.IsAddressInProcessRanges(RangeEnd));
-    }
-
-    [Fact]
-    public void IsAddressInProcessRanges_WithoutLayout_AlwaysReturnsTrue()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(1024, os);
-        // processLayoutLoaded is false — guard makes all addresses valid for unit tests
-        Assert.True(hw.IsAddressInProcessRanges(0));
-        Assert.True(hw.IsAddressInProcessRanges(1023));
-    }
-
-    // ---- LOAD bounds check --------------------------------------------------
-
-    [Fact]
-    public void Load_InUserMode_OutsideProcessRanges_ShouldTrap()
-    {
-        // Uses BasicOS so the LOAD trap condition is active.
-        BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
-        Process process = new Process("ignored", 64, 64);
-        process.ProgramAddress = 100;
-        process.ProgramSize = 4;
-        hw.LoadProcessLayout(process);
-
-        InvalidInstructionArgs? trapped = null;
-        hw.InvalidInstruction += (_, e) => { trapped = e; };
-
-        hw.SetPrivilegeLevel(PrivilegeLevel.User);
-        hw.WriteRegisterAt(1, 800); // address = 100 (programBase) + 800 = 900, outside [100, 376)
-        hw.WriteBytes(100, Test.Word(Instruction.LOAD, 0, 1, 0));
-        Instruction.Execute(100, hw);
-
-        Assert.NotNull(trapped);
-        Assert.Equal(Instruction.LOAD, trapped!.Opcode);
-    }
+    // (The IsAddressInProcessRanges boundary tests and the LOAD bounds-trap test were removed
+    // with the bounds traps — the MMU is now the sole memory-protection mechanism. Out-of-
+    // bounds user access is covered as a protection fault in PagingTests.)
 
     // ---- STORE in kernel mode is unrestricted --------------------------------
 
     [Fact]
     public void Store_InKernelMode_OutsideProcessRanges_DoesNotTrap()
     {
-        // Uses BasicOS so the STORE trap is defined — but the Condition gates on
-        // User mode only, so kernel-mode writes must not fire it.
+        // Kernel mode addresses memory absolutely (bypassing the MMU), so a kernel-mode STORE
+        // anywhere is unrestricted and never raises a protection fault.
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Test.MachineWithHeap(8192), Test.AllRegisters(), os);
         Process process = new Process("ignored", 64, 64);

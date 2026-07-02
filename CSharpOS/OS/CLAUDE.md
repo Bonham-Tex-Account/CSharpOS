@@ -81,8 +81,6 @@ Implement in `BasicOSPlugin/Traps/` as `public sealed class XxxTrapProvider : IT
 | Provider | Opcode | Condition | Reason |
 |----------|--------|-----------|--------|
 | IretTrapProvider | IRET | user mode | "IRET not allowed in user mode" |
-| LoadBoundsTrapProvider | LOAD | address outside process ranges | bounds violation |
-| StoreBoundsTrapProvider | STORE | address outside process ranges | bounds violation |
 
 ---
 

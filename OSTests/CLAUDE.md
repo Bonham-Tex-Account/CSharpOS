@@ -49,8 +49,8 @@ sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
 | **OsPluginLoader reflection** | `OsPluginLoaderTests` |
 | **Computer host end-to-end** | `ComputerTests` |
 | **Struct/data-object basics** (Process/MemoryRange/Trap/RegisterName) | `DataObjectTests` |
-| **Trap providers** (IRET/LOAD/STORE bounds) | `TrapProviderTests` |
-| **Bounds checks / IsAddressInProcessRanges** | `MissingCoverageTests` |
+| **Trap providers** (IRET only) + CollectTraps reflection | `TrapProviderTests` |
+| **MMU protection faults** (out-of-bounds user access kills the process; size guard) | `MemoryProtectionTests` |
 | **Console visualizer / dashboard** | `ConsoleVisualizerTests`, `SpectreDashboardTests` |
 | **Visualizer internals** (history, frames, buddy view, model) | `FrameHistoryTests`, `VisualizerModelTests`, `BuddyHeapViewTests` |
 | **Risky edge cases / uninitialised state** | `EdgeCaseTests`, `EdgeCaseScenarioTests` |

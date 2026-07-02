@@ -23,14 +23,6 @@ public class DataObjectTests
     }
 
     [Fact]
-    public void MemoryRange_StoresStartAndSize()
-    {
-        MemoryRange range = new MemoryRange { Start = 10, Size = 20 };
-        Assert.Equal(10, range.Start);
-        Assert.Equal(20, range.Size);
-    }
-
-    [Fact]
     public void Trap_StoresOpcodeReasonAndCondition()
     {
         Trap trap = new Trap

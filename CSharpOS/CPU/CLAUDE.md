@@ -58,7 +58,8 @@ Section markers use `// ===== ` — search for them, then `Read(offset=N, limit=
 ### MMU (Paging) (Hardware.cs:724 `// ---- MMU`)
 | Method | Line | Notes |
 |--------|------|-------|
-| `TryTranslateData(int virt, bool isWrite, out int physical) → bool` | :733 | False on page fault (page fault dispatched; caller must abort) |
+| `TryTranslateData(int virt, bool isWrite, out int physical) → bool` | :733 | User+OS path only; false → caller must abort. Non-resident → page fault; **unmapped/out-of-range → protection fault (kills the process)** — no linear fallback (MMU is sole memory protection) |
+| `RaiseProtectionFault(int page)` | private | Terminates the running process (exit -1) via the IvtInvalidInstruction teardown; fires InvalidInstruction("Memory access outside process bounds") + ProcessTerminated |
 | `TranslateDataAddress(int virt) → int` | ~:789 | Non-faulting query for visualizer/tests |
 | `RaisePageFault(int page)` | ~:800 | private; rewinds IP, dispatches IvtPageFault |
 | `SeedPageTableIfNew(index, progAddr, progSize, reqMem, userExtent)` | ~:820 | private; once per process slot; seeds non-resident PTEs |
@@ -152,7 +153,7 @@ Section markers (search `// ===== `):
 | Disk (DRead, DWrite, DLen) | :343 |
 | Process (Fork, Exec, Wait, Exit, SetFocus) | :388 |
 
-Data access pattern (LOAD/STORE/CALL/RET): call `hw.TryTranslateData(virt, isWrite, out addr)`; if it returns false, **return immediately** (page fault raised; instruction will re-run).
+Data access pattern (LOAD/STORE/CALL/RET): call `hw.TryTranslateData(virt, isWrite, out addr)`; if it returns false, **return immediately**. False means either a page fault was raised (instruction will re-run after fault-in) or a protection fault (the process is being terminated) — the caller must not commit either way.
 
 ---
 

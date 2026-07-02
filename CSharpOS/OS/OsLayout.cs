@@ -75,12 +75,13 @@ public static class OsLayout
     // for any block alignment), or -1 for an unmapped page. Phase 2's frame allocator can
     // store frame*PageSize in the same field once frames are page-aligned by construction.
     public const int PageSize = 256;                  // == BuddyDefaultMinBlock
-    public const int MaxPagesPerProcess = 64;         // 64 * 256 = 16 KiB of mapped virtual space per process
+    public const int MaxPagesPerProcess = 128;        // 128 * 256 = 32 KiB of mapped virtual space per process
     public const int PageTableEntryBytes = 4;
     // PTE sentinels. >= 0 is a resident page's physical base. UnmappedPage marks a page
-    // outside the process (the MMU falls back to linear / lets bounds traps handle it).
-    // NonResidentPage marks a page that belongs to the process but is not currently
-    // resident — touching it raises a demand page fault (Phase 2).
+    // outside the process's address space — a user access to it is a protection fault that
+    // terminates the process (the MMU is the sole memory-protection mechanism; there is no
+    // linear fallback and no bounds trap). NonResidentPage marks a page that belongs to the
+    // process but is not currently resident — touching it raises a demand page fault.
     public const int UnmappedPage = -1;
     public const int NonResidentPage = -2;
     public const int PageTableBytesPerProcess = MaxPagesPerProcess * PageTableEntryBytes;

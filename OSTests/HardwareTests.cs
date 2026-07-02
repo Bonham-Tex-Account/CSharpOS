@@ -150,28 +150,6 @@ public class HardwareTests
     }
 
     [Fact]
-    public void GetCurrentProcessRanges_MergesContiguousRegions()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(512, os);
-        Process process = new Process("ignored", 16, 16);
-        process.ProgramAddress = 0;
-        byte[] program = new byte[] { 0, 0, 0, 0 };
-        hw.LoadProcess(process, program);
-
-        List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
-
-        // program + user memory + user stack + kernel stack are contiguous from 0
-        // (no per-process kernel section now). Terms derive from the process/kernel sizes.
-        int expectedSize = program.Length
-            + process.RequiredMemory + process.RequiredStackSize
-            + Hardware.KernelStackSize;
-        Assert.Single(ranges);
-        Assert.Equal(0, ranges[0].Start);
-        Assert.Equal(expectedSize, ranges[0].Size);
-    }
-
-    [Fact]
     public void TrapInvalidInstruction_FiresHardwareEvent()
     {
         FakeOS os = new FakeOS();
@@ -269,28 +247,6 @@ public class HardwareTests
 
         int expectedTop = program.Length + process.RequiredMemory + process.RequiredStackSize;
         Assert.Equal(expectedTop, hw.ReadRegister(RegisterName.ESP));
-    }
-
-    [Fact]
-    public void GetCurrentProcessRanges_IncludesKernelStackInTotal()
-    {
-        FakeOS os = new FakeOS();
-        Hardware hw = Test.NewHardware(1024, os);
-        Process process = new Process("ignored", 16, 16);
-        process.ProgramAddress = 0;
-        byte[] program = new byte[] { 0, 0, 0, 0 };
-        process.RegisterStateAddress = program.Length;
-        hw.LoadProcess(process, program);
-
-        List<MemoryRange> ranges = hw.GetCurrentProcessRanges();
-
-        // The reserved kernel stack is part of the process's footprint. Sizes are
-        // derived from the process/kernel constants, not hard-coded.
-        int expectedSize = program.Length
-            + process.RequiredMemory + process.RequiredStackSize
-            + Hardware.KernelStackSize;
-        Assert.Single(ranges);
-        Assert.Equal(expectedSize, ranges[0].Size);
     }
 
     [Fact]

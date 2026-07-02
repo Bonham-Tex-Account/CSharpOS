@@ -25,7 +25,12 @@
       "Bash(gh auth *)",
       "PowerShell(gh auth *)",
       "PowerShell(Get-Command *)",
-      "PowerShell(cd \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\VisualStudio2026\\\\CSharpOS\" && dotnet build OSTests 2>&1 | Where-Object { $_ -notmatch \"^  Determining|^  All projects|->|^  CSharp|^  Basic|^Build succeeded\" } | Select-Object -First 10)"
+      "PowerShell(cd \"C:\\\\Users\\\\Tex\\\\OneDrive\\\\Documents\\\\VisualStudio2026\\\\CSharpOS\" && dotnet build OSTests 2>&1 | Where-Object { $_ -notmatch \"^  Determining|^  All projects|->|^  CSharp|^  Basic|^Build succeeded\" } | Select-Object -First 10)",
+      "Bash(rm OSTests/GeneralFunctionality.cs)",
+      "Bash(git rm *)",
+      "Bash(rm -rf claude-memory)",
+      "Bash(git restore *)",
+      "Bash(git commit -q -m ' *)"
     ]
   }
 }
