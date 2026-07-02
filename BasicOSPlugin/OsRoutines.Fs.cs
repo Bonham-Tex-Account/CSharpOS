@@ -51,6 +51,12 @@ public static partial class OsRoutines
         asm.MovImm(R(R14), Hardware.FsOpPathResolve);
         asm.Cmp(R(R13), R(R14));
         asm.Jz("fo_pathresolve");
+        asm.MovImm(R(R14), Hardware.FsOpOpen);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_open");
+        asm.MovImm(R(R14), Hardware.FsOpClose);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_close");
         asm.MovImm(R(R12), 0);                   // unknown op
         asm.Jmp("fo_result");
 
@@ -107,6 +113,14 @@ public static partial class OsRoutines
         asm.Label("fo_pathresolve");
         asm.Mov(R(EAX), R(EBX));                 // path addr
         asm.Call("fs_path_resolve");
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_open");
+        asm.Call("fs_open_core");                // EBX=abs path, ECX=flags, EDX=proc index
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_close");
+        asm.Call("fs_close_core");               // EBX=fd, ECX=proc index
         asm.Mov(R(R12), R(EAX));
 
         asm.Label("fo_result");
@@ -690,6 +704,300 @@ public static partial class OsRoutines
         asm.Dec(R(EAX));
         asm.Ret();
         asm.Label("mk_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+    }
+
+    // ===== EmitFsSyscall =====================================================
+    // IvtFsSyscall: the FSYS dispatcher. Entered atomically with the trapped user registers
+    // still live (EAX=syscall#, EBX/ECX/EDX=args). Runs the op via the fs_*_core routines,
+    // then resumes the caller with the result in EAX — the SAVEREGS/entry-EAX/LOADREGS/OSRET
+    // idiom (as EmitWait's reap path), which persists the CAPTURED trap frame (clean user
+    // regs) to the entry, overrides EAX with the result, and returns to the same process.
+    private static void EmitFsSyscall(Assembler asm)
+    {
+        asm.Label("fs_syscall");
+        SetupPrivilegedStack(asm);
+        asm.MovImm(R(R8), Hardware.FsysOpen);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_open");
+        asm.MovImm(R(R8), Hardware.FsysClose);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_close");
+        asm.MovImm(R(R15), 0);                   // unknown syscall → -1
+        asm.Dec(R(R15));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_open");
+        // absolute path = current process ProgramAddress + user path ptr (EBX); flags in ECX.
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(EDX), R(EBP));                // EDX = current process index (OPEN ignores user EDX)
+        EntryAddress(asm, EDX, R9);              // R9 = current entry
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(EBX), R(R10));                 // EBX = absolute path addr
+        asm.Call("fs_open_core");                // (EBX=abs path, ECX=flags, EDX=proc)
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_close");
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EBP));                // ECX = current process index
+        asm.Call("fs_close_core");               // (EBX=fd, ECX=proc)
+        asm.Mov(R(R15), R(EAX));
+
+        asm.Label("fsy_deliver");
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EBP));
+        EntryAddress(asm, ECX, EBX);             // EBX = current entry
+        asm.SaveRegs(R(EBX));                    // persist the captured user regs
+        StoreFieldReg(asm, EBX, EaxSlot, R15);   // deliver the result in EAX
+        asm.LoadRegs(R(EBX));
+        asm.SetLayout(R(EBX));
+        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+    }
+
+    // ===== EmitFsFileSubroutines =============================================
+    // File-syscall cores (Increment 5): open/create + close over the open-file table, plus
+    // the parent-path resolver and OFT slot allocator they need. Cores take an ABSOLUTE path
+    // and an explicit process index (so they're callable straight from IvtFsOp in tests); the
+    // FSYS wrapper translates the user pointer and passes the current process index.
+    private static void EmitFsFileSubroutines(Assembler asm)
+    {
+        // ---- oft_alloc: → EAX = free open-file-table index, or -1 (pure memory) ----
+        asm.Label("oft_alloc");
+        asm.MovImm(R(R8), 0);
+        asm.Label("oa_loop");
+        asm.MovImm(R(R9), OsLayout.MaxOpenFiles);
+        asm.Cmp(R(R8), R(R9));
+        asm.Jns("oa_full");
+        asm.Mov(R(R10), R(R8));
+        asm.MovImm(R(R9), OsLayout.OftEntryBytes);
+        asm.Mul(R(R10), R(R9));
+        Imm16(asm, R9, OsLayout.OftBase);
+        asm.Add(R(R10), R(R9));                  // R10 = OFT entry addr
+        asm.Load(R(R11), R(R10));                // inUse
+        asm.MovImm(R(R9), 0);
+        asm.Cmp(R(R11), R(R9));
+        asm.Jz("oa_found");
+        asm.Inc(R(R8));
+        asm.Jmp("oa_loop");
+        asm.Label("oa_found");
+        asm.Mov(R(EAX), R(R8));
+        asm.Ret();
+        asm.Label("oa_full");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_resolve_parent: EAX=path → EAX=parent dir block or -1; leaves the last
+        // component in FsPathComponentBase (like fs_path_resolve but stops before the tail) ----
+        asm.Label("fs_resolve_parent");
+        SpillStore(asm, OsLayout.FsPathPos, EAX);
+        asm.Call("fs_root_dir");
+        SpillStore(asm, OsLayout.FsPathDir, EAX);
+        asm.Label("rp_loop");
+        asm.Call("fs_extract_component");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("rp_fail");                       // empty path
+        SpillLoad(asm, OsLayout.FsPathLast, EBX);
+        asm.MovImm(R(ECX), 1);
+        asm.Cmp(R(EBX), R(ECX));
+        asm.Jz("rp_done");                       // last component → current dir is the parent
+        SpillLoad(asm, OsLayout.FsPathDir, EAX);
+        Imm16(asm, ECX, OsLayout.FsPathComponentBase);
+        asm.Call("fs_dir_lookup");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("rp_fail");
+        asm.Mov(R(R8), R(EAX));
+        asm.Load(R(R9), R(R8));                  // type
+        asm.MovImm(R(EBX), FsLayout.DirTypeDir);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jnz("rp_fail");                      // intermediate is not a directory
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EBX), FsLayout.DirEntryFirstBlock);
+        asm.Add(R(R9), R(EBX));
+        asm.Load(R(R9), R(R9));
+        SpillStore(asm, OsLayout.FsPathDir, R9);
+        asm.Jmp("rp_loop");
+        asm.Label("rp_done");
+        SpillLoad(asm, OsLayout.FsPathDir, EAX);
+        asm.Ret();
+        asm.Label("rp_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_create_file: path in FsOpenAbsPath → EAX = new file entry addr or -1;
+        // fs_dir_insert leaves the entry's block in FsScratchEntryBlock ----
+        asm.Label("fs_create_file");
+        SpillLoad(asm, OsLayout.FsOpenAbsPath, EAX);
+        asm.Call("fs_resolve_parent");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("cf_fail");
+        SpillStore(asm, OsLayout.FsOpenDirBlock, EAX);   // parent (temp)
+        asm.Call("fs_alloc_block");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("cf_fail");
+        SpillStore(asm, OsLayout.FsOpenFirst, EAX);      // file's first block (temp)
+        SpillLoad(asm, OsLayout.FsOpenDirBlock, EBX);    // parent
+        Imm16(asm, ECX, OsLayout.FsPathComponentBase);   // name = last component
+        asm.MovImm(R(EDX), FsLayout.DirTypeFile);
+        SpillLoad(asm, OsLayout.FsOpenFirst, ESI);       // first block
+        asm.Call("fs_dir_insert");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("cf_insert_fail");
+        asm.Ret();                                       // EAX = new entry addr
+        asm.Label("cf_insert_fail");
+        SpillLoad(asm, OsLayout.FsOpenFirst, EAX);
+        asm.Call("fs_free_block");                       // undo the block alloc
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+        asm.Label("cf_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_open_core: EBX=abs path, ECX=flags, EDX=proc → EAX = fd or -1 ----
+        asm.Label("fs_open_core");
+        SpillStore(asm, OsLayout.FsOpenAbsPath, EBX);
+        SpillStore(asm, OsLayout.FsOpenFlags, ECX);
+        SpillStore(asm, OsLayout.FsOpenProc, EDX);
+        SpillLoad(asm, OsLayout.FsOpenAbsPath, EAX);
+        asm.Call("fs_path_resolve");             // EAX = entry addr or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jns("open_have_entry");              // found
+        SpillLoad(asm, OsLayout.FsOpenFlags, EBX);
+        asm.MovImm(R(ECX), Hardware.FsysCreateFlag);
+        asm.And(R(EBX), R(ECX));
+        asm.MovImm(R(ECX), 0);
+        asm.Cmp(R(EBX), R(ECX));
+        asm.Jz("open_fail");                     // not found and no create flag
+        asm.Call("fs_create_file");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("open_fail");
+        asm.Label("open_have_entry");
+        asm.Mov(R(R8), R(EAX));                  // entry addr
+        asm.Load(R(R9), R(R8));                  // type
+        asm.MovImm(R(EBX), FsLayout.DirTypeDir);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jz("open_fail");                     // cannot open a directory as a file
+        SpillStore(asm, OsLayout.FsOpenEntryAddr, R8);
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EBX), FsLayout.DirEntryFirstBlock);
+        asm.Add(R(R9), R(EBX));
+        asm.Load(R(R9), R(R9));
+        SpillStore(asm, OsLayout.FsOpenFirst, R9);
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EBX), FsLayout.DirEntrySizeField);
+        asm.Add(R(R9), R(EBX));
+        asm.Load(R(R9), R(R9));
+        SpillStore(asm, OsLayout.FsOpenSize, R9);
+        SpillLoad(asm, OsLayout.FsScratchEntryBlock, R9);   // dir block holding the entry
+        SpillStore(asm, OsLayout.FsOpenDirBlock, R9);
+        // entry byte offset within its block = entryAddr - cache_get(dirBlock).dataAddr
+        asm.Mov(R(EAX), R(R9));
+        asm.Call("cache_get");                   // hit: same slot the entry lives in
+        SpillLoad(asm, OsLayout.FsOpenEntryAddr, EBX);
+        asm.Sub(R(EBX), R(EAX));
+        SpillStore(asm, OsLayout.FsOpenEntryOffset, EBX);
+        // allocate an OFT slot and fill it
+        asm.Call("oft_alloc");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("open_fail");
+        asm.Mov(R(R8), R(EAX));                  // OFT index
+        asm.Mov(R(R10), R(R8));
+        asm.MovImm(R(EBX), OsLayout.OftEntryBytes);
+        asm.Mul(R(R10), R(EBX));
+        Imm16(asm, EBX, OsLayout.OftBase);
+        asm.Add(R(R10), R(EBX));                 // R10 = OFT entry addr
+        StoreFieldImm(asm, R10, OsLayout.OftInUse, 1);
+        SpillLoad(asm, OsLayout.FsOpenFirst, EBX);
+        StoreFieldReg(asm, R10, OsLayout.OftFirstBlock, EBX);
+        StoreFieldImm(asm, R10, OsLayout.OftOffset, 0);
+        SpillLoad(asm, OsLayout.FsOpenSize, EBX);
+        StoreFieldReg(asm, R10, OsLayout.OftSize, EBX);
+        SpillLoad(asm, OsLayout.FsOpenDirBlock, EBX);
+        StoreFieldReg(asm, R10, OsLayout.OftDirBlock, EBX);
+        SpillLoad(asm, OsLayout.FsOpenEntryOffset, EBX);
+        StoreFieldReg(asm, R10, OsLayout.OftEntryOffset, EBX);
+        // allocate an fd (2..FdCount-1) in the owning process; store OFT index + 1
+        asm.Mov(R(R11), R(R8));
+        asm.Inc(R(R11));                         // fd value = OFT index + 1
+        SpillLoad(asm, OsLayout.FsOpenProc, ECX);
+        EntryAddress(asm, ECX, R12);             // R12 = process entry
+        asm.MovImm(R(R13), 2);                   // fd index k (skip stdin/stdout)
+        asm.Label("open_fd_loop");
+        asm.MovImm(R(EBX), Hardware.FdCount);
+        asm.Cmp(R(R13), R(EBX));
+        asm.Jns("open_fd_full");
+        asm.Mov(R(R14), R(R13));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(R14), R(EBX));
+        asm.MovImm(R(EBX), Hardware.ProcessEntryFdTable);
+        asm.Add(R(R14), R(EBX));
+        asm.Add(R(R14), R(R12));                 // R14 = fd slot addr
+        asm.Load(R(R15), R(R14));
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R15), R(EBX));
+        asm.Jz("open_fd_found");
+        asm.Inc(R(R13));
+        asm.Jmp("open_fd_loop");
+        asm.Label("open_fd_found");
+        asm.Store(R(R14), R(R11));               // fd[k] = OFT index + 1
+        asm.Mov(R(EAX), R(R13));                 // return the fd number
+        asm.Ret();
+        asm.Label("open_fd_full");
+        StoreFieldImm(asm, R10, OsLayout.OftInUse, 0);   // release the OFT slot
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+        asm.Label("open_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_close_core: EBX=fd, ECX=proc → EAX = 0, or -1 (pure memory) ----
+        asm.Label("fs_close_core");
+        asm.MovImm(R(R8), 2);
+        asm.Cmp(R(EBX), R(R8));
+        asm.Js("close_fail");                    // fd < 2
+        asm.MovImm(R(R8), Hardware.FdCount);
+        asm.Cmp(R(EBX), R(R8));
+        asm.Jns("close_fail");                   // fd >= FdCount
+        EntryAddress(asm, ECX, R9);              // R9 = process entry
+        asm.Mov(R(R10), R(EBX));
+        asm.MovImm(R(R8), 4);
+        asm.Mul(R(R10), R(R8));
+        asm.MovImm(R(R8), Hardware.ProcessEntryFdTable);
+        asm.Add(R(R10), R(R8));
+        asm.Add(R(R10), R(R9));                  // R10 = fd slot addr
+        asm.Load(R(R11), R(R10));
+        asm.MovImm(R(R8), 0);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jz("close_fail");                    // fd not open
+        asm.Dec(R(R11));                         // OFT index
+        asm.Mov(R(R12), R(R11));
+        asm.MovImm(R(R8), OsLayout.OftEntryBytes);
+        asm.Mul(R(R12), R(R8));
+        Imm16(asm, R8, OsLayout.OftBase);
+        asm.Add(R(R12), R(R8));                  // R12 = OFT entry addr
+        StoreFieldImm(asm, R12, OsLayout.OftInUse, 0);
+        asm.MovImm(R(R8), 0);
+        asm.Store(R(R10), R(R8));                // clear the fd slot
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+        asm.Label("close_fail");
         asm.MovImm(R(EAX), 0);
         asm.Dec(R(EAX));
         asm.Ret();

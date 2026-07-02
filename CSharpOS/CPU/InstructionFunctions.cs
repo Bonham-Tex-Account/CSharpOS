@@ -462,6 +462,14 @@ internal static class InstructionFunctions
         hw.FileBlockWrite(block, srcAddress);
     }
 
+    // ===== Filesystem Syscall (Fsys) =========================================
+    // FSYS — user filesystem syscall. EAX = syscall number, EBX/ECX/EDX = args. Dispatches
+    // the IvtFsSyscall OS routine, which resumes the caller with the result in EAX.
+    internal static void Fsys(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.FsSyscall();
+    }
+
     // ===== Process (Fork, Exec, Wait, Exit, SetFocus) ========================
     // FORK — duplicate the running process; traps into the privileged OS fork routine,
     // which delivers the child's PID to the parent (in EAX) and 0 to the child.

@@ -78,6 +78,7 @@ public static partial class OsRoutines
         int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
         int cacheOp       = OsLayout.CodeBase + asm.CodeLength; EmitCacheOp(asm);
         int fsOp          = OsLayout.CodeBase + asm.CodeLength; EmitFsOp(asm);
+        int fsSyscall     = OsLayout.CodeBase + asm.CodeLength; EmitFsSyscall(asm);
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
@@ -91,6 +92,7 @@ public static partial class OsRoutines
         EmitFsSubroutines(asm);    // "fs_format/alloc_block/free_block/chain_next/chain_set_next"
         EmitFsDirSubroutines(asm); // "fs_hash/root_dir/dir_lookup/dir_insert/dir_remove"
         EmitFsPathSubroutines(asm);// "fs_extract_component/path_resolve/mkdir"
+        EmitFsFileSubroutines(asm);// "oft_alloc/resolve_parent/create_file/open_core/close_core"
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);
@@ -122,6 +124,7 @@ public static partial class OsRoutines
         WriteWord(image, Hardware.IvtPageFault * 4,          pageFault);
         WriteWord(image, Hardware.IvtCacheOp * 4,            cacheOp);
         WriteWord(image, Hardware.IvtFsOp * 4,               fsOp);
+        WriteWord(image, Hardware.IvtFsSyscall * 4,          fsSyscall);
 
         // Default every process's copy-on-write partner to -1 (none) in the image itself, so
         // even minimal hand-seeded test images (which skip SeedOsData) never see a process

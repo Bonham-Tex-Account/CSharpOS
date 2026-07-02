@@ -251,6 +251,12 @@ public sealed partial class Assembler
         Emit(Instruction.FBWRITE, (byte)block, (byte)src, 0);
     }
 
+    // User filesystem syscall: EAX = syscall number, EBX/ECX/EDX = args (set before FSYS).
+    public void Fsys()
+    {
+        Emit(Instruction.FSYS, 0, 0, 0);
+    }
+
     // Process control: fork the running process (parent gets the child PID in EAX,
     // child gets 0).
     public void Fork()

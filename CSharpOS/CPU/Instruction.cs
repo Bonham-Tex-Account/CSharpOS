@@ -88,6 +88,11 @@ public static class Instruction
     public const byte FBREAD      = 0x4B;
     public const byte FBWRITE     = 0x4C;
 
+    // ---- user filesystem syscall (Increment 5) ----------------------------
+    // FSYS — a user-mode filesystem syscall. EAX = syscall number, EBX/ECX/EDX = args;
+    // dispatches the IvtFsSyscall OS routine (like FORK), which delivers the result in EAX.
+    public const byte FSYS        = 0x4D;
+
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
@@ -141,6 +146,7 @@ public static class Instruction
         opcodeTable[INPOLL]      = InstructionFunctions.InkPoll;
         opcodeTable[FBREAD]      = InstructionFunctions.FbRead;
         opcodeTable[FBWRITE]     = InstructionFunctions.FbWrite;
+        opcodeTable[FSYS]        = InstructionFunctions.Fsys;
     }
 
     // ---- integral functions ----------------------------------------------

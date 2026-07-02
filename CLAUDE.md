@@ -111,14 +111,13 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x4A | INPOLL | InkPoll | b1=dst; non-blocking; delivers keycode or -1 if empty; never blocks; User→EnterKernel(INPOLL, b1*4, 0) |
 | 0x4B | FBREAD | FbRead | b1=dest (RAM addr), b2=block; copy FileBlockSize bytes file-block→RAM; privileged (User→invalid trap) |
 | 0x4C | FBWRITE | FbWrite | b1=block, b2=src (RAM addr); copy FileBlockSize bytes RAM→file-block; privileged (User→invalid trap) |
-
-*(0x4D reserved for FSYS — Increment 5.)*
+| 0x4D | FSYS | Fsys | user filesystem syscall; EAX=syscall#, EBX/ECX/EDX=args; dispatches IvtFsSyscall (like FORK), result delivered in EAX |
 
 ---
 
 ## IVT Slot Table
 
-`IvtSlotCount=19`, `IvtSize=76`, `CodeBase=76`
+`IvtSlotCount=20`, `IvtSize=80`, `CodeBase=80`
 
 | Slot | Constant | C# addr field | Emit Method | Purpose |
 |------|----------|--------------|-------------|---------|
@@ -140,9 +139,10 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 15 | IvtPageFault | — | EmitPageFault | Demand fault-in + COW-write resolve; EAX=page |
 | 16 | IvtWakeKey | — | EmitWakeEntry(KeyInput) | Wake first process waiting for a raw keypress |
 | 17 | IvtCacheOp | — | EmitCacheOp | FS buffer-cache control: EAX=op, EBX=block → result in CacheResult |
-| 18 | IvtFsOp | — | EmitFsOp | FS block layer: EAX=op, EBX=block, ECX=next → result in FsResult |
+| 18 | IvtFsOp | — | EmitFsOp | FS block/dir/file layer: EAX=op, args in EBX/ECX/EDX/ESI → result in FsResult |
+| 19 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
 
-Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove, 10=Mkdir(EBX=parent,ECX=name), 11=PathResolve(EBX=path) (see `Hardware.FsOp*`).
+Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove, 10=Mkdir(EBX=parent,ECX=name), 11=PathResolve(EBX=path), 12=Open(EBX=absPath,ECX=flags,EDX=proc), 13=Close(EBX=fd,ECX=proc) (see `Hardware.FsOp*`). FSYS syscall numbers (EAX): 0=Open(EBX=pathPtr,ECX=flags), 1=Read, 2=Write, 3=Close(EBX=fd); flag `FsysCreateFlag=1`. IvtFsOp Open/Close take an ABSOLUTE path + explicit proc index; FSYS translates the user pointer (ProgramAddress+ptr) and uses the current process.
 
 ---
 
@@ -182,7 +182,11 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | FsResultOffset | +9024 | 4 (IvtFsOp return slot) |
 | FsScratchBase | +9028 | 40 (FsScratchWords=10: Name/Hash/Type/First/Dir/EntryBlock/FreeBlock/ArgA/ArgB + spare) |
 | FsPathBase | +9068 | FsPathPos/Dir/Last (+0/+4/+8) then FsPathComponentBase (+12, NameMaxChars words) |
-| **TotalSize** | **+9128** (= 25512 abs) | — |
+| OftBase | +9128 | OftRegionSize=192 (MaxOpenFiles=8 × OftEntryBytes=24: inUse/firstBlock/offset/size/dirBlock/entryOffset) |
+| FsOpenBase | +9320 | 32 (fs_open_core spill scratch: absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset) |
+| **TotalSize** | **+9352** (= 25736 abs) | — |
+
+`OftAddress(i) = OftBase + i * 24`. A process fd slot (2..7) holds `OFT index + 1` (0 = free), so a zeroed fd table = no open files (no seeding).
 
 `SwapSlot(proc, page) = 64 + proc * 64 + page` (disk slot, DataBase-independent). `PageTableAddress(i)`, `FrameTableEntry(f)`, `FrameBase(f)`, `CowPartnerAddress(i)`, `CacheSlotAddress(i)` are all `OsLayout.<Base> + i * <stride>` — read the stride from the region's Size column.
 
@@ -343,6 +347,8 @@ Each block: payload bytes 0..251, `NextPtrOffset=252` holds the next-block link 
 
 **Nested dirs + path traversal (Inc 4b, in `OsRoutines.Fs.cs`):** `fs_mkdir` (alloc a dir block + insert a `type=dir` entry; frees the block if the name dups), `fs_path_resolve` (walk `/a/b/c` word-per-char, descending only through `type=dir` entries), `fs_extract_component` (pull one component into `FsPathComponentBase`). Path-resolve keeps all loop state in `OsLayout.FsPath*` memory (lookup clobbers registers between components); `/` separator, trailing slashes resolve the last component, empty/`/`-only path → -1.
 
+**File syscalls (Inc 5a, in `OsRoutines.Fs.cs`):** `FSYS` (0x4D) → `IvtFsSyscall` (atomic dispatch, like FORK) → `fs_open_core`/`fs_close_core`. OPEN resolves the path (creates via `fs_create_file`→`fs_resolve_parent` if missing and `FsysCreateFlag` set), rejects directories, fills an OFT slot (`oft_alloc`) with firstBlock/offset/size + the dir-entry location, and stores `OFT index+1` in the lowest free fd (2..7). CLOSE clears the fd + OFT slot. The FSYS wrapper resumes the caller with the result in EAX via the SAVEREGS→entry.EAX→LOADREGS→OSRET idiom (EmitWait's reap path). **READ/WRITE = Inc 5b (pending).** Note: boot does not yet auto-format — tests/callers run `FsOpFormat` first.
+
 ### Buddy Allocator
 | Constant | Value |
 |----------|-------|
@@ -431,6 +437,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-01 | Filesystem Inc 4a: ISA directory layer (word-per-char names; FsScratch spill region; fs_hash/root_dir/dir_lookup/dir_insert/dir_remove; dup rejection, chain extension). Format now allocs root dir @block 2 | ~45K (inline) | 10 new dir tests + 6 Inc-3 tests updated for root-dir reservation (564 total), all green. Heavy register-spill-to-memory pattern. Nested/path traversal deferred to Inc 4b. |
 | 2026-07-01 | Refactor: split OsRoutines.cs (3021 lines) into partial-class files (core + Paging + Cache + Fs) via scripted line-slicing; CLAUDE index switched from drifting line numbers to Grep-stable marker names + file map | ~15K (inline) | Pure code motion, 564 tests still green. FS work now opens OsRoutines.Fs.cs (~520 lines) not the whole file. Scripted with PowerShell to keep file content out of context. |
 | 2026-07-01 | Filesystem Inc 4b: nested dirs (fs_mkdir) + path traversal (fs_path_resolve/fs_extract_component) in OsRoutines.Fs.cs; FsPath* scratch. DataBase 12288→16384 (FS code hit the guard at 12.4KB) | ~30K (inline) | 9 new path tests (573 total), all green after the DataBase bump. First increment worked in the split file. OsLayout addrs converted to DataBase-relative in docs to stop absolute-address drift. |
+| 2026-07-01 | Filesystem Inc 5a: FSYS (0x4D) + IvtFsSyscall (slot 19; IVT→20, CodeBase→80) + open-file table + fs_open_core/close_core (create-on-open, dir rejection, fd/OFT bookkeeping). Cores testable via FsOpOpen/FsOpClose | ~45K (inline) | Full ISA chosen. 13 core tests + 1 end-to-end FSYS test through a live scheduler (587 total), all green. Deliver-result idiom = EmitWait reap path (SAVEREGS persists captured trap frame). READ/WRITE = 5b. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 
