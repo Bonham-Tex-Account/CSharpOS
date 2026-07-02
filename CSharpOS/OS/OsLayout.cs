@@ -16,8 +16,10 @@ public static class OsLayout
     // The assembled OS routines (scheduler, allocator, disk, and the spawning family:
     // spawn/fork/exec/wait/exit) sit between CodeBase and DataBase; BuildOsImage guards
     // against overrun. Raised to 8192 once the spawning routines were added, then to 12288
-    // once the paging family (page-fault handler + frame/swap/COW subroutines) was added.
-    public const int DataBase = 12288;
+    // once the paging family (page-fault handler + frame/swap/COW subroutines) was added,
+    // then to 16384 once the filesystem family (cache manager + block/directory/path
+    // routines, Increments 2–4) was added (~12.4 KB of code; headroom for Inc 5–6).
+    public const int DataBase = 16384;
 
     // ---- scheduler state header (4-byte fields at the data section base) ---
     public const int ProcessCountOffset    = DataBase + 0;
@@ -211,10 +213,24 @@ public static class OsLayout
     public const int FsScratchDir        = FsScratchBase + 16;  // insert: directory block
     public const int FsScratchEntryBlock = FsScratchBase + 20;  // block holding the matched/new entry
     public const int FsScratchFreeBlock  = FsScratchBase + 24;  // insert: newly chained block
-    public const int FsScratchWords      = 8;                   // one spare
+    public const int FsScratchArgA       = FsScratchBase + 28;  // mkdir: name addr (survives fs_dir_insert)
+    public const int FsScratchArgB       = FsScratchBase + 32;  // mkdir: new dir block (survives fs_dir_insert)
+    public const int FsScratchWords      = 10;                  // one spare
+
+    // ---- filesystem path-resolution scratch (Increment 4b) ----------------
+    // fs_path_resolve walks a "/a/b/c" path (word-per-char) component by component. All of its
+    // loop state lives in memory (fs_dir_lookup clobbers the registers): the current read
+    // position, the current directory block, a "last component" flag, and a buffer the current
+    // path component is extracted into for the per-directory lookup.
+    public const int FsPathBase          = FsScratchBase + FsScratchWords * 4;
+    public const int FsPathPos           = FsPathBase + 0;   // read cursor into the path string
+    public const int FsPathDir           = FsPathBase + 4;   // directory currently being descended
+    public const int FsPathLast          = FsPathBase + 8;   // 1 = the extracted component is the last
+    public const int FsPathComponentBase = FsPathBase + 12;  // NameMaxChars words: the extracted name
+    public const char FsPathSeparator    = '/';
 
     // Total OS region size.
-    public const int TotalSize = FsScratchBase + FsScratchWords * 4;
+    public const int TotalSize = FsPathComponentBase + FsLayout.NameMaxChars * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)

@@ -142,58 +142,49 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 17 | IvtCacheOp | — | EmitCacheOp | FS buffer-cache control: EAX=op, EBX=block → result in CacheResult |
 | 18 | IvtFsOp | — | EmitFsOp | FS block layer: EAX=op, EBX=block, ECX=next → result in FsResult |
 
-Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove (see `Hardware.FsOp*`).
+Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove, 10=Mkdir(EBX=parent,ECX=name), 11=PathResolve(EBX=path) (see `Hardware.FsOp*`).
 
 ---
 
 ## OsLayout Offsets
 
-`DataBase = 12288`
+`DataBase = 16384` (raised from 12288 in Inc 4b for the FS code). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
 
-### Header (relative to DataBase)
+### Header
 
-| Field | Absolute Addr | +offset |
-|-------|--------------|---------|
-| ProcessCountOffset | 12288 | +0 |
-| CurrentIndexOffset | 12292 | +4 |
-| BuddyHeapStartOffset | 12296 | +8 |
-| BuddyHeapSizeOffset | 12300 | +12 |
-| BoostTimerOffset | 12304 | +16 |
-| QuantumTableOffset | 12308 | +20 (4 × 4-byte thresholds: L0=1, L1=2, L2=4, L3=255) |
-| BuddyMinBlockOffset | 12324 | +36 |
-| BuddyLevelsOffset | 12328 | +40 |
-| NextPidOffset | 12332 | +44 |
-| ProcessTableOffset | 12336 | +48 (MaxProcesses=8 × ProcessEntrySize=192 = 1536 bytes) |
+| Field | Offset from DataBase |
+|-------|------|
+| ProcessCountOffset | +0 |
+| CurrentIndexOffset | +4 |
+| BuddyHeapStartOffset | +8 |
+| BuddyHeapSizeOffset | +12 |
+| BoostTimerOffset | +16 |
+| QuantumTableOffset | +20 (4 × 4-byte thresholds: L0=1, L1=2, L2=4, L3=255) |
+| BuddyMinBlockOffset | +36 |
+| BuddyLevelsOffset | +40 |
+| NextPidOffset | +44 |
+| ProcessTableOffset | +48 (MaxProcesses=8 × ProcessEntrySize=192 = 1536 bytes) |
 
 ### After Process Table
 
-*(All addresses below shifted +128 from the pre-Inc-0 layout: process table grew 1408→1536 when FdCount went 4→8.)*
+| Region | Offset from DataBase | Size |
+|--------|------|------|
+| BuddyBitmapOffset | +1584 | 32 bytes (BuddyBitmapWords=8 × 4) |
+| PrivilegedStackOffset | +1616 | 64 bytes |
+| PrivilegedStackTop / PageTableBase | +1680 | PageTableRegionSize=2048 (8 procs × 64 pages × 4 bytes) |
+| FrameTableBase | +3728 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
+| FramePoolBase | +3856 | FramePoolSize=1024 (4 frames × PageSize=256) |
+| ZeroPageBase | +4880 | 256 bytes (always-zero DWRITE source) |
+| SwapScratchBase | +5136 | 256 bytes (fork slot-copy transfer buffer) |
+| CowPartnerBase | +5392 | 32 bytes (8 procs × 4 bytes each) |
+| CacheClockOffset / FlushTimer / Result | +5424 / +5428 / +5432 | 3 × 4 (cache header) |
+| CacheSlotTableBase | +5436 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
+| FsResultOffset | +9024 | 4 (IvtFsOp return slot) |
+| FsScratchBase | +9028 | 40 (FsScratchWords=10: Name/Hash/Type/First/Dir/EntryBlock/FreeBlock/ArgA/ArgB + spare) |
+| FsPathBase | +9068 | FsPathPos/Dir/Last (+0/+4/+8) then FsPathComponentBase (+12, NameMaxChars words) |
+| **TotalSize** | **+9128** (= 25512 abs) | — |
 
-| Region | Absolute Addr | Size |
-|--------|--------------|------|
-| BuddyBitmapOffset | 13872 | 32 bytes (BuddyBitmapWords=8 × 4) |
-| PrivilegedStackOffset | 13904 | 64 bytes |
-| PrivilegedStackTop | 13968 | — |
-| PageTableBase | 13968 | PageTableRegionSize=2048 (8 procs × 64 pages × 4 bytes) |
-| FrameTableBase | 16016 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
-| FramePoolBase | 16144 | FramePoolSize=1024 (4 frames × PageSize=256) |
-| ZeroPageBase | 17168 | 256 bytes (always-zero DWRITE source) |
-| SwapScratchBase | 17424 | 256 bytes (fork slot-copy transfer buffer) |
-| CowPartnerBase | 17680 | 32 bytes (8 procs × 4 bytes each) |
-| CacheClockOffset | 17712 | 4 (LRU stamp counter) |
-| CacheFlushTimerOffset | 17716 | 4 (periodic-flush countdown) |
-| CacheResultOffset | 17720 | 4 (IvtCacheOp return slot) |
-| CacheSlotTableBase | 17724 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
-| FsResultOffset | 21312 | 4 (IvtFsOp return slot) |
-| FsScratchBase | 21316 | 32 (FsScratchWords=8; dir routines spill cross-cache-call state here) |
-| **TotalSize** | **21348** | — |
-
-`PageTableAddress(i) = 13968 + i * 256`
-`FrameTableEntry(f) = 16016 + f * 32`
-`FrameBase(f) = 16144 + f * 256`
-`SwapSlot(proc, page) = 64 + proc * 64 + page`
-`CowPartnerAddress(i) = 17680 + i * 4`
-`CacheSlotAddress(i) = 17724 + i * 276`
+`SwapSlot(proc, page) = 64 + proc * 64 + page` (disk slot, DataBase-independent). `PageTableAddress(i)`, `FrameTableEntry(f)`, `FrameBase(f)`, `CowPartnerAddress(i)`, `CacheSlotAddress(i)` are all `OsLayout.<Base> + i * <stride>` — read the stride from the region's Size column.
 
 ### Cache Slot Fields (276 bytes per slot)
 | Offset | Field | Notes |
@@ -348,7 +339,9 @@ Distinct from OsLayout (OS RAM). File-block region blocks:
 
 Each block: payload bytes 0..251, `NextPtrOffset=252` holds the next-block link (`EndOfChain=-1`) for free-chaining. Block layer is ISA `fs_*` subroutines via `IvtFsOp`, all through the cache: `fs_format` (bits 0,1 set, allocs root dir → block 2 stored @ SuperRootDirOffset), `fs_alloc_block` (scan bitmap for a clear bit → set + init next=-1), `fs_free_block` (clear bit + cache_discard), `fs_chain_next`/`fs_chain_set_next`. **Convention:** EDX/EDI carry a value across `cache_*` calls (the cache subroutines never touch EDX/EDI); state that must survive `fs_alloc_block`/`fs_chain_set_next` (which do clobber EDX/EDI) is spilled to `OsLayout.FsScratch*`.
 
-**Directory entries (Inc 4a):** a directory is a block chain; `DirEntryBytes=64`, `DirEntriesPerBlock=3`. Entry: `type`@0 (0=free,1=file,2=dir) · `hash`@4 · `firstBlock`@8 · `size`@12 · `name`@16 (`NameMaxChars=12` words, word-per-char, null-padded). ISA dir routines via `IvtFsOp`: `fs_hash` (h=h*31+c), `fs_root_dir`, `fs_dir_lookup` (hash-reject then name-verify; stashes matched block in FsScratchEntryBlock), `fs_dir_insert` (dup-reject via lookup, find free slot or extend chain), `fs_dir_remove` (type=free). **Nested dirs / path traversal = Inc 4b (pending).**
+**Directory entries (Inc 4a):** a directory is a block chain; `DirEntryBytes=64`, `DirEntriesPerBlock=3`. Entry: `type`@0 (0=free,1=file,2=dir) · `hash`@4 · `firstBlock`@8 · `size`@12 · `name`@16 (`NameMaxChars=12` words, word-per-char, null-padded). ISA dir routines via `IvtFsOp`: `fs_hash` (h=h*31+c), `fs_root_dir`, `fs_dir_lookup` (hash-reject then name-verify; stashes matched block in FsScratchEntryBlock), `fs_dir_insert` (dup-reject via lookup, find free slot or extend chain), `fs_dir_remove` (type=free).
+
+**Nested dirs + path traversal (Inc 4b, in `OsRoutines.Fs.cs`):** `fs_mkdir` (alloc a dir block + insert a `type=dir` entry; frees the block if the name dups), `fs_path_resolve` (walk `/a/b/c` word-per-char, descending only through `type=dir` entries), `fs_extract_component` (pull one component into `FsPathComponentBase`). Path-resolve keeps all loop state in `OsLayout.FsPath*` memory (lookup clobbers registers between components); `/` separator, trailing slashes resolve the last component, empty/`/`-only path → -1.
 
 ### Buddy Allocator
 | Constant | Value |
@@ -437,6 +430,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-01 | Filesystem Inc 3: ISA block allocator + free-chaining (FsLayout.cs on-disk struct; IvtFsOp slot 18, IVT 18→19, CodeBase 72→76; fs_format/alloc_block/free_block/chain_next/chain_set_next, all through the cache) | ~35K (inline) | 10 new tests (554 total), all passed first run. ISA format routine chosen. EDX/EDI carry values across cache_* calls. |
 | 2026-07-01 | Filesystem Inc 4a: ISA directory layer (word-per-char names; FsScratch spill region; fs_hash/root_dir/dir_lookup/dir_insert/dir_remove; dup rejection, chain extension). Format now allocs root dir @block 2 | ~45K (inline) | 10 new dir tests + 6 Inc-3 tests updated for root-dir reservation (564 total), all green. Heavy register-spill-to-memory pattern. Nested/path traversal deferred to Inc 4b. |
 | 2026-07-01 | Refactor: split OsRoutines.cs (3021 lines) into partial-class files (core + Paging + Cache + Fs) via scripted line-slicing; CLAUDE index switched from drifting line numbers to Grep-stable marker names + file map | ~15K (inline) | Pure code motion, 564 tests still green. FS work now opens OsRoutines.Fs.cs (~520 lines) not the whole file. Scripted with PowerShell to keep file content out of context. |
+| 2026-07-01 | Filesystem Inc 4b: nested dirs (fs_mkdir) + path traversal (fs_path_resolve/fs_extract_component) in OsRoutines.Fs.cs; FsPath* scratch. DataBase 12288→16384 (FS code hit the guard at 12.4KB) | ~30K (inline) | 9 new path tests (573 total), all green after the DataBase bump. First increment worked in the split file. OsLayout addrs converted to DataBase-relative in docs to stop absolute-address drift. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 
