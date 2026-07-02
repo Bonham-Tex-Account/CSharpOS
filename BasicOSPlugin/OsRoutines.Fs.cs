@@ -745,6 +745,9 @@ public static partial class OsRoutines
         asm.MovImm(R(R8), Hardware.FsysWrite);
         asm.Cmp(R(EAX), R(R8));
         asm.Jz("fsy_write");
+        asm.MovImm(R(R8), Hardware.FsysExec);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_exec");
         asm.MovImm(R(R15), 0);                   // unknown syscall → -1
         asm.Dec(R(R15));
         asm.Jmp("fsy_deliver");
@@ -785,6 +788,19 @@ public static partial class OsRoutines
         LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
         asm.Add(R(ECX), R(R10));
         asm.Call("fs_write_core");
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_exec");
+        // translate the user path ptr (EBX) to absolute, then hand off to fs_exec_core, which
+        // replaces the running image and resumes it (never returns) on success, or returns -1
+        // if the path does not resolve to a file — in which case we deliver -1 to the caller.
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EBP));
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(EBX), R(R10));                 // EBX = absolute path addr
+        asm.Call("fs_exec_core");                // resumes the process on success; returns -1 on failure
         asm.Mov(R(R15), R(EAX));
 
         asm.Label("fsy_deliver");
@@ -1423,6 +1439,189 @@ public static partial class OsRoutines
         asm.MovImm(R(EAX), 0);
         asm.Ret();
         asm.Label("write_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+    }
+
+    // ===== EmitFsExecSubroutine ==============================================
+    // fs_exec_core (Increment 6): replace the running process's image with a program stored as
+    // an FS file. Mirrors EmitExec's teardown/realloc/resume, but sources the new image from a
+    // file's block chain instead of a disk image slot. Entered with EBX = ABSOLUTE path address
+    // (the FSYS wrapper has already translated the user pointer).
+    //
+    // The path is resolved to a file entry FIRST — while the old image (holding the path string)
+    // is still mapped — and its firstBlock + size are captured into FsRw* scratch before any
+    // teardown or cache eviction can invalidate them. Only after a successful resolve does the
+    // routine cross the point of no return and rebuild the process. Code pages are RAM-home, so
+    // the rebuilt process needs no disk slot; DiskSlot is set to -1 to mark it FS-backed.
+    //   Returns EAX = -1 if the path is missing or names a directory (caller delivers it);
+    //   on success it OSRETs into the new image and never returns.
+    private static void EmitFsExecSubroutine(Assembler asm)
+    {
+        asm.Label("fs_exec_core");
+        asm.Mov(R(EAX), R(EBX));
+        asm.Call("fs_path_resolve");                 // EAX = entry addr or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fxc_fail");                          // path not found
+        asm.Mov(R(R12), R(EAX));                     // R12 = entry addr (LoadField clobbers EAX)
+        LoadField(asm, R12, FsLayout.DirEntryType, R8);
+        asm.MovImm(R(EBX), FsLayout.DirTypeFile);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("fxc_isfile");
+        asm.Jmp("fxc_fail");                         // a directory is not executable
+
+        asm.Label("fxc_isfile");
+        // Capture firstBlock + size (in words) NOW, before teardown: the entry addr points into
+        // a cache slot a later cache_get could evict, and the buddy/paging teardown clobbers the
+        // FsRw* scratch — so the durable values live in FsScratch* (which only the dir/path
+        // routines touch) and are re-seeded into FsRw* after the realloc.
+        LoadField(asm, R12, FsLayout.DirEntryFirstBlock, R8);
+        SpillStore(asm, OsLayout.FsScratchArgA, R8);         // chain walk start (survives teardown)
+        LoadField(asm, R12, FsLayout.DirEntrySizeField, R8); // size in words
+        SpillStore(asm, OsLayout.FsScratchFirst, R8);        // words to load (survives teardown)
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R9), R(EAX));
+        SpillStore(asm, OsLayout.FsScratchArgB, R9);         // newLen in bytes (survives teardown)
+
+        // ---------------- point of no return: tear down the old image ----------------
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        EntryAddress(asm, ECX, EBX);                         // EBX = current entry
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryDiskSlot); // FS-backed: no disk slot
+
+        SetupPrivilegedStack(asm);
+        asm.Call("free_sub");
+        asm.Call("resolve_cow");
+        asm.Call("release_frames");
+        asm.Call("zero_swap_slots");
+        // resolve_cow clobbered EBX; reload this process's entry.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(EBX), R(EAX));
+        EntryAddress(asm, EBX, EBX);
+
+        // Sizing: newTotal = oldTotal - oldProgramSize + newLen.
+        SpillLoad(asm, OsLayout.FsScratchArgB, R9);          // newLen bytes (stashed pre-teardown)
+        LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramSize, R11);
+        asm.Mov(R(R12), R(R10));
+        asm.Sub(R(R12), R(R11));
+        asm.Add(R(R12), R(R9));
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryProgramSize, R9);
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryTotalSize, R12);
+
+        SetupPrivilegedStack(asm);
+        asm.Call("alloc_sub");                               // sets entry.ProgramAddress or -1
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R9);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R9), R(EAX));
+        asm.Jns("fxc_alloc_ok");
+        // Out of memory: the old image is already gone, so terminate the process.
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated);
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        asm.Jmp("resume_mlfq");
+
+        asm.Label("fxc_alloc_ok");
+        // Copy the file's block chain into ProgramAddress (R9), word by word, through the cache.
+        // Re-seed the FsRw* walk state from the FsScratch* values stashed before teardown.
+        SpillStore(asm, OsLayout.FsRwBufPtr, R9);           // dest = ProgramAddress
+        SpillLoad(asm, OsLayout.FsScratchArgA, R8);
+        SpillStore(asm, OsLayout.FsRwCurBlock, R8);         // chain walk start
+        SpillLoad(asm, OsLayout.FsScratchFirst, R8);
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);        // words left to load
+        asm.Label("fxc_load_loop");
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("fxc_load_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("cache_get");                              // EAX = block data addr
+        asm.Mov(R(R9), R(EAX));                             // src block
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Mov(R(R12), R(R8));
+        asm.MovImm(R(R11), FsLayout.CharsPerBlock);
+        asm.Cmp(R(R12), R(R11));
+        asm.Js("fxc_n_ok");
+        asm.Mov(R(R12), R(R11));                            // n = min(remaining, CharsPerBlock)
+        asm.Label("fxc_n_ok");
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);           // dst
+        asm.MovImm(R(R15), 0);
+        asm.Label("fxc_word");
+        asm.Cmp(R(R15), R(R12));
+        asm.Jns("fxc_word_done");
+        asm.Mov(R(EBX), R(R15));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));                            // EBX = R15*4
+        asm.Mov(R(ECX), R(R9));
+        asm.Add(R(ECX), R(EBX));
+        asm.Load(R(ECX), R(ECX));                           // word from file block
+        asm.Mov(R(EBP), R(R14));
+        asm.Add(R(EBP), R(EBX));
+        asm.Store(R(EBP), R(ECX));                          // → RAM image
+        asm.Inc(R(R15));
+        asm.Jmp("fxc_word");
+        asm.Label("fxc_word_done");
+        asm.Mov(R(EBX), R(R12));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);
+        asm.Add(R(R14), R(EBX));
+        SpillStore(asm, OsLayout.FsRwBufPtr, R14);          // dst += n*4
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Sub(R(R8), R(R12));
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);        // remaining -= n
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("fxc_load_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Jmp("fxc_load_loop");
+        asm.Label("fxc_load_done");
+
+        // The chain walk clobbered EBX; reload the current entry.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(EBX), R(EAX));
+        EntryAddress(asm, EBX, EBX);
+
+        // Reset the register file to zero (24 words) so the new program starts fresh (EIP=0).
+        asm.MovImm(R(R13), 0);
+        asm.Label("fxc_clear");
+        asm.MovImm(R(EAX), 96);
+        asm.Cmp(R(R13), R(EAX));
+        asm.Jns("fxc_clear_done");
+        asm.Mov(R(R14), R(EBX));
+        asm.Add(R(R14), R(R13));
+        asm.MovImm(R(R15), 0);
+        asm.Store(R(R14), R(R15));
+        asm.MovImm(R(EAX), 4);
+        asm.Add(R(R13), R(EAX));
+        asm.Jmp("fxc_clear");
+        asm.Label("fxc_clear_done");
+
+        // ESP = top of the user stack = TotalSize - KernelStackSize (EIP stays 0).
+        LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);
+        asm.MovImm(R(EAX), Hardware.KernelStackSize);
+        asm.Sub(R(R10), R(EAX));
+        StoreFieldReg(asm, EBX, EspSlot, R10);
+
+        // Scheduling state (keep Pid/ParentPid — exec preserves identity).
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryLevel, User);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryWaitReason, WaitNone);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryTicksUsed, 0);
+
+        // Resume the process running its new image (it is still the current process).
+        asm.LoadRegs(R(EBX));
+        asm.SetLayout(R(EBX));
+        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+
+        asm.Label("fxc_fail");
         asm.MovImm(R(EAX), 0);
         asm.Dec(R(EAX));
         asm.Ret();

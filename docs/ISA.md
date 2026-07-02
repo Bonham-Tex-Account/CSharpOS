@@ -14,9 +14,11 @@ This document is the authoritative reference for the CSharpOS ISA. Source of tru
    - [Arithmetic and logic](#arithmetic-and-logic)
    - [Control flow](#control-flow)
    - [I/O](#io)
+   - [String and key I/O](#string-and-key-io)
    - [Process control](#process-control)
    - [OS / privileged support](#os--privileged-support)
    - [Disk](#disk)
+   - [Filesystem](#filesystem)
 5. [Addressing and program-relative offsets](#addressing-and-program-relative-offsets)
 6. [Privilege levels and mode transitions](#privilege-levels-and-mode-transitions)
 7. [Worked examples](#worked-examples)
@@ -91,7 +93,7 @@ There is no carry, overflow, parity, or auxiliary-carry flag.
 
 ## Complete instruction list
 
-41 opcodes are currently defined. The "Assembler method" column shows the C# `Assembler` method that emits the instruction.
+48 opcodes are currently defined. The "Assembler method" column shows the C# `Assembler` method that emits the instruction.
 
 ### Data movement
 
@@ -168,6 +170,28 @@ The shared handler (`EmitSyscall` in `OsRoutines.cs`) reads the faulting opcode 
 | `HLT` | 0x32 | `Hlt()` | Terminate the running process with exit status 0. Dispatches `IvtHalt`; the OS frees memory, resolves parent/zombie/orphan logic, and schedules the next process. |
 | `IRET` | 0x33 | `Iret()` | Return from a kernel-mode syscall handler to user mode. Restores the user register file from the kernel-stack trap frame and resumes user code at the saved return IP. **Forbidden in user mode** (trapped as an invalid instruction by `IretTrapProvider`). |
 
+### String and key I/O
+
+Like `OUT`/`IN`, these are user-mode instructions that trap to the shared kernel syscall handler (`EnterKernel` → `IvtSyscall`) when executed in User mode; they run directly when already in Kernel mode.
+
+| Mnemonic | Opcode | Bytes (b1 b2 b3) | Assembler method | Description |
+|----------|--------|-------------------|------------------|-------------|
+| `OUTS [ptr], len` | 0x47 | ptr, len, 0 | `Outs(ptr, len)` | Reads `reg[len]` words starting at virtual address `reg[ptr]`, outputs the low byte of each as a character, and stops early at the first null word. User mode traps via `EnterKernel(OUTS, reg[ptr]*4, reg[len]*4)`. |
+| `INS [ptr], maxLen` | 0x48 | ptr, maxLen, 0 | `Ins(ptr, maxLen)` | Blocks (`WaitReason.StringInput`) until a line is available on stdin's string queue, then writes each character as a zero-extended word into `ptr[0..n)` and null-terminates. User mode traps via `EnterKernel(INS, reg[ptr]*4, reg[maxLen]*4)`. |
+| `INK dst` | 0x49 | dst, 0, 0 | `Ink(dst)` | Blocks (`WaitReason.KeyInput`) until a raw keypress arrives, then delivers the keycode into `reg[dst]`. User mode traps via `EnterKernel(INK, reg[dst]*4, 0)`. |
+| `INPOLL dst` | 0x4A | dst, 0, 0 | `InkPoll(dst)` | Non-blocking: delivers the next queued keycode into `reg[dst]`, or −1 if no key is queued. Never blocks. User mode traps via `EnterKernel(INPOLL, reg[dst]*4, 0)`. |
+
+**Raw key codes:** ASCII 32–126 are delivered as-is. Special keys use values above the ASCII range, defined as `Hardware` constants:
+
+| Constant | Value |
+|----------|-------|
+| `KeyUp` | 256 |
+| `KeyDown` | 257 |
+| `KeyLeft` | 258 |
+| `KeyRight` | 259 |
+
+**Wait reasons introduced by these instructions:** `WaitReason.StringInput = 4` (blocked in `INS`), `WaitReason.KeyInput = 5` (blocked in `INK`). A dedicated IVT slot, `IvtWakeKey` (slot 16), wakes the first process blocked on a raw keypress; string and int input share the ordinary `IvtWakeInput` path.
+
 ### Process control
 
 These instructions are available to user-mode processes. They trap into the privileged OS routines listed (the pattern mirrors `HLT`).
@@ -182,7 +206,7 @@ These instructions are available to user-mode processes. They trap into the priv
 
 ### OS / privileged support
 
-These instructions are used exclusively by the OS ISA routines running in Kernel mode with interrupts masked (atomic). They have no user-mode guards enforced by traps, but calling them from user mode is incorrect: SAVEREGS/LOADREGS read and write absolute memory addresses, SETLAYOUT reconfigures the hardware layout, and OSRET manipulates the staged context and privilege level in ways that corrupt process state. Only DREAD/DWRITE/DLEN have explicit user-mode faults (see Disk section).
+These instructions are used exclusively by the OS ISA routines running in Kernel mode with interrupts masked (atomic). They have no user-mode guards enforced by traps, but calling them from user mode is incorrect: SAVEREGS/LOADREGS read and write absolute memory addresses, SETLAYOUT reconfigures the hardware layout, and OSRET manipulates the staged context and privilege level in ways that corrupt process state. Only DREAD/DWRITE/DLEN and FBREAD/FBWRITE have explicit user-mode faults (see [Disk](#disk)).
 
 | Mnemonic | Opcode | Assembler method | Description |
 |----------|--------|------------------|-------------|
@@ -197,13 +221,43 @@ These instructions are used exclusively by the OS ISA routines running in Kernel
 
 Block-device transfers between RAM and the `Bin` disk. The disk is only accessible from Kernel mode; executing these in User mode calls `hw.TrapInvalidInstruction` (faults the process).
 
+`Bin` has two independent address spaces: a **slot region** (variable-length, occupied/length directory — holds process program images and demand-paging swap) and a **file-block region** (fixed-size, block-addressed — holds the filesystem). `DREAD`/`DWRITE`/`DLEN` operate on the slot region; `FBREAD`/`FBWRITE` operate on the file-block region.
+
 | Mnemonic | Opcode | Assembler method | Description |
 |----------|--------|------------------|-------------|
 | `DREAD [dst], slot, lenOut` | 0x44 | `DRead(dst, slot, lenOut)` | Copy disk slot `reg[slot]` into RAM at **absolute** address `reg[dst]`. Write the number of bytes copied into `reg[lenOut]`. |
 | `DWRITE slot, [src], len` | 0x45 | `DWrite(slot, src, len)` | Copy `reg[len]` bytes from **absolute** address `reg[src]` into disk slot `reg[slot]`. |
 | `DLEN slot, lenOut` | 0x46 | `DLen(slot, lenOut)` | Write the stored byte length of disk slot `reg[slot]` into `reg[lenOut]`. Used by `IvtExec` to size the new image's allocation before loading it. |
+| `FBREAD [dst], block` | 0x4B | `FbRead(dst, block)` | Copy `Hardware.DefaultFileBlockSize` (256) bytes from file-block `reg[block]` into RAM at **absolute** address `reg[dst]`. Reading a never-written block yields zeros (raw block-device semantics; never throws). |
+| `FBWRITE block, [src]` | 0x4C | `FbWrite(block, src)` | Copy 256 bytes from **absolute** address `reg[src]` into file-block `reg[block]`. |
 
-**Disk addresses are absolute** (program base = 0 in Kernel mode), not program-relative.
+**Disk addresses are absolute** (program base = 0 in Kernel mode), not program-relative. `FBREAD`/`FBWRITE` are used exclusively by the filesystem's `cache_get`/`cache_write_through`/`cache_flush` ISA subroutines (see [Filesystem](#filesystem)) — user code never issues them directly, and they trap the same way `DREAD`/`DWRITE`/`DLEN` do if a user process attempts them.
+
+---
+
+### Filesystem
+
+`FSYS` is the single user-mode entry point into the filesystem. It does **not** use the `OUT`/`IN`-style `EnterKernel` trap path (preemptible, shared handler in Kernel mode with interrupts enabled). Instead, like `FORK`/`EXEC`/`WAIT`/`EXIT`, it dispatches `IvtFsSyscall` (slot 19) through the ordinary atomic `DispatchOsRoutine` path (interrupts masked) — the whole syscall runs to completion without preemption, then resumes the caller (SAVEREGS the captured trap frame → compute → write the result into the saved EAX slot → LOADREGS/SETLAYOUT/OSRET), the same idiom `IvtWait`'s zombie-reap path uses.
+
+| Mnemonic | Opcode | Bytes (b1 b2 b3) | Assembler method | Description |
+|----------|--------|-------------------|------------------|-------------|
+| `FSYS` | 0x4D | 0, 0, 0 | *(none — assembled inline; see below)* | `EAX` = syscall number, `EBX`/`ECX`/`EDX` = arguments (meaning depends on the syscall). Dispatches `IvtFsSyscall` atomically; the result is delivered back into the caller's `EAX` when the syscall completes. |
+
+**Syscall numbers** (value of `EAX` on entry):
+
+| # | Name | Arguments | Result |
+|---|------|-----------|--------|
+| 0 | Open | `EBX` = pointer to a null-terminated word-per-char path (user-relative), `ECX` = flags (`FsysCreateFlag = 1` creates the file if missing) | fd (2–7), or −1 |
+| 1 | Read | `EBX` = fd, `ECX` = buffer pointer (user-relative), `EDX` = count | characters read, or −1 |
+| 2 | Write | `EBX` = fd, `ECX` = buffer pointer (user-relative), `EDX` = count | characters written, or −1 |
+| 3 | Close | `EBX` = fd | 0, or −1 |
+| 4 | Exec | `EBX` = pointer to a null-terminated word-per-char path (user-relative) | does not return on success (the process image is replaced and resumes at its new entry point); −1 if the path is missing or is a directory |
+
+File descriptors 2–7 are per-process (`ProcessEntryFdTable`, `FdCount = 8`; fd 0/1 are reserved for stdin/stdout). `FSYS` translates the user-relative pointer arguments (`ProgramAddress + ptr`) to absolute addresses and always operates on the calling process — this is the only difference from the `IvtFsOp` selectors used internally and by tests, which take an absolute path/buffer and an explicit process index.
+
+**Directories cannot be opened for read/write** — `Open` on a path that resolves to a directory entry fails with −1. There is currently no `Mkdir`/`Readdir`/`Unlink` syscall exposed through `FSYS`; those operations exist as ISA subroutines (`fs_mkdir`, directory-layer routines) reachable via `IvtFsOp` but not yet wired to a user-mode instruction.
+
+See `docs/OS-Architecture.md`, section "The ISA filesystem", for the on-disk layout, the buffer cache, the block allocator, and the full syscall implementation.
 
 ---
 
@@ -250,7 +304,9 @@ The following operations are forbidden (or redirected) when the CPU is at User l
 | `STORE` outside process ranges | `StoreBoundsTrapProvider` (OS trap table) | Faults the process. |
 | `OUT reg` | Hardware in `InstructionFunctions.Out` | Redirected: calls `hw.EnterKernel(OUT, ...)` instead of executing directly. |
 | `IN reg` | Hardware in `InstructionFunctions.In` | Redirected: calls `hw.EnterKernel(IN, ...)`. |
-| `DREAD`, `DWRITE`, `DLEN` | Hardware in `InstructionFunctions.DRead/DWrite/DLen` | Faults the process via `hw.TrapInvalidInstruction`. |
+| `OUTS`, `INS`, `INK`, `INPOLL` | Hardware in the respective `InstructionFunctions` handlers | Redirected: each calls `hw.EnterKernel(...)` with its own opcode/operand encoding, same pattern as `OUT`/`IN`. |
+| `DREAD`, `DWRITE`, `DLEN`, `FBREAD`, `FBWRITE` | Hardware in `InstructionFunctions.DRead/DWrite/DLen/FbRead/FbWrite` | Faults the process via `hw.TrapInvalidInstruction`. |
+| `FORK`, `EXEC`, `WAIT`, `EXIT`, `FSYS` | Hardware in the respective `InstructionFunctions` handlers | Not user-mode-restricted — these dispatch an atomic OS routine directly (`DispatchOsRoutine`) from either privilege level; the routine itself enforces any needed checks. |
 
 `SAVEREGS`, `LOADREGS`, `SETLAYOUT`, and `OSRET` do not have explicit user-mode guards, but using them from user mode produces undefined behavior (clobbering the OS's process-table data and hardware layout state).
 
@@ -263,7 +319,7 @@ Triggered by `OUT`/`IN` in user mode. `Hardware.EnterKernel` pushes a trap frame
 `Hardware.Iret` restores the user register file from the kernel-stack trap frame, sets the CPU to User mode, re-enables interrupts, and resumes at the saved return IP (user-relative).
 
 **→ atomic OS routine (IVT dispatch):**
-`Hardware.DispatchOsRoutine(slot)` (called by the hardware run loop, by I/O fault paths, and by process-control instructions): snapshots the interrupted process's registers plus its current IP (base-relative) into `trapFrame`, **masks interrupts** (making the routine atomic), sets the CPU to Kernel mode, and jumps to the address stored in the IVT at `0 + slot * 4`.
+`Hardware.DispatchOsRoutine(slot)` (called by the hardware run loop, by I/O fault paths, and by process-control instructions — `FORK`, `EXEC`, `WAIT`, `EXIT`, and `FSYS`): snapshots the interrupted process's registers plus its current IP (base-relative) into `trapFrame`, **masks interrupts** (making the routine atomic), sets the CPU to Kernel mode, and jumps to the address stored in the IVT at `0 + slot * 4`.
 
 **OS routine → resumed process (OSRET):**
 The OS routine calls `LOADREGS [entry]` (stages the target process's register file) then `SETLAYOUT [entry]` (rebuilds the hardware layout) then `OSRET levelReg`. `Hardware.OsReturn` commits the staged context, resolves the EIP slot against the target level's program base, drops to that level, **re-enables interrupts**, and sets `processRunning = true`.
@@ -399,13 +455,27 @@ The C# `Hardware` class implements a software MMU that translates user-mode data
 Key constants:
 - `PageSize = 256` bytes (= `BuddyDefaultMinBlock`)
 - `MaxPagesPerProcess = 64` (16 KiB of mappable virtual space per process)
-- `IvtPageFault = 15`; `IvtSlotCount = 16`; `OsLayout.CodeBase = 64` (= `IvtSlotCount * 4`)
+- `IvtPageFault = 15`; `IvtSlotCount = 20`; `OsLayout.CodeBase = 80` (= `IvtSlotCount * 4`)
 - PTE encodings: `>= 0` resident (physical frame base); `-1` unmapped; `-2` non-resident RAM-home; `<= -3` non-resident swap-backed (`SwapPte`); `<= -4096` copy-on-write share (`CowPte`)
-- Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 512` swap slots (total: 576 slots)
+- Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 512` swap slots (total: 576 slots) — the filesystem's file-block region (below) is a separate address space and does not consume slots.
 
 See `OS-Architecture.md`, section "Virtual memory and demand paging", for the complete design.
 
-Source files: `CSharpOS/CPU/Hardware.cs` (MMU methods `TryTranslateData`, `SeedPageTableIfNew`, `RaisePageFault`), `BasicOSPlugin/OsRoutines.cs` (`EmitPageFault`, `EmitReleaseFrames`, `EmitFlushFrames`, `EmitZeroSwapSlots`, `EmitPairResolve`, `EmitResolveCow`, `EmitCowShare`), `OSTests/PagingTests.cs`.
+Source files: `CSharpOS/CPU/Hardware.cs` (MMU methods `TryTranslateData`, `SeedPageTableIfNew`, `RaisePageFault`), `BasicOSPlugin/OsRoutines.Paging.cs` (`EmitPageFault`, `EmitReleaseFrames`, `EmitFlushFrames`, `EmitZeroSwapSlots`, `EmitPairResolve`, `EmitResolveCow`, `EmitCowShare`), `OSTests/PagingTests.cs`.
+
+### Implemented: ISA filesystem (new opcodes `FBREAD`/`FBWRITE`/`FSYS`; see [Disk](#disk) and [Filesystem](#filesystem))
+
+A complete filesystem — write-back buffer cache, on-disk block allocator with free-chaining, a nested directory tree with path traversal, an open-file table, and byte-level read/write — built as ISA code, the same way the scheduler and buddy allocator are. Three new opcodes support it: `FBREAD`/`FBWRITE` (0x4B/0x4C, privileged raw block transfer to/from the disk's file-block region) and `FSYS` (0x4D, the user-mode syscall entry point: open/read/write/close/exec-by-path).
+
+Three new IVT slots dispatch the filesystem's ISA routines: `IvtCacheOp = 17` (buffer-cache control), `IvtFsOp = 18` (block/directory/path/file-core operations, used internally and by tests), `IvtFsSyscall = 19` (the `FSYS` wrapper). The filesystem is formatted automatically on first boot (guarded by the on-disk superblock magic, so a persisted, already-formatted disk is left alone).
+
+Source files: `CSharpOS/Disk/FsLayout.cs` (on-disk structure), `CSharpOS/Disk/FsImage.cs` (host-side helper for staging a file before running it), `BasicOSPlugin/OsRoutines.Cache.cs` (buffer cache), `BasicOSPlugin/OsRoutines.Fs.cs` (block allocator, directories, path resolution, `FSYS`, open/close/read/write/exec cores), `OSTests/CacheManagerTests.cs`, `OSTests/FsBlockAllocatorTests.cs`, `OSTests/FsDirectoryTests.cs`, `OSTests/FsPathTests.cs`, `OSTests/FsOpenCloseTests.cs`, `OSTests/FsReadWriteTests.cs`, `OSTests/FsSyscallTests.cs`, `OSTests/FsExecTests.cs`.
+
+### Implemented: string and raw-key I/O (new opcodes `OUTS`/`INS`/`INK`/`INPOLL`; see [String and key I/O](#string-and-key-io))
+
+Word-per-char string output/input and raw (non-line-buffered) keypress input, layered on the same `EnterKernel`/`IvtSyscall` trap path as `OUT`/`IN`. `INK` blocks on `WaitReason.KeyInput`, woken by a dedicated `IvtWakeKey` slot; `INPOLL` never blocks.
+
+Source files: `CSharpOS/CPU/InstructionFunctions.cs` (`Outs`, `Ins`, `Ink`, `InkPoll`), `BasicOSPlugin/OsRoutines.cs` (`EmitSyscall` dispatch, `EmitWakeEntry(KeyInput)`), `OSTests/SyscallTests.cs`.
 
 ---
 

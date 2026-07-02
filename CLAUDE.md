@@ -38,6 +38,7 @@ CSharpOSConsole/
                   InteractionController.cs  BuddyHeapView.cs  Pacer.cs
   ConsoleVisualizer.cs  Program.cs  Programs.cs  VisualizerMode.cs
 OSTests/
+  CLAUDE.md (test navigation index: subsystem→file jump table, shared helpers, conventions)
   *Tests.cs  TestSupport.cs (shared Test static class)
 ```
 
@@ -142,13 +143,13 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 18 | IvtFsOp | — | EmitFsOp | FS block/dir/file layer: EAX=op, args in EBX/ECX/EDX/ESI → result in FsResult |
 | 19 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
 
-Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove, 10=Mkdir(EBX=parent,ECX=name), 11=PathResolve(EBX=path), 12=Open(EBX=absPath,ECX=flags,EDX=proc), 13=Close(EBX=fd,ECX=proc), 14=Read(EBX=fd,ECX=absBuf,EDX=count,ESI=proc), 15=Write(EBX=fd,ECX=absBuf,EDX=count,ESI=proc) (see `Hardware.FsOp*`). FSYS syscall numbers (EAX): 0=Open(EBX=pathPtr,ECX=flags), 1=Read(EBX=fd,ECX=bufPtr,EDX=count), 2=Write(EBX=fd,ECX=bufPtr,EDX=count), 3=Close(EBX=fd); flag `FsysCreateFlag=1`. IvtFsOp Open/Close/Read/Write take an ABSOLUTE path/buffer + explicit proc index; FSYS translates the user pointer (ProgramAddress+ptr) and uses the current process.
+Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove, 10=Mkdir(EBX=parent,ECX=name), 11=PathResolve(EBX=path), 12=Open(EBX=absPath,ECX=flags,EDX=proc), 13=Close(EBX=fd,ECX=proc), 14=Read(EBX=fd,ECX=absBuf,EDX=count,ESI=proc), 15=Write(EBX=fd,ECX=absBuf,EDX=count,ESI=proc) (see `Hardware.FsOp*`). FSYS syscall numbers (EAX): 0=Open(EBX=pathPtr,ECX=flags), 1=Read(EBX=fd,ECX=bufPtr,EDX=count), 2=Write(EBX=fd,ECX=bufPtr,EDX=count), 3=Close(EBX=fd), 4=Exec(EBX=pathPtr) — replace the running image with the FS file, no return on success/ -1 on failure (Inc 6); flag `FsysCreateFlag=1`. IvtFsOp Open/Close/Read/Write take an ABSOLUTE path/buffer + explicit proc index; FSYS translates the user pointer (ProgramAddress+ptr) and uses the current process.
 
 ---
 
 ## OsLayout Offsets
 
-`DataBase = 16384` (raised from 12288 in Inc 4b for the FS code). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
+`DataBase = 20480` (raised from 16384 in Inc 6 once file read/write + exec-by-path pushed the OS code to ~16.7 KB). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
 
 ### Header
 
@@ -185,7 +186,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | OftBase | +9128 | OftRegionSize=192 (MaxOpenFiles=8 × OftEntryBytes=24: inUse/firstBlock/offset/size/dirBlock/entryOffset) |
 | FsOpenBase | +9320 | 32 (fs_open_core spill scratch: absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset) |
 | FsRwBase | +9352 | 48 (FsRwWords=12: fs_read_core/fs_write_core spill: Fd/Buf/Count/Proc/Oft/CurBlock/Remaining/CharInBlock/BufPtr/Copied/Counter + spare) |
-| **TotalSize** | **+9400** (= 25784 abs) | — |
+| **TotalSize** | **+9400** (= 29880 abs, with DataBase 20480) | — |
 
 `OftAddress(i) = OftBase + i * 24`. A process fd slot (2..7) holds `OFT index + 1` (0 = free), so a zeroed fd table = no open files (no seeding).
 
@@ -205,7 +206,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 ## ProcessEntry Field Map
 
-`ProcessEntrySize = 192`; `ProcessEntryAddress(i) = 12336 + i * 192`
+`ProcessEntrySize = 192`; `ProcessEntryAddress(i) = ProcessTableOffset + i * 192 = (DataBase + 48) + i * 192` (DataBase-relative so it survives DataBase bumps)
 
 | Byte Offset | Field Constant | Size | Notes |
 |-------------|---------------|------|-------|
@@ -352,6 +353,12 @@ Each block: payload bytes 0..251, `NextPtrOffset=252` holds the next-block link 
 
 **File read/write (Inc 5b, in `OsRoutines.Fs.cs`):** `EmitFsRwSubroutines` adds `oft_from_fd` (fd 2..7 → OFT entry addr or -1), `fs_grow_chain` (walk/extend a block chain to ≥N blocks, allocating + linking as needed), `fs_read_core`, `fs_write_core` — reachable via `IvtFsOp` (FsOpRead=14/FsOpWrite=15, absolute buffer) or `FSYS` (FsysRead=1/FsysWrite=2, user pointer translated). Both walk the chain word-per-char through `cache_get`; READ clamps count at `size-offset` and advances OFT offset; WRITE grows the chain, marks blocks `cache_dirty`, advances offset, grows OFT size, and writes the new size back into the on-disk dir entry. All loop state lives in `OsLayout.FsRw*` (cache/chain calls clobber registers). **Trap:** `fs_grow_chain` reuses `FsRwRemaining` as its block counter, so `fs_write_core` restores `FsRwRemaining` from `FsRwCopied` after calling it. **Paging note:** cores write file→buffer via *absolute* addresses; a user buffer must sit in a RAM-home page (program image page) so the user's later MMU-translated read sees the same bytes — a buffer straddling into demand-paged heap will not.
 
+**Exec-by-path + boot wiring (Inc 6, in `OsRoutines.Fs.cs`):** `FSYS` syscall 4 (`FsysExec`, EBX=path ptr) → `fsy_exec` → `fs_exec_core` (label, `EmitFsExecSubroutine`). Mirrors `EmitExec`'s teardown/realloc/resume but sources the new image from an FS file's block chain instead of a disk image slot: it resolves the path to a `type=file` entry (rejecting missing paths and directories → returns -1, delivered to the caller), captures `firstBlock`+`size` **before** teardown, then `free_sub`/`resolve_cow`/`release_frames`/`zero_swap_slots` → recompute sizing (`newLen = size*4`) → `alloc_sub` → copy the chain word-by-word into `ProgramAddress` through `cache_get` → reset regs (EIP=0), set ESP, and `OSRET` into the new image (never returns on success). The rebuilt process is FS-backed so its `DiskSlot` is set to -1 (code pages are RAM-home, filled from `ProgramAddress`, so no slot is needed). **Two ISA gotchas learned here:** (1) `LoadField`/`StoreFieldReg` clobber **EAX** (they build the offset in it), so an entry address reused across several `LoadField`s must live in another register (fs_exec_core holds it in R12); (2) the durable `firstBlock`/`size`/`newLen` are stashed in `FsScratch*` (not `FsRw*`) across the teardown and re-seeded into `FsRw*` after `alloc_sub`.
+
+**Boot auto-format:** `OperatingSystem.AttachHardware` now calls a virtual `OnBooted(hw)` hook after seeding; `BasicOS` overrides it to run `FsOpFormat` once — guarded by the on-disk superblock magic (read from the disk, empty on a fresh machine) so a persisted/loaded FS is not wiped. Tests no longer need to format by hand (existing ones that still do are harmless double-formats).
+
+**Storing a program as a file:** `FsImage.WriteFile(hw, path, bytes)` (host helper, `CSharpOS/Disk/FsImage.cs`) drives the `IvtFsOp` Open/Write/Close cores with a scratch process index (Close cleans up its fd/OFT), staging the path+bytes in the free heap above the OS region — intended for **boot-time** population before any process is allocated. Because content is copied word-per-4-bytes, the file's raw bytes equal the supplied image (padded to a multiple of 4), which is exactly what `fs_exec_core` reads back.
+
 ### Buddy Allocator
 | Constant | Value |
 |----------|-------|
@@ -442,6 +449,9 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-01 | Filesystem Inc 4b: nested dirs (fs_mkdir) + path traversal (fs_path_resolve/fs_extract_component) in OsRoutines.Fs.cs; FsPath* scratch. DataBase 12288→16384 (FS code hit the guard at 12.4KB) | ~30K (inline) | 9 new path tests (573 total), all green after the DataBase bump. First increment worked in the split file. OsLayout addrs converted to DataBase-relative in docs to stop absolute-address drift. |
 | 2026-07-01 | Filesystem Inc 5a: FSYS (0x4D) + IvtFsSyscall (slot 19; IVT→20, CodeBase→80) + open-file table + fs_open_core/close_core (create-on-open, dir rejection, fd/OFT bookkeeping). Cores testable via FsOpOpen/FsOpClose | ~45K (inline) | Full ISA chosen. 13 core tests + 1 end-to-end FSYS test through a live scheduler (587 total), all green. Deliver-result idiom = EmitWait reap path (SAVEREGS persists captured trap frame). READ/WRITE = 5b. |
 | 2026-07-02 | Filesystem Inc 5b: finish byte-level file read/write (EmitFsRwSubroutines: oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core; FsOpRead=14/Write=15, FsysRead=1/Write=2). FsRw* scratch region; TotalSize→+9400. Fixed fs_grow_chain clobbering FsRwRemaining | ~20K (inline) | Resumed from a work-in-progress tree (6 isolation tests were red). Root-caused via a cache-Get block probe: grow reused FsRwRemaining as its counter → write copied only 1 char. Added end-to-end FSYS write/read round-trip (599 total). Learned: user FS buffers must be RAM-home (kernel writes absolute, user reads via MMU). |
+| 2026-07-02 | Filesystem Inc 6: exec-by-path (FSYS 4 → fs_exec_core, EmitFsExecSubroutine) + boot auto-format (OnBooted hook in BasicOS, magic-guarded) + FsImage.WriteFile host helper + FS wired into program launch. DataBase 16384→20480 | ~55K (inline) | 4 end-to-end exec tests (603 total). Long debug hunt on a "block 900" crash: root cause was LoadField clobbering EAX while fs_exec_core held the entry addr there (memory[8]=IVT[2]≈900). Fixed by holding the entry addr in R12. Learned LoadField/StoreFieldReg clobber EAX+EBP. |
+| 2026-07-02 | Test-suite navigation metadata: new `OSTests/CLAUDE.md` (subsystem→file jump table for 50 files, shared `Test` helper reference, test conventions) to cut the cost of finding a test case; root CLAUDE.md folder map updated | ~12K (inline) | Extracted class summaries + sample test names via scripted grep instead of reading 50 files. Then delegated README/docs refresh to the docs-sync-writer agent. |
+| 2026-07-02 | Docs refresh (README.md + docs/ISA.md + docs/OS-Architecture.md) for the whole FS subsystem (Inc 1–6), string/key I/O, two-level privilege, paging | 214K (agent) | docs-sync-writer agent; verified numbers against OsLayout.cs. Caught that FSYS dispatches atomically (like FORK), not via EnterKernel. Flagged: no FS demo in the console yet; Mkdir/Readdir/Unlink have ISA routines but no FSYS number. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

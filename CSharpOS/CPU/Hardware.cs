@@ -174,6 +174,7 @@ public partial class Hardware
     public const int FsysRead   = 1; // EBX=fd, ECX=buf ptr, EDX=len → bytes read (Inc 5b)
     public const int FsysWrite  = 2; // EBX=fd, ECX=buf ptr, EDX=len → bytes written (Inc 5b)
     public const int FsysClose  = 3; // EBX=fd → 0, or -1
+    public const int FsysExec   = 4; // EBX=path ptr → replace the running image with the FS file (Inc 6); no return on success, -1 on failure
     public const int FsysCreateFlag = 1; // OPEN: create the file if it does not exist
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------

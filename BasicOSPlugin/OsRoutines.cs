@@ -94,6 +94,7 @@ public static partial class OsRoutines
         EmitFsPathSubroutines(asm);// "fs_extract_component/path_resolve/mkdir"
         EmitFsFileSubroutines(asm);// "oft_alloc/resolve_parent/create_file/open_core/close_core"
         EmitFsRwSubroutines(asm);  // "oft_from_fd/grow_chain/read_core/write_core"
+        EmitFsExecSubroutine(asm); // "fs_exec_core"
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);

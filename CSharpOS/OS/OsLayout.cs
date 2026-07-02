@@ -18,8 +18,9 @@ public static class OsLayout
     // against overrun. Raised to 8192 once the spawning routines were added, then to 12288
     // once the paging family (page-fault handler + frame/swap/COW subroutines) was added,
     // then to 16384 once the filesystem family (cache manager + block/directory/path
-    // routines, Increments 2–4) was added (~12.4 KB of code; headroom for Inc 5–6).
-    public const int DataBase = 16384;
+    // routines, Increments 2–4) was added, then to 20480 once the file read/write and
+    // exec-by-path routines (Increments 5–6) pushed the code to ~16.7 KB.
+    public const int DataBase = 20480;
 
     // ---- scheduler state header (4-byte fields at the data section base) ---
     public const int ProcessCountOffset    = DataBase + 0;
