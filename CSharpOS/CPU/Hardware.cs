@@ -152,6 +152,9 @@ public partial class Hardware
     public const int FsOpLookup       = 7; // find name ECX in directory EBX → entry addr, or -1
     public const int FsOpInsert       = 8; // add (name ECX, type EDX, firstBlock ESI) to dir EBX → entry addr, or -1 (dup/full)
     public const int FsOpRemove       = 9; // remove name ECX from directory EBX → 0, or -1 if absent
+    // Nested directories (Inc 4b).
+    public const int FsOpMkdir        = 10; // create subdirectory (name ECX) in dir EBX → new dir block, or -1
+    public const int FsOpPathResolve  = 11; // resolve path at EBX (e.g. "/a/b/c") → entry addr, or -1
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------
     // Printable ASCII (32–126) is delivered as-is. Special keys use values above

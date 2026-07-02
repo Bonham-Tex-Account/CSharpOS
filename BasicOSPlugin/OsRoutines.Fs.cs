@@ -45,6 +45,12 @@ public static partial class OsRoutines
         asm.MovImm(R(R14), Hardware.FsOpRemove);
         asm.Cmp(R(R13), R(R14));
         asm.Jz("fo_remove");
+        asm.MovImm(R(R14), Hardware.FsOpMkdir);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_mkdir");
+        asm.MovImm(R(R14), Hardware.FsOpPathResolve);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_pathresolve");
         asm.MovImm(R(R12), 0);                   // unknown op
         asm.Jmp("fo_result");
 
@@ -92,6 +98,15 @@ public static partial class OsRoutines
         asm.Label("fo_remove");
         asm.Mov(R(EAX), R(EBX));                 // dir block; ECX = name addr
         asm.Call("fs_dir_remove");
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_mkdir");
+        asm.Call("fs_mkdir");                    // EBX=parent dir, ECX=name
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_pathresolve");
+        asm.Mov(R(EAX), R(EBX));                 // path addr
+        asm.Call("fs_path_resolve");
         asm.Mov(R(R12), R(EAX));
 
         asm.Label("fo_result");
@@ -519,6 +534,162 @@ public static partial class OsRoutines
         asm.MovImm(R(EAX), 0);
         asm.Ret();
         asm.Label("dr_notfound");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+    }
+
+    // ===== EmitFsPathSubroutines =============================================
+    // Nested directories (Increment 4b): extract one path component, resolve a whole
+    // "/a/b/c" path by descending through DirTypeDir entries, and mkdir a subdirectory.
+    // fs_path_resolve keeps all loop state in OsLayout.FsPath* memory because fs_dir_lookup
+    // clobbers the registers between components.
+    private static void EmitFsPathSubroutines(Assembler asm)
+    {
+        // ---- fs_extract_component: read the next path component out of FsPathPos into the
+        // FsPathComponent buffer (null-padded), advance FsPathPos to the delimiter, set
+        // FsPathLast=1 iff nothing but separators/null follows. EAX = component length. Pure
+        // memory work (no cache calls), so all registers are free scratch. ----
+        asm.Label("fs_extract_component");
+        SpillLoad(asm, OsLayout.FsPathPos, R8);          // R8 = read position
+        asm.Label("ec_skip");
+        asm.Load(R(R9), R(R8));
+        asm.MovImm(R(R10), OsLayout.FsPathSeparator);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jnz("ec_copy_start");
+        asm.MovImm(R(R11), 4);
+        asm.Add(R(R8), R(R11));
+        asm.Jmp("ec_skip");
+        asm.Label("ec_copy_start");
+        asm.MovImm(R(R12), 0);                           // R12 = component length i
+        Imm16(asm, R13, OsLayout.FsPathComponentBase);   // R13 = component buffer base
+        asm.Label("ec_copy");
+        asm.Load(R(R9), R(R8));                          // char
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("ec_pad");                                // null terminator
+        asm.MovImm(R(R10), OsLayout.FsPathSeparator);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("ec_pad");                                // component separator
+        asm.MovImm(R(R10), FsLayout.NameMaxChars);
+        asm.Cmp(R(R12), R(R10));
+        asm.Jns("ec_advance");                           // name full: truncate extra chars
+        asm.Mov(R(R11), R(R12));
+        asm.MovImm(R(R10), 4);
+        asm.Mul(R(R11), R(R10));
+        asm.Add(R(R11), R(R13));
+        asm.Store(R(R11), R(R9));
+        asm.Label("ec_advance");
+        asm.Inc(R(R12));
+        asm.MovImm(R(R10), 4);
+        asm.Add(R(R8), R(R10));
+        asm.Jmp("ec_copy");
+        asm.Label("ec_pad");
+        asm.Mov(R(R14), R(R12));                         // pad from j = i to NameMaxChars
+        asm.Label("ec_pad_loop");
+        asm.MovImm(R(R10), FsLayout.NameMaxChars);
+        asm.Cmp(R(R14), R(R10));
+        asm.Jns("ec_pad_done");
+        asm.Mov(R(R11), R(R14));
+        asm.MovImm(R(R10), 4);
+        asm.Mul(R(R11), R(R10));
+        asm.Add(R(R11), R(R13));
+        asm.MovImm(R(R10), 0);
+        asm.Store(R(R11), R(R10));
+        asm.Inc(R(R14));
+        asm.Jmp("ec_pad_loop");
+        asm.Label("ec_pad_done");
+        SpillStore(asm, OsLayout.FsPathPos, R8);         // leave the cursor at the delimiter
+        // last component? skip trailing separators; if the path then ends, this was the last.
+        asm.Mov(R(R15), R(R8));
+        asm.Label("ec_last_skip");
+        asm.Load(R(R9), R(R15));
+        asm.MovImm(R(R10), OsLayout.FsPathSeparator);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jnz("ec_last_check");
+        asm.MovImm(R(R10), 4);
+        asm.Add(R(R15), R(R10));
+        asm.Jmp("ec_last_skip");
+        asm.Label("ec_last_check");
+        asm.Load(R(R9), R(R15));
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("ec_is_last");
+        asm.MovImm(R(R11), 0);
+        SpillStore(asm, OsLayout.FsPathLast, R11);
+        asm.Jmp("ec_ret");
+        asm.Label("ec_is_last");
+        asm.MovImm(R(R11), 1);
+        SpillStore(asm, OsLayout.FsPathLast, R11);
+        asm.Label("ec_ret");
+        asm.Mov(R(EAX), R(R12));                         // return component length
+        asm.Ret();
+
+        // ---- fs_path_resolve: EAX = path addr → EAX = final entry addr, or -1 ----
+        asm.Label("fs_path_resolve");
+        SpillStore(asm, OsLayout.FsPathPos, EAX);        // cursor = path
+        asm.Call("fs_root_dir");
+        SpillStore(asm, OsLayout.FsPathDir, EAX);        // current dir = root
+        asm.Label("pr_loop");
+        asm.Call("fs_extract_component");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("pr_fail");                               // empty (e.g. "/" or trailing) → no entry
+        SpillLoad(asm, OsLayout.FsPathDir, EAX);         // dir
+        Imm16(asm, ECX, OsLayout.FsPathComponentBase);   // name = the extracted component
+        asm.Call("fs_dir_lookup");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("pr_fail");                               // component not found
+        SpillLoad(asm, OsLayout.FsPathLast, EBX);
+        asm.MovImm(R(ECX), 1);
+        asm.Cmp(R(EBX), R(ECX));
+        asm.Jz("pr_found");                              // last component → this is the answer
+        // not last: the component must be a directory to descend into
+        asm.Mov(R(R8), R(EAX));                          // entry addr
+        asm.Load(R(R9), R(R8));                          // type
+        asm.MovImm(R(EBX), FsLayout.DirTypeDir);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jnz("pr_fail");                              // not a directory
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EBX), FsLayout.DirEntryFirstBlock);
+        asm.Add(R(R9), R(EBX));
+        asm.Load(R(R9), R(R9));                          // firstBlock
+        SpillStore(asm, OsLayout.FsPathDir, R9);         // descend
+        asm.Jmp("pr_loop");
+        asm.Label("pr_found");
+        asm.Ret();                                       // EAX = entry addr
+        asm.Label("pr_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_mkdir: EBX = parent dir, ECX = name → EAX = new dir block, or -1 ----
+        asm.Label("fs_mkdir");
+        SpillStore(asm, OsLayout.FsScratchArgA, ECX);    // name (survives everything below)
+        asm.Mov(R(EDI), R(EBX));                         // parent (survives fs_alloc_block)
+        asm.Call("fs_alloc_block");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("mk_fail");                               // disk full
+        SpillStore(asm, OsLayout.FsScratchArgB, EAX);    // new dir block
+        asm.Mov(R(ESI), R(EAX));                         // first = new block
+        asm.Mov(R(EBX), R(EDI));                         // parent
+        SpillLoad(asm, OsLayout.FsScratchArgA, ECX);     // name
+        asm.MovImm(R(EDX), FsLayout.DirTypeDir);
+        asm.Call("fs_dir_insert");                       // add the directory entry
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("mk_insert_fail");                        // duplicate name or parent full
+        SpillLoad(asm, OsLayout.FsScratchArgB, EAX);     // return the new dir block
+        asm.Ret();
+        asm.Label("mk_insert_fail");
+        SpillLoad(asm, OsLayout.FsScratchArgB, EAX);
+        asm.Call("fs_free_block");                       // undo the allocation
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+        asm.Label("mk_fail");
         asm.MovImm(R(EAX), 0);
         asm.Dec(R(EAX));
         asm.Ret();

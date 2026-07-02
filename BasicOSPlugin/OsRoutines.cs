@@ -90,6 +90,7 @@ public static partial class OsRoutines
         EmitCacheSubroutines(asm); // "cache_find/get/dirty/write_through/pin/unpin/discard/flush"
         EmitFsSubroutines(asm);    // "fs_format/alloc_block/free_block/chain_next/chain_set_next"
         EmitFsDirSubroutines(asm); // "fs_hash/root_dir/dir_lookup/dir_insert/dir_remove"
+        EmitFsPathSubroutines(asm);// "fs_extract_component/path_resolve/mkdir"
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);
