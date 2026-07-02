@@ -146,4 +146,131 @@ public class FsSyscallTests
         Assert.False(os.HasProcesses);
         Assert.Contains(2, outputs);   // OPEN returned fd 2, delivered in EAX, then OUT
     }
+
+    // ---- Phase 1 syscalls: unlink / mkdir / readdir ----------------------
+
+    // A program that runs FSYS `syscall` with a path at image offset 64, OUTs the result, halts.
+    private static byte[] PathSyscall(int syscall, string path)
+    {
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, syscall);
+        asm.MovImm16(RegisterName.EBX, 64);
+        asm.Fsys();
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+        return WithPathAt64(asm.Build(), path);
+    }
+
+    // A program that FSYS-readdirs the dir path at offset 64, entry `index`, into a buffer at
+    // offset 128 (in-page / RAM-home), OUTs the returned entry type, halts.
+    private static byte[] ReaddirProgram(string path, int index)
+    {
+        Assembler asm = new Assembler();
+        asm.MovImm(RegisterName.EAX, Hardware.FsysReaddir);
+        asm.MovImm16(RegisterName.EBX, 64);
+        asm.MovImm(RegisterName.ECX, index);
+        asm.MovImm16(RegisterName.EDX, 128);
+        asm.Fsys();
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+        return WithPathAt64(asm.Build(), path);
+    }
+
+    private static byte[] WithPathAt64(byte[] code, string path)
+    {
+        byte[] image = new byte[128 + 64];   // room for the path @64 and a readdir buffer @128
+        Array.Copy(code, image, code.Length);
+        for (int i = 0; i < path.Length; i++)
+        {
+            image[64 + i * 4] = (byte)path[i];
+        }
+        return image;
+    }
+
+    // Creates an empty file at `path` via the IvtFsOp cores (scratch process index), so a test
+    // program can then unlink or list it. Uses the heap above the OS region as a path buffer.
+    private static void CreateFile(Hardware hw, string path)
+    {
+        int pathAddr = OsLayout.TotalSize + 12000;
+        for (int i = 0; i < path.Length; i++)
+        {
+            Test.WriteWord(hw, pathAddr + i * 4, path[i]);
+        }
+        Test.WriteWord(hw, pathAddr + path.Length * 4, 0);
+        hw.WriteRegister(RegisterName.EBX, pathAddr);
+        hw.WriteRegister(RegisterName.ECX, Hardware.FsysCreateFlag);
+        hw.WriteRegister(RegisterName.EDX, OsLayout.MaxProcesses - 1);   // scratch owner
+        hw.RunOsRoutineSynchronously(Hardware.IvtFsOp, Hardware.FsOpOpen);
+        int fd = Test.ReadWord(hw, OsLayout.FsResultOffset);
+        hw.WriteRegister(RegisterName.EBX, fd);
+        hw.WriteRegister(RegisterName.ECX, OsLayout.MaxProcesses - 1);
+        hw.RunOsRoutineSynchronously(Hardware.IvtFsOp, Hardware.FsOpClose);
+    }
+
+    private static int PathExists(Hardware hw, string path)
+    {
+        int pathAddr = OsLayout.TotalSize + 12000;
+        for (int i = 0; i < path.Length; i++)
+        {
+            Test.WriteWord(hw, pathAddr + i * 4, path[i]);
+        }
+        Test.WriteWord(hw, pathAddr + path.Length * 4, 0);
+        hw.WriteRegister(RegisterName.EBX, pathAddr);
+        hw.RunOsRoutineSynchronously(Hardware.IvtFsOp, Hardware.FsOpPathResolve);
+        return Test.ReadWord(hw, OsLayout.FsResultOffset);
+    }
+
+    private static (BasicOS os, Hardware hw, List<int> outputs) BootedMachine()
+    {
+        BasicOS os = new BasicOS(new StringWriter());   // auto-formats at boot
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        return (os, hw, CaptureOutputs(hw));
+    }
+
+    private static void RunToHalt(BasicOS os, Hardware hw)
+    {
+        for (int i = 0; i < 20000 && os.HasProcesses; i++)
+        {
+            hw.Run();
+        }
+        Assert.False(os.HasProcesses);
+    }
+
+    [Fact]
+    public void Fsys_Mkdir_FromAUserProcess_CreatesTheDirectory()
+    {
+        (BasicOS os, Hardware hw, List<int> outputs) = BootedMachine();
+        os.LoadProcess(new Process(hw.Disk.Store(PathSyscall(Hardware.FsysMkdir, "/d")), 256, 64));
+        RunToHalt(os, hw);
+
+        Assert.Single(outputs);
+        Assert.True(outputs[0] >= FsLayout.FirstDataBlock);   // returned the new dir block
+        Assert.True(PathExists(hw, "/d") >= 0);               // and it is really there
+    }
+
+    [Fact]
+    public void Fsys_Unlink_FromAUserProcess_RemovesTheFile()
+    {
+        (BasicOS os, Hardware hw, List<int> outputs) = BootedMachine();
+        CreateFile(hw, "/f");
+        Assert.True(PathExists(hw, "/f") >= 0);
+
+        os.LoadProcess(new Process(hw.Disk.Store(PathSyscall(Hardware.FsysUnlink, "/f")), 256, 64));
+        RunToHalt(os, hw);
+
+        Assert.Equal(new List<int> { 0 }, outputs);           // unlink returned 0
+        Assert.Equal(-1, PathExists(hw, "/f"));               // the file is gone
+    }
+
+    [Fact]
+    public void Fsys_Readdir_FromAUserProcess_ReturnsTheEntryType()
+    {
+        (BasicOS os, Hardware hw, List<int> outputs) = BootedMachine();
+        CreateFile(hw, "/f");
+
+        os.LoadProcess(new Process(hw.Disk.Store(ReaddirProgram("/", 0)), 256, 64));
+        RunToHalt(os, hw);
+
+        Assert.Equal(new List<int> { FsLayout.DirTypeFile }, outputs);   // "/"'s entry 0 is the file
+    }
 }

@@ -270,7 +270,9 @@ public static partial class OsRoutines
         asm.Label("cds_done");
         asm.Ret();
 
-        // ---- cache_flush: write back every dirty, unpinned, valid slot ----
+        // ---- cache_flush: write back every dirty, valid slot (pinned or not) ----
+        // Pinning blocks *eviction* (see cache_get's victim scan), not write-back: flushing
+        // keeps the slot resident, so a pinned superblock/bitmap must still be persisted here.
         asm.Label("cache_flush");
         asm.MovImm(R(ESI), 0);
         asm.Label("cfl_loop");
@@ -286,10 +288,6 @@ public static partial class OsRoutines
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R10), R(EAX));
         asm.Jz("cfl_next");
-        LoadField(asm, R9, OsLayout.CachePinField, R10);
-        asm.MovImm(R(EAX), 0);
-        asm.Cmp(R(R10), R(EAX));
-        asm.Jnz("cfl_next");
         LoadField(asm, R9, OsLayout.CacheBlockField, EBX);
         asm.Mov(R(ECX), R(R9));
         asm.MovImm(R(EBP), OsLayout.CacheDataField);
