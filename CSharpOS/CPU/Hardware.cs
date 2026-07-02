@@ -97,40 +97,41 @@ public partial class Hardware
     public const int IvtBlockInput         = 5;
     public const int IvtBlockOutput        = 6;
     public const int IvtSchedule           = 7;
-    // Process loading is two routines: IvtAllocate reserves a memory block (pure,
-    // disk-free), and IvtDiskLoad copies the program image from its disk slot into
-    // the allocated RAM. LoadProcess dispatches them in sequence.
+    // IvtAllocate reserves a memory block for a staged process entry (pure, disk-free). It is
+    // kept as the buddy allocator's isolation-test entry point; production loads go through
+    // IvtSpawn (which allocs + DREADs the image inline). Program bytes are moved by IvtSpawn/
+    // IvtExec (DREAD from a disk slot) or fs_exec_core (from the filesystem), never a
+    // standalone slot — the old IvtDiskLoad routine was removed (had no dispatch sites).
     public const int IvtAllocate           = 8;
-    public const int IvtDiskLoad           = 9;
     // Process-spawning routines (fork/exec/wait runtime creation, spawn boot creation).
-    public const int IvtFork               = 10;
-    public const int IvtExec               = 11;
-    public const int IvtWait               = 12;
-    public const int IvtSpawn              = 13;
+    public const int IvtFork               = 9;
+    public const int IvtExec               = 10;
+    public const int IvtWait               = 11;
+    public const int IvtSpawn              = 12;
     // The shared syscall (IN/OUT) handler's entry address. Unlike the dispatched slots,
     // EnterKernel jumps here directly without masking interrupts, so the handler stays
     // preemptible; only its address is stored here (wired up by BuildOsImage).
-    public const int IvtSyscall            = 14;
+    public const int IvtSyscall            = 13;
     // Demand-paging fault handler (Phase 2): dispatched by the MMU when a user data
     // access touches a non-resident page; makes the page resident, then resumes.
-    public const int IvtPageFault          = 15;
-    public const int IvtWakeKey            = 16;
+    public const int IvtPageFault          = 14;
+    public const int IvtWakeKey            = 15;
     // Filesystem buffer-cache control interface (Increment 2). Dispatched with an op
     // selector in EAX and a block number in EBX; routes to the cache manager subroutines
     // (get/dirty/write-through/pin/unpin/discard/flush) and parks the result in the cache
     // header's CacheResult word. Kernel-internal; also the direct test entry point.
-    public const int IvtCacheOp            = 17;
+    public const int IvtCacheOp            = 16;
     // Filesystem control interface (Increment 3+). Dispatched with an op selector in EAX and
     // arguments in EBX/ECX; routes to the block allocator / free-chaining (and, later, the
     // directory tree). Result parked in OsLayout.FsResult. One slot grows across increments.
-    public const int IvtFsOp               = 18;
+    public const int IvtFsOp               = 17;
     // User filesystem syscall (Increment 5). FSYS dispatches this atomic routine (like FORK
     // dispatches IvtFork); it reads the syscall number in EAX and args in EBX/ECX/EDX from
     // the trapped user registers, performs the op, and resumes the caller with the result in
     // EAX. File ops don't block, so it runs atomically rather than through the preemptible
     // IvtSyscall path (whose shared privileged stack couldn't survive preemption mid-op).
-    public const int IvtFsSyscall          = 19;
-    public const int IvtSlotCount          = 20;
+    public const int IvtFsSyscall          = 18;
+    public const int IvtSlotCount          = 19;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
@@ -431,7 +432,6 @@ public partial class Hardware
             case IvtBlockOutput:        return "Block (output)";
             case IvtSchedule:           return "Schedule";
             case IvtAllocate:           return "Allocate";
-            case IvtDiskLoad:           return "DiskLoad";
             case IvtFork:               return "Fork";
             case IvtExec:               return "Exec";
             case IvtWait:               return "Wait";

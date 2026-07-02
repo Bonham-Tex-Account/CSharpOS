@@ -23,21 +23,22 @@
 ### Key methods (called by infrastructure)
 | Method | Notes |
 |--------|-------|
-| `AttachHardware(Hardware hw)` | Called by Hardware ctor; calls `BuildOsImage`, writes it, `ReserveOsMemory`, `SeedOsData`, `LoadTraps(BuildTraps())` |
-| `SeedOsData()` | Seeds quantum table (L0=1, L1=2, L2=4, L3=255), boost timer, buddy heap config, NextPid=1 |
-| `LoadProcess(Process process)` | Stages entry, dispatches IvtAllocate, then IvtDiskLoad (if slot ≥ 0), seeds fds, assigns PID |
+| `AttachHardware(Hardware hw)` | Called by Hardware ctor; `LoadTraps(traps)`, `ReserveOsMemory`, `WriteBytes(BuildOsImage)`, `SeedOsData`, then `OnBooted(hw)` hook |
+| `OnBooted(Hardware hw)` | Virtual post-boot hook; base no-op. `BasicOS` overrides it to auto-format the FS once (magic-guarded) |
+| `SeedOsData()` | Seeds quantum table (L0=1, L1=2, L2=4, L3=255), boost timer, buddy heap config, NextPid=1, cache/swap/COW init |
+| `LoadProcess(Process process)` | Stages entry sizing, dispatches **IvtSpawn** (one routine: allocs region + DREADs image + seeds regs/PID), seeds fds, syncs descriptor |
 | `SetLayoutFromEntry(int entryAddress)` | Rebuilds HW layout from entry; called before resume (via SETLAYOUT) |
 | `SeedPageTableIfNew(...)` | Called from SetLayoutFromEntry; seeds per-process page table once per slot reuse |
 
 ### LoadProcess flow
-1. Resolve/auto-stage the program slot in `hw.Disk` if needed
-2. Read program length from `hw.Disk.GetLength(slot)`
-3. Write sizing fields to the process-table entry (ProgramSize, RequiredMemory, etc.)
-4. `RunOsRoutineSynchronously(IvtAllocate, entryAddress)` — sets ProgramAddress in the entry
-5. If ProgramAddress ≥ 0 and slot ≥ 0: `RunOsRoutineSynchronously(IvtDiskLoad, entryAddress)`
-6. Seed fd table (fd[0]=fd[1]=process-table index)
-7. Assign PID from NextPid, increment NextPid
-8. Set entry state to Ready, priority=0, ticksUsed=0
+1. Resolve/auto-stage the program slot in `hw.Disk` (a file-path `Process` reads bytes → `Disk.Store`); disk-full → log + bail
+2. `programLength = hw.Disk.GetLength(slot)`; floor `RequiredMemory` to `GetRegisterFileSize()+4`
+3. `total = programLength + RequiredMemory + RequiredStackSize + KernelStackSize`
+4. `FindFreeSlot`; process-table full → log + bail
+5. Write the entry's sizing fields (ProgramSize/RequiredMemory/RequiredStackSize/TotalSize/DiskSlot) + State=Terminated placeholder
+6. `RunOsRoutineSynchronously(IvtSpawn, entry)` — allocs the region, DREADs the image, seeds saved regs (EIP/ESP), scheduling state, and a fresh PID; sets ProgramAddress=-1 on OOM
+7. ProgramAddress < 0 → log + bail; else read back the assigned PID
+8. Seed fd table (fd[0]=stdin, fd[1]=stdout → the process's own device id = slot); grow ProcessCount high-water mark; sync the C# `Process` descriptor + name map
 
 ---
 

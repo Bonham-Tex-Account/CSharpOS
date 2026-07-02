@@ -395,12 +395,13 @@ public class OsSeedDataTests
 
     // ---- IVT entries seeded by BuildOsImage ---------------------------------
 
-    // EDGE CASE: The IVT entries for IvtAllocate and IvtDiskLoad must point into the
-    // code region [CodeBase, DataBase) so that RunOsRoutineSynchronously can dispatch
-    // them. If either points to 0 or outside the code region, loading is broken.
+    // EDGE CASE: The IVT entries for IvtAllocate and IvtSpawn (the process-loading
+    // routines) must point into the code region [CodeBase, DataBase) so that
+    // RunOsRoutineSynchronously can dispatch them. If either points to 0 or outside the
+    // code region, loading is broken.
     [Theory]
     [InlineData(Hardware.IvtAllocate)]
-    [InlineData(Hardware.IvtDiskLoad)]
+    [InlineData(Hardware.IvtSpawn)]
     public void BuildOsImage_LoadRoutineEntry_PointsIntoCodeRegion(int vector) // EDGE CASE
     {
         // Arrange
@@ -468,7 +469,7 @@ public class OsSeedDataTests
             Hardware.IvtHalt,
             Hardware.IvtInvalidInstruction,
             Hardware.IvtAllocate,
-            Hardware.IvtDiskLoad
+            Hardware.IvtSpawn
         };
 
         // Act + Assert
