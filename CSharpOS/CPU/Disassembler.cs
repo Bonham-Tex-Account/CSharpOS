@@ -59,6 +59,8 @@ public static class Disassembler
             case Instruction.DREAD:         return $"DREAD [{Reg(b1)}], {Reg(b2)}, {Reg(b3)}";
             case Instruction.DWRITE:        return $"DWRITE {Reg(b1)}, [{Reg(b2)}], {Reg(b3)}";
             case Instruction.DLEN:          return $"DLEN {Reg(b1)}, {Reg(b2)}";
+            case Instruction.FBREAD:        return $"FBREAD [{Reg(b1)}], {Reg(b2)}";
+            case Instruction.FBWRITE:       return $"FBWRITE {Reg(b1)}, [{Reg(b2)}]";
             case Instruction.FORK:          return "FORK";
             case Instruction.EXEC:          return $"EXEC {Reg(b1)}";
             case Instruction.WAIT:          return $"WAIT {Reg(b1)}";

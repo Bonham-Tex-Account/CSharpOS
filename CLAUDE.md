@@ -105,6 +105,10 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x48 | INS | Ins | b1=ptr-reg (virt addr), b2=maxLen-reg; blocks WaitReason.StringInput; writes chars as words + null; User→EnterKernel(INS, b1*4, b2*4) |
 | 0x49 | INK | Ink | b1=dst; block until raw keypress; delivers keycode; WaitReason.KeyInput; User→EnterKernel(INK, b1*4, 0) |
 | 0x4A | INPOLL | InkPoll | b1=dst; non-blocking; delivers keycode or -1 if empty; never blocks; User→EnterKernel(INPOLL, b1*4, 0) |
+| 0x4B | FBREAD | FbRead | b1=dest (RAM addr), b2=block; copy FileBlockSize bytes file-block→RAM; privileged (User→invalid trap) |
+| 0x4C | FBWRITE | FbWrite | b1=block, b2=src (RAM addr); copy FileBlockSize bytes RAM→file-block; privileged (User→invalid trap) |
+
+*(0x4D reserved for FSYS — Increment 5.)*
 
 ---
 
@@ -153,34 +157,36 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | BuddyMinBlockOffset | 12324 | +36 |
 | BuddyLevelsOffset | 12328 | +40 |
 | NextPidOffset | 12332 | +44 |
-| ProcessTableOffset | 12336 | +48 (MaxProcesses=8 × ProcessEntrySize=176 = 1408 bytes) |
+| ProcessTableOffset | 12336 | +48 (MaxProcesses=8 × ProcessEntrySize=192 = 1536 bytes) |
 
 ### After Process Table
 
+*(All addresses below shifted +128 from the pre-Inc-0 layout: process table grew 1408→1536 when FdCount went 4→8.)*
+
 | Region | Absolute Addr | Size |
 |--------|--------------|------|
-| BuddyBitmapOffset | 13744 | 32 bytes (BuddyBitmapWords=8 × 4) |
-| PrivilegedStackOffset | 13776 | 64 bytes |
-| PrivilegedStackTop | 13840 | — |
-| PageTableBase | 13840 | PageTableRegionSize=2048 (8 procs × 64 pages × 4 bytes) |
-| FrameTableBase | 15888 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
-| FramePoolBase | 16016 | FramePoolSize=1024 (4 frames × PageSize=256) |
-| ZeroPageBase | 17040 | 256 bytes (always-zero DWRITE source) |
-| SwapScratchBase | 17296 | 256 bytes (fork slot-copy transfer buffer) |
-| CowPartnerBase | 17552 | 32 bytes (8 procs × 4 bytes each) |
-| **TotalSize** | **17584** | — |
+| BuddyBitmapOffset | 13872 | 32 bytes (BuddyBitmapWords=8 × 4) |
+| PrivilegedStackOffset | 13904 | 64 bytes |
+| PrivilegedStackTop | 13968 | — |
+| PageTableBase | 13968 | PageTableRegionSize=2048 (8 procs × 64 pages × 4 bytes) |
+| FrameTableBase | 16016 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
+| FramePoolBase | 16144 | FramePoolSize=1024 (4 frames × PageSize=256) |
+| ZeroPageBase | 17168 | 256 bytes (always-zero DWRITE source) |
+| SwapScratchBase | 17424 | 256 bytes (fork slot-copy transfer buffer) |
+| CowPartnerBase | 17680 | 32 bytes (8 procs × 4 bytes each) |
+| **TotalSize** | **17712** | — |
 
-`PageTableAddress(i) = 13840 + i * 256`
-`FrameTableEntry(f) = 15888 + f * 32`
-`FrameBase(f) = 16016 + f * 256`
+`PageTableAddress(i) = 13968 + i * 256`
+`FrameTableEntry(f) = 16016 + f * 32`
+`FrameBase(f) = 16144 + f * 256`
 `SwapSlot(proc, page) = 64 + proc * 64 + page`
-`CowPartnerAddress(i) = 17552 + i * 4`
+`CowPartnerAddress(i) = 17680 + i * 4`
 
 ---
 
 ## ProcessEntry Field Map
 
-`ProcessEntrySize = 176`; `ProcessEntryAddress(i) = 12336 + i * 176`
+`ProcessEntrySize = 192`; `ProcessEntryAddress(i) = 12336 + i * 192`
 
 | Byte Offset | Field Constant | Size | Notes |
 |-------------|---------------|------|-------|
@@ -201,8 +207,8 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | 148 | ProcessEntryExitStatus | 4 | |
 | 152 | ProcessEntryDiskSlot | 4 | Bin disk slot for program image |
 | 156 | (spare) | 4 | |
-| 160 | ProcessEntryFdTable | 16 | FdCount=4 × 4-byte device ids; [0]=stdin, [1]=stdout |
-| **176** | **(end)** | | |
+| 160 | ProcessEntryFdTable | 32 | FdCount=8 × 4-byte device ids; [0]=stdin, [1]=stdout, [2..7]=open files |
+| **192** | **(end)** | | |
 
 Process memory layout: `[program][memory][user stack][kernel stack]`
 `TotalSize = ProgramSize + RequiredMemory + RequiredStackSize + KernelStackSize(176)`
@@ -295,6 +301,10 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | SwapSlotCount | 512 (8 procs × 64 pages) |
 | DiskDeviceId | 256 |
 | Total disk slots (default) | 576 (64 + 512) |
+| DefaultFileBlockSize | 256 bytes (== PageSize by convention) |
+| DefaultFileBlockCount | 256 (file-block region; 64 KiB file space) |
+
+**File-block region** (Inc 1): a second backing store inside the same `Bin`, block-addressed (not slot-addressed). `Bin.ReadFileBlock(block)` reads a fresh copy (zeros if never written — raw block-device semantics, never throws for empty); `Bin.WriteFileBlock(block, data)` requires exactly `FileBlockSize` bytes. `Bin.Save(path)`/`Load(path)` persist **only** the file-block region (magic `0x43534653` "CSFS" + geometry header) — images rebuild from programs at boot, swap is transient. Moved via privileged `FBREAD`/`FBWRITE` (0x4B/0x4C). Default disk is now `Bin(576, 1024, 256, 256)`.
 
 ### Buddy Allocator
 | Constant | Value |
@@ -378,6 +388,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-06-30 | Process tree panel + option 11 spawn demo | ~22K (inline) | ProcessRow Pid/ParentPid, BuildProcessTree, SpawnChildren (3 children), WAIT-clobbers-EAX bug found via OsRoutines read |
 | 2026-06-30 | INK + INPOLL raw key input: IvtSlotCount 16→17, WaitReason.KeyInput=5, 3 new syscall tests, 5 revised arrow-key tests | ~20K (inline) | CodeBase 64→68; arrow keys route to process when running, scrub history when paused |
 | 2026-06-30 | Key routing fix + F1 passthrough toggle: command keys (a/s/o/q) no longer leak to process; F1 toggles full keyboard passthrough to process buffer | ~10K (inline) | Resumed from context summary; 6 new passthrough tests; 506 total. PR merged to master. |
+| 2026-07-01 | Filesystem roadmap Inc 0 (FdCount 4→8, ProcessEntrySize 176→192) + Inc 1 (Bin file-block region + .bin persistence + FBREAD/FBWRITE 0x4B/0x4C) | ~30K (inline) | Traced full syscall path first (EnterKernel/EmitSyscall) to de-risk plan. 26 new tests (532 total). ISA filesystem chosen over C#. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

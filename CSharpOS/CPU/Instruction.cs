@@ -78,6 +78,16 @@ public static class Instruction
     public const byte INK         = 0x49;
     public const byte INPOLL      = 0x4A;
 
+    // ---- privileged file-block opcodes ------------------------------------
+    // Raw block transfers between the disk's file-block region and RAM, run by the
+    // filesystem's OS routines in kernel mode (absolute addresses); they trap as
+    // invalid in user mode, exactly like DREAD/DWRITE. The transfer size is fixed at
+    // the disk's FileBlockSize, so there is no length operand.
+    // FBREAD dest, block  — RAM[reg[dest] .. +FileBlockSize) = fileBlock[reg[block]]
+    // FBWRITE block, src  — fileBlock[reg[block]] = RAM[reg[src] .. +FileBlockSize)
+    public const byte FBREAD      = 0x4B;
+    public const byte FBWRITE     = 0x4C;
+
     // ---- private fields --------------------------------------------------
     private static Dictionary<byte, Action<Hardware, byte, byte, byte>> opcodeTable = new();
 
@@ -129,6 +139,8 @@ public static class Instruction
         opcodeTable[INS]         = InstructionFunctions.Ins;
         opcodeTable[INK]         = InstructionFunctions.Ink;
         opcodeTable[INPOLL]      = InstructionFunctions.InkPoll;
+        opcodeTable[FBREAD]      = InstructionFunctions.FbRead;
+        opcodeTable[FBWRITE]     = InstructionFunctions.FbWrite;
     }
 
     // ---- integral functions ----------------------------------------------

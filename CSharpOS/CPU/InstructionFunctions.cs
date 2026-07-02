@@ -432,6 +432,36 @@ internal static class InstructionFunctions
         hw.WriteRegisterAt(b2, hw.DiskLength(slot));
     }
 
+    // ===== File Blocks (FbRead, FbWrite) =====================================
+    // FBREAD dest, block — copies file block reg[block] (FileBlockSize bytes) into RAM at
+    // the absolute address reg[dest]. Like DREAD, the file-block region is a kernel
+    // boundary, so this traps as invalid in user mode.
+    internal static void FbRead(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.TrapInvalidInstruction(Instruction.FBREAD, b1, b2, b3);
+            return;
+        }
+        int destAddress = hw.ReadRegisterAt(b1);
+        int block = hw.ReadRegisterAt(b2);
+        hw.FileBlockRead(destAddress, block);
+    }
+
+    // FBWRITE block, src — copies FileBlockSize bytes of RAM from the absolute address
+    // reg[src] into file block reg[block]. Privileged-only (traps in user mode).
+    internal static void FbWrite(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        if (hw.GetPrivilegeLevel() == PrivilegeLevel.User)
+        {
+            hw.TrapInvalidInstruction(Instruction.FBWRITE, b1, b2, b3);
+            return;
+        }
+        int block = hw.ReadRegisterAt(b1);
+        int srcAddress = hw.ReadRegisterAt(b2);
+        hw.FileBlockWrite(block, srcAddress);
+    }
+
     // ===== Process (Fork, Exec, Wait, Exit, SetFocus) ========================
     // FORK — duplicate the running process; traps into the privileged OS fork routine,
     // which delivers the child's PID to the parent (in EAX) and 0 to the child.

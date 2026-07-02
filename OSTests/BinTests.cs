@@ -199,4 +199,183 @@ public class BinTests
         Assert.Equal(8, bin.SlotCount);
         Assert.Equal(256, bin.SlotSize);
     }
+
+    // ---- file-block region -----------------------------------------------
+
+    [Fact]
+    public void Constructor_ExposesFileBlockGeometry()
+    {
+        Bin bin = new Bin(8, 256, 16, 64);
+        Assert.Equal(16, bin.FileBlockCount);
+        Assert.Equal(64, bin.FileBlockSize);
+    }
+
+    [Fact]
+    public void SlotOnlyBin_HasNoFileBlockRegion()
+    {
+        Bin bin = new Bin(4, 16);
+        Assert.Equal(0, bin.FileBlockCount);
+        Assert.Equal(0, bin.FileBlockSize);
+    }
+
+    [Fact]
+    public void WriteFileBlockThenReadFileBlock_RoundTrips()
+    {
+        Bin bin = new Bin(2, 16, 4, 8);
+        byte[] block = new byte[] { 10, 20, 30, 40, 50, 60, 70, 80 };
+        bin.WriteFileBlock(2, block);
+
+        Assert.Equal(block, bin.ReadFileBlock(2));
+    }
+
+    [Fact]
+    public void ReadFileBlock_NeverWritten_ReturnsZeros_DoesNotThrow()
+    {
+        Bin bin = new Bin(2, 16, 4, 8);
+        Assert.Equal(new byte[8], bin.ReadFileBlock(1));
+    }
+
+    [Fact]
+    public void ReadFileBlock_ReturnsACopy_MutatingItDoesNotAffectStorage()
+    {
+        Bin bin = new Bin(2, 16, 4, 8);
+        bin.WriteFileBlock(0, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+
+        byte[] first = bin.ReadFileBlock(0);
+        first[0] = 99;
+
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, bin.ReadFileBlock(0));
+    }
+
+    [Fact]
+    public void WriteFileBlock_OverwritesWholeBlock()
+    {
+        Bin bin = new Bin(2, 16, 4, 4);
+        bin.WriteFileBlock(0, new byte[] { 1, 2, 3, 4 });
+        bin.WriteFileBlock(0, new byte[] { 9, 8, 7, 6 });
+        Assert.Equal(new byte[] { 9, 8, 7, 6 }, bin.ReadFileBlock(0));
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(5)]
+    public void WriteFileBlock_WrongSize_Throws(int length)
+    {
+        Bin bin = new Bin(2, 16, 4, 4);
+        Assert.Throws<ArgumentException>(() => bin.WriteFileBlock(0, new byte[length]));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public void FileBlock_OutOfRange_Throws(int block)
+    {
+        Bin bin = new Bin(2, 16, 4, 8);
+        Assert.Throws<ArgumentOutOfRangeException>(() => bin.ReadFileBlock(block));
+        Assert.Throws<ArgumentOutOfRangeException>(() => bin.WriteFileBlock(block, new byte[8]));
+    }
+
+    [Fact]
+    public void FileBlockAccess_OnSlotOnlyBin_Throws()
+    {
+        Bin bin = new Bin(4, 16);
+        Assert.Throws<InvalidOperationException>(() => bin.ReadFileBlock(0));
+        Assert.Throws<InvalidOperationException>(() => bin.WriteFileBlock(0, new byte[0]));
+    }
+
+    [Fact]
+    public void Constructor_NegativeFileBlockCount_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new Bin(4, 16, -1, 8));
+    }
+
+    [Fact]
+    public void Constructor_PositiveFileBlockCountWithNonPositiveSize_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new Bin(4, 16, 2, 0));
+    }
+
+    [Fact]
+    public void FileBlockRegion_IsIndependentOfSlotStorage()
+    {
+        Bin bin = new Bin(2, 16, 2, 8);
+        bin.Store(0, new byte[] { 1, 2, 3 });
+        bin.WriteFileBlock(0, new byte[] { 9, 9, 9, 9, 9, 9, 9, 9 });
+
+        // Neither region disturbs the other.
+        Assert.Equal(new byte[] { 1, 2, 3 }, bin.Load(0));
+        Assert.Equal(new byte[] { 9, 9, 9, 9, 9, 9, 9, 9 }, bin.ReadFileBlock(0));
+    }
+
+    // ---- persistence -----------------------------------------------------
+
+    [Fact]
+    public void SaveThenLoad_RestoresFileBlocksIntoAFreshBin()
+    {
+        string path = Path.GetTempFileName();
+        try
+        {
+            Bin source = new Bin(2, 16, 4, 8);
+            source.WriteFileBlock(0, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            source.WriteFileBlock(3, new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 });
+            source.Save(path);
+
+            Bin restored = new Bin(2, 16, 4, 8);
+            restored.Load(path);
+
+            Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, restored.ReadFileBlock(0));
+            Assert.Equal(new byte[8], restored.ReadFileBlock(1)); // untouched block stays zero
+            Assert.Equal(new byte[] { 8, 7, 6, 5, 4, 3, 2, 1 }, restored.ReadFileBlock(3));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Load_MismatchedGeometry_Throws()
+    {
+        string path = Path.GetTempFileName();
+        try
+        {
+            new Bin(2, 16, 4, 8).Save(path);
+            Assert.Throws<InvalidDataException>(() => new Bin(2, 16, 8, 8).Load(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Load_BadMagic_Throws()
+    {
+        string path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, new byte[] { 0, 1, 2, 3, 4, 5, 6, 7 });
+            Assert.Throws<InvalidDataException>(() => new Bin(2, 16, 4, 8).Load(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SaveOrLoad_OnSlotOnlyBin_Throws()
+    {
+        string path = Path.GetTempFileName();
+        try
+        {
+            Bin bin = new Bin(4, 16);
+            Assert.Throws<InvalidOperationException>(() => bin.Save(path));
+            Assert.Throws<InvalidOperationException>(() => bin.Load(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
 }

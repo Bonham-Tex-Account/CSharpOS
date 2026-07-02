@@ -105,8 +105,10 @@ OperatingSystem os = OsPluginLoader.Load(string dllPath, TextWriter log);
 Flat fixed-slot block store. Slots numbered 0..SlotCount-1. Short blobs recorded at true length; slack tail is zeroed.
 
 ```csharp
-Bin(int slotCount, int slotSize)
+Bin(int slotCount, int slotSize)                                    // slot-only (no file region)
+Bin(int slotCount, int slotSize, int fileBlockCount, int fileBlockSize) // + file-block region
 
+// ---- slot region (variable-length, occupied/length directory) ----
 int  Store(byte[] data)          // first free slot → index; -1 if full; throws if data > slotSize
 void Store(int slot, byte[] data) // overwrite specific slot; throws if data > slotSize
 byte[] Load(int slot)            // defensive copy at true length; throws if free
@@ -115,10 +117,16 @@ void Free(int slot)              // zero + mark free; idempotent
 bool IsOccupied(int slot)
 int  FreeSlotCount               // property
 int  SlotCount / SlotSize        // properties
+
+// ---- file-block region (fixed-size, raw, block-addressed) ----
+byte[] ReadFileBlock(int block)         // fresh copy; zeros if never written; never throws for "empty"
+void   WriteFileBlock(int block, byte[]) // data must be exactly FileBlockSize; else ArgumentException
+int    FileBlockCount / FileBlockSize   // properties (0 for a slot-only Bin)
+void   Save(string path) / Load(string path) // persist ONLY the file-block region (CSFS header)
 ```
 
-Default disk: `Bin(DefaultDiskSlots + SwapSlotCount, DefaultDiskSlotSize)` = `Bin(576, 1024)`.
-Image slots: 0–63. Swap slots: 64–575 (`SwapSlot(proc, page) = 64 + proc*64 + page`).
+Default disk: `Bin(DefaultDiskSlots + SwapSlotCount, DefaultDiskSlotSize, DefaultFileBlockCount, DefaultFileBlockSize)` = `Bin(576, 1024, 256, 256)`.
+Image slots: 0–63. Swap slots: 64–575 (`SwapSlot(proc, page) = 64 + proc*64 + page`). File blocks: 0–255 (independent address space, moved by `FBREAD`/`FBWRITE`).
 
 ---
 
