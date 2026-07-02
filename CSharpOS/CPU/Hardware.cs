@@ -56,12 +56,15 @@ public partial class Hardware
     // Per-process file-descriptor table: FdCount handles (0 = stdin, 1 = stdout, ...),
     // each a 4-byte device id. IN/OUT resolve the fd's device rather than assuming
     // device == process index. Bytes 136-159 stay free for later efforts (disk slot,
-    // PID group); the fd table sits at 160 so those stay untouched.
+    // PID group); the fd table sits at 160 so those stay untouched. Widened from 4 to 8
+    // handles for the filesystem effort so a process can hold several open files at once
+    // (fds 2-7) alongside stdin/stdout; the table is the last entry field, so widening it
+    // only grows ProcessEntrySize (no other field moves) and shifts OsLayout downstream.
     public const int ProcessEntryFdTable            = 160;
-    public const int FdCount                        = 4;
+    public const int FdCount                        = 8;
     public const int StdIn                          = 0;
     public const int StdOut                         = 1;
-    public const int ProcessEntrySize               = 176;  // 160 + FdCount * 4
+    public const int ProcessEntrySize               = 192;  // 160 + FdCount * 4
 
     // ---- device ids ------------------------------------------------------
     // Character device ids 0..MaxProcesses-1 are the per-process I/O devices (the
@@ -73,6 +76,14 @@ public partial class Hardware
     // never exhaust slots.
     public const int DefaultDiskSlots    = 64;
     public const int DefaultDiskSlotSize = 1024;
+    // The filesystem's raw block store, carried in the same Bin as the image/swap slots
+    // but block-addressed (see Bin.ReadFileBlock). Block size matches the paging PageSize
+    // (256) by convention so the future RAM cache can hold one block per page frame; kept
+    // as an independent constant here to avoid a Hardware→OsLayout dependency. The count is
+    // configurable — start large enough for early filesystem work; the cache is sized as a
+    // fraction of it. 256 blocks × 256 bytes = 64 KiB of file space.
+    public const int DefaultFileBlockSize  = 256;
+    public const int DefaultFileBlockCount = 256;
 
     // ---- interrupt vector table -----------------------------------------
     // One 4-byte slot per OS routine at the front of the OS region. Hardware reads
@@ -261,7 +272,7 @@ public partial class Hardware
     // image slots [0, DefaultDiskSlots) plus the paging swap region above them, so a
     // page's deterministic swap slot (OsLayout.SwapSlot) is always in range.
     public Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os)
-        : this(memorySize, registerNames, os, new Bin(DefaultDiskSlots + OsLayout.SwapSlotCount, DefaultDiskSlotSize))
+        : this(memorySize, registerNames, os, new Bin(DefaultDiskSlots + OsLayout.SwapSlotCount, DefaultDiskSlotSize, DefaultFileBlockCount, DefaultFileBlockSize))
     {
     }
 
@@ -658,6 +669,28 @@ public partial class Hardware
     public int DiskLength(int slot)
     {
         return Disk.GetLength(slot);
+    }
+
+    // Block-device transfer: copies a whole file block (FileBlockSize bytes) into RAM at
+    // destAddr (absolute). Backs the FBREAD instruction. Unlike DiskRead the size is fixed,
+    // so no length is returned; a never-written block reads back as zeros.
+    public void FileBlockRead(int destAddr, int block)
+    {
+        byte[] data = Disk.ReadFileBlock(block);
+        WriteBytes(destAddr, data);
+    }
+
+    // Block-device transfer: copies a whole file block (FileBlockSize bytes) of RAM from
+    // srcAddr (absolute) into the file block. Backs the FBWRITE instruction.
+    public void FileBlockWrite(int block, int srcAddr)
+    {
+        int size = Disk.FileBlockSize;
+        byte[] buffer = new byte[size];
+        for (int i = 0; i < size; i++)
+        {
+            buffer[i] = memory[srcAddr + i];
+        }
+        Disk.WriteFileBlock(block, buffer);
     }
 
     // ===== Device Internals (FdDevice, FocusedInputDevice, waiters) ==========

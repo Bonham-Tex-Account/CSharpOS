@@ -239,6 +239,18 @@ public sealed partial class Assembler
         Emit(Instruction.DLEN, (byte)slot, (byte)lengthOut, 0);
     }
 
+    // Privileged file-block transfers (fixed FileBlockSize, no length operand): copy a
+    // whole block into RAM at dest (FBREAD), and copy a RAM block into a file block (FBWRITE).
+    public void FbRead(RegisterName dest, RegisterName block)
+    {
+        Emit(Instruction.FBREAD, (byte)dest, (byte)block, 0);
+    }
+
+    public void FbWrite(RegisterName block, RegisterName src)
+    {
+        Emit(Instruction.FBWRITE, (byte)block, (byte)src, 0);
+    }
+
     // Process control: fork the running process (parent gets the child PID in EAX,
     // child gets 0).
     public void Fork()
