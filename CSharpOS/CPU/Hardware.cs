@@ -115,8 +115,25 @@ public partial class Hardware
     // access touches a non-resident page; makes the page resident, then resumes.
     public const int IvtPageFault          = 15;
     public const int IvtWakeKey            = 16;
-    public const int IvtSlotCount          = 17;
+    // Filesystem buffer-cache control interface (Increment 2). Dispatched with an op
+    // selector in EAX and a block number in EBX; routes to the cache manager subroutines
+    // (get/dirty/write-through/pin/unpin/discard/flush) and parks the result in the cache
+    // header's CacheResult word. Kernel-internal; also the direct test entry point.
+    public const int IvtCacheOp            = 17;
+    public const int IvtSlotCount          = 18;
     public const int IvtSize               = IvtSlotCount * 4;
+
+    // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
+    // each op's result (cache_get returns the block's cached data address; the rest return 0)
+    // in the cache header's CacheResult word, since RunOsRoutineSynchronously restores
+    // registers and a test cannot read a routine's register result directly.
+    public const int CacheOpGet          = 0; // ensure block resident → data address
+    public const int CacheOpDirty        = 1; // mark resident block dirty (write-back later)
+    public const int CacheOpWriteThrough = 2; // flush block to disk now, leave clean
+    public const int CacheOpPin          = 3; // pin (never evict while pinned)
+    public const int CacheOpUnpin        = 4; // release one pin
+    public const int CacheOpDiscard      = 5; // drop block: clear valid+dirty (no write-back)
+    public const int CacheOpFlush        = 6; // write back all dirty unpinned slots
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------
     // Printable ASCII (32–126) is delivered as-is. Special keys use values above
@@ -378,6 +395,7 @@ public partial class Hardware
             case IvtWait:               return "Wait";
             case IvtSpawn:              return "Spawn";
             case IvtPageFault:          return "PageFault";
+            case IvtCacheOp:            return "CacheOp";
             default:                    return $"slot {slot}";
         }
     }
