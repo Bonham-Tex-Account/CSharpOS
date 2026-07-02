@@ -77,6 +77,7 @@ public static class OsRoutines
         int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
         int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
         int cacheOp       = OsLayout.CodeBase + asm.CodeLength; EmitCacheOp(asm);
+        int fsOp          = OsLayout.CodeBase + asm.CodeLength; EmitFsOp(asm);
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
@@ -87,6 +88,7 @@ public static class OsRoutines
         EmitResolveCow(asm);    // shared subroutine "resolve_cow"; ends with Ret
         EmitCowShare(asm);      // shared subroutine "cow_share"; ends with Ret
         EmitCacheSubroutines(asm); // "cache_find/get/dirty/write_through/pin/unpin/discard/flush"
+        EmitFsSubroutines(asm);    // "fs_format/alloc_block/free_block/chain_next/chain_set_next"
         EmitResumeMlfq(asm);    // label "resume_mlfq"
 
         byte[] code = asm.Build(OsLayout.CodeBase);
@@ -117,6 +119,7 @@ public static class OsRoutines
         WriteWord(image, Hardware.IvtSyscall * 4,            syscall);
         WriteWord(image, Hardware.IvtPageFault * 4,          pageFault);
         WriteWord(image, Hardware.IvtCacheOp * 4,            cacheOp);
+        WriteWord(image, Hardware.IvtFsOp * 4,               fsOp);
 
         // Default every process's copy-on-write partner to -1 (none) in the image itself, so
         // even minimal hand-seeded test images (which skip SeedOsData) never see a process
@@ -2380,6 +2383,234 @@ public static class OsRoutines
         asm.Inc(R(ESI));
         asm.Jmp("cfl_loop");
         asm.Label("cfl_done");
+        asm.Ret();
+    }
+
+    // ---- filesystem block allocator + free-chaining (Increment 3) -----------
+
+    // ===== EmitFsOp ==========================================================
+    // IvtFsOp: the filesystem control interface. Op selector in EAX; block arg in EBX;
+    // ChainSetNext's next arg in ECX. Sets up the privileged stack, routes to a block-layer
+    // subroutine, and parks the result (an allocated block, a chain pointer, else 0) in the
+    // FsResult header word. Grows with more selectors as later increments add directory ops.
+    private static void EmitFsOp(Assembler asm)
+    {
+        asm.Label("fs_op");
+        SetupPrivilegedStack(asm);
+        asm.Mov(R(R13), R(EAX));                 // R13 = op selector
+        asm.MovImm(R(R14), Hardware.FsOpFormat);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_format");
+        asm.MovImm(R(R14), Hardware.FsOpAllocBlock);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_alloc");
+        asm.MovImm(R(R14), Hardware.FsOpFreeBlock);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_free");
+        asm.MovImm(R(R14), Hardware.FsOpChainNext);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_next");
+        asm.MovImm(R(R14), Hardware.FsOpChainSetNext);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_setnext");
+        asm.MovImm(R(R12), 0);                   // unknown op
+        asm.Jmp("fo_result");
+
+        asm.Label("fo_format");
+        asm.Call("fs_format");
+        asm.MovImm(R(R12), 0);
+        asm.Jmp("fo_result");
+        asm.Label("fo_alloc");
+        asm.Call("fs_alloc_block");
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_free");
+        asm.Mov(R(EAX), R(EBX));
+        asm.Call("fs_free_block");
+        asm.MovImm(R(R12), 0);
+        asm.Jmp("fo_result");
+        asm.Label("fo_next");
+        asm.Mov(R(EAX), R(EBX));
+        asm.Call("fs_chain_next");
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_setnext");
+        asm.Mov(R(EAX), R(EBX));                 // block; ECX still carries the caller's next arg
+        asm.Call("fs_chain_set_next");
+        asm.MovImm(R(R12), 0);
+
+        asm.Label("fo_result");
+        Imm16(asm, EBP, OsLayout.FsResultOffset);
+        asm.Store(R(EBP), R(R12));
+        asm.MovImm(R(EAX), User);
+        asm.OsRet(R(EAX));
+    }
+
+    // ===== EmitFsSubroutines =================================================
+    // Block layer over the file-block region, all going through the cache. Convention: block
+    // arrives in EAX; results come back in EAX. EDX/EDI carry a value across cache_* calls
+    // (the cache subroutines never touch EDX/EDI); R8-R15/EAX/EBP are scratch. Bitmap bit = 1
+    // means the block is allocated.
+    private static void EmitFsSubroutines(Assembler asm)
+    {
+        // ---- fs_format: initial superblock + empty bitmap (blocks 0,1 reserved) ----
+        asm.Label("fs_format");
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_get");                   // EAX = bitmap data addr
+        asm.Mov(R(R8), R(EAX));
+        asm.MovImm(R(R9), 0);
+        asm.Label("ff_zero");
+        asm.MovImm(R(R10), FsLayout.BitmapWords);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jns("ff_zero_done");
+        asm.Mov(R(R11), R(R9));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R11), R(EAX));
+        asm.Add(R(R11), R(R8));
+        asm.MovImm(R(EAX), 0);
+        asm.Store(R(R11), R(EAX));
+        asm.Inc(R(R9));
+        asm.Jmp("ff_zero");
+        asm.Label("ff_zero_done");
+        asm.MovImm(R(EAX), 3);                   // bits 0,1 set: blocks 0,1 in use
+        asm.Store(R(R8), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_dirty");
+        // superblock: magic, block count, free count
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_get");                   // EAX = superblock data addr
+        asm.Mov(R(R8), R(EAX));
+        asm.MovImm16(R(EAX), FsLayout.SuperMagic);
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(R10), FsLayout.SuperMagicOffset);
+        asm.Add(R(R9), R(R10));
+        asm.Store(R(R9), R(EAX));
+        asm.MovImm16(R(EAX), FsLayout.BlockCount);
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(R10), FsLayout.SuperBlockCountOffset);
+        asm.Add(R(R9), R(R10));
+        asm.Store(R(R9), R(EAX));
+        asm.MovImm16(R(EAX), FsLayout.BlockCount - FsLayout.FirstDataBlock);
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(R10), FsLayout.SuperFreeCountOffset);
+        asm.Add(R(R9), R(R10));
+        asm.Store(R(R9), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_dirty");
+        asm.Ret();
+
+        // ---- fs_alloc_block: → EAX = allocated block, or -1 if full ----
+        asm.Label("fs_alloc_block");
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_get");
+        asm.Mov(R(R8), R(EAX));                   // R8 = bitmap base
+        asm.MovImm(R(R9), 0);                     // R9 = word index
+        asm.Label("fa_word");
+        asm.MovImm(R(R10), FsLayout.BitmapWords);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jns("fa_full");
+        asm.Mov(R(R11), R(R9));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R11), R(EAX));
+        asm.Add(R(R11), R(R8));                   // R11 = &bitmap[word]
+        asm.Load(R(R12), R(R11));                 // R12 = word bits
+        asm.MovImm(R(R13), 0);                    // R13 = bit index
+        asm.Label("fa_bit");
+        asm.MovImm(R(EAX), 32);
+        asm.Cmp(R(R13), R(EAX));
+        asm.Jns("fa_next_word");
+        asm.Mov(R(R14), R(R12));
+        asm.Shr(R(R14), R(R13));
+        asm.MovImm(R(EAX), 1);
+        asm.And(R(R14), R(EAX));
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R14), R(EAX));
+        asm.Jz("fa_found");                       // bit == 0 → free block
+        asm.Inc(R(R13));
+        asm.Jmp("fa_bit");
+        asm.Label("fa_next_word");
+        asm.Inc(R(R9));
+        asm.Jmp("fa_word");
+
+        asm.Label("fa_found");
+        asm.Mov(R(EDX), R(R9));                   // block = word*32 + bit → EDX
+        asm.MovImm(R(EAX), 32);
+        asm.Mul(R(EDX), R(EAX));
+        asm.Add(R(EDX), R(R13));
+        asm.MovImm(R(EAX), 1);
+        asm.Shl(R(EAX), R(R13));
+        asm.Or(R(R12), R(EAX));                   // set the bit
+        asm.Store(R(R11), R(R12));
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_dirty");
+        // initialise the new block's next-pointer = -1 (end of chain)
+        asm.Mov(R(EAX), R(EDX));
+        asm.Call("cache_get");
+        asm.Mov(R(R8), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.NextPtrOffset);
+        asm.Add(R(R8), R(EAX));
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Store(R(R8), R(EAX));
+        asm.Mov(R(EAX), R(EDX));
+        asm.Call("cache_dirty");
+        asm.Mov(R(EAX), R(EDX));                  // return the block number
+        asm.Ret();
+        asm.Label("fa_full");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_free_block: EAX = block (clear bitmap bit, discard from cache) ----
+        asm.Label("fs_free_block");
+        asm.Mov(R(EDX), R(EAX));                  // EDX = block
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_get");
+        asm.Mov(R(R8), R(EAX));
+        asm.Mov(R(R9), R(EDX));
+        asm.MovImm(R(EAX), 32);
+        asm.Div(R(R9), R(EAX));                   // R9 = word = block/32
+        asm.Mov(R(R10), R(R9));
+        asm.MovImm(R(EAX), 32);
+        asm.Mul(R(R10), R(EAX));
+        asm.Mov(R(R13), R(EDX));
+        asm.Sub(R(R13), R(R10));                  // R13 = bit = block - word*32
+        asm.Mov(R(R11), R(R9));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R11), R(EAX));
+        asm.Add(R(R11), R(R8));                   // R11 = &bitmap[word]
+        asm.Load(R(R12), R(R11));
+        asm.MovImm(R(EAX), 1);
+        asm.Shl(R(EAX), R(R13));
+        asm.Not(R(EAX));
+        asm.And(R(R12), R(EAX));                  // clear the bit
+        asm.Store(R(R11), R(R12));
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_dirty");
+        asm.Mov(R(EAX), R(EDX));
+        asm.Call("cache_discard");               // drop the freed block's cached copy
+        asm.Ret();
+
+        // ---- fs_chain_next: EAX = block → EAX = next-block link ----
+        asm.Label("fs_chain_next");
+        asm.Call("cache_get");
+        asm.Mov(R(R9), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.NextPtrOffset);
+        asm.Add(R(R9), R(EAX));
+        asm.Load(R(EAX), R(R9));
+        asm.Ret();
+
+        // ---- fs_chain_set_next: EAX = block, ECX = next ----
+        asm.Label("fs_chain_set_next");
+        asm.Mov(R(EDI), R(ECX));                  // EDI = next (preserved across cache_*)
+        asm.Mov(R(EDX), R(EAX));                  // EDX = block
+        asm.Call("cache_get");
+        asm.Mov(R(R9), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.NextPtrOffset);
+        asm.Add(R(R9), R(EAX));
+        asm.Store(R(R9), R(EDI));
+        asm.Mov(R(EAX), R(EDX));
+        asm.Call("cache_dirty");
         asm.Ret();
     }
 

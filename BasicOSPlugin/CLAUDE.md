@@ -17,8 +17,8 @@
 `OsRoutines.BuildOsImage()` emits routines in this order, recording each start address:
 
 ```
-[IVT: 18 slots × 4 bytes = 72 bytes]
-[CodeBase = 72]
+[IVT: 19 slots × 4 bytes = 76 bytes]
+[CodeBase = 76]
 EmitContextSwitch    → IvtContextSwitch (slot 0)        OsRoutines.cs:124
 EmitSchedule         → IvtSchedule (slot 7)             OsRoutines.cs:208
 EmitBlock            → IvtBlockInput + IvtBlockOutput (slots 5 & 6, same address) :216
@@ -37,6 +37,7 @@ EmitWait             → IvtWait (slot 12)                OsRoutines.cs:1091
 EmitSyscall          → IvtSyscall (slot 14)             OsRoutines.cs:1143
 EmitPageFault        → IvtPageFault (slot 15)           OsRoutines.cs:254
 EmitCacheOp          → IvtCacheOp (slot 17)             (dispatch → cache_* subs)
+EmitFsOp             → IvtFsOp (slot 18)                (dispatch → fs_* subs)
 EmitExitBody         → label "exit_body"                OsRoutines.cs:960
 EmitAllocSub         → label "alloc_sub" (CALL/RET)     OsRoutines.cs:1208
 EmitBuddyFree        → label "buddy_free_entry"         OsRoutines.cs:1721
@@ -47,6 +48,7 @@ EmitPairResolve      → label "pair_resolve" (CALL/RET)  OsRoutines.cs:627
 EmitResolveCow       → label "resolve_cow" (CALL/RET)   OsRoutines.cs:743
 EmitCowShare         → label "cow_share" (CALL/RET)     OsRoutines.cs:826
 EmitCacheSubroutines → labels "cache_find/get/dirty/write_through/pin/unpin/discard/flush" (CALL/RET)
+EmitFsSubroutines    → labels "fs_format/alloc_block/free_block/chain_next/chain_set_next" (CALL/RET)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
 
@@ -77,6 +79,10 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `cache_pin`/`cache_unpin` | EmitCacheSubroutines | IvtCacheOp | Bump / floor-decrement a slot's pin count (pinned = never evicted) |
 | `cache_discard` | EmitCacheSubroutines | IvtCacheOp | Drop a block with no write-back (clear valid+dirty+pin) |
 | `cache_flush` | EmitCacheSubroutines | IvtCacheOp, ContextSwitch periodic hook | FBWRITE every dirty unpinned valid slot, clear dirty |
+| `fs_format` | EmitFsSubroutines | IvtFsOp | Write superblock (magic/geom) + empty bitmap (bits 0,1 set) through the cache |
+| `fs_alloc_block` | EmitFsSubroutines | IvtFsOp, future dir/file routines | Scan bitmap for a clear bit → set it, init next=-1; EAX→block or -1 |
+| `fs_free_block` | EmitFsSubroutines | IvtFsOp | Clear the bitmap bit + cache_discard the block; EAX=block |
+| `fs_chain_next`/`fs_chain_set_next` | EmitFsSubroutines | IvtFsOp | Read / write a block's next-block link (offset 252) |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---

@@ -120,7 +120,11 @@ public partial class Hardware
     // (get/dirty/write-through/pin/unpin/discard/flush) and parks the result in the cache
     // header's CacheResult word. Kernel-internal; also the direct test entry point.
     public const int IvtCacheOp            = 17;
-    public const int IvtSlotCount          = 18;
+    // Filesystem control interface (Increment 3+). Dispatched with an op selector in EAX and
+    // arguments in EBX/ECX; routes to the block allocator / free-chaining (and, later, the
+    // directory tree). Result parked in OsLayout.FsResult. One slot grows across increments.
+    public const int IvtFsOp               = 18;
+    public const int IvtSlotCount          = 19;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
@@ -134,6 +138,14 @@ public partial class Hardware
     public const int CacheOpUnpin        = 4; // release one pin
     public const int CacheOpDiscard      = 5; // drop block: clear valid+dirty (no write-back)
     public const int CacheOpFlush        = 6; // write back all dirty unpinned slots
+
+    // IvtFsOp op selectors (EAX). Block arg in EBX; ChainSetNext's next arg in ECX.
+    // Results (alloc's block number, ChainNext's pointer) are parked in OsLayout.FsResult.
+    public const int FsOpFormat       = 0; // write initial superblock + empty bitmap (blocks 0,1 used)
+    public const int FsOpAllocBlock   = 1; // claim a free block → block number, or -1 if full
+    public const int FsOpFreeBlock    = 2; // release block EBX (clear bitmap bit, discard from cache)
+    public const int FsOpChainNext    = 3; // read block EBX's next-block link → pointer
+    public const int FsOpChainSetNext = 4; // set block EBX's next-block link to ECX
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------
     // Printable ASCII (32–126) is delivered as-is. Special keys use values above
@@ -396,6 +408,7 @@ public partial class Hardware
             case IvtSpawn:              return "Spawn";
             case IvtPageFault:          return "PageFault";
             case IvtCacheOp:            return "CacheOp";
+            case IvtFsOp:               return "FsOp";
             default:                    return $"slot {slot}";
         }
     }

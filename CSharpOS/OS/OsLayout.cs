@@ -193,8 +193,14 @@ public static class OsLayout
     public const int CacheSlotTableBase = CacheClockOffset + CacheHeaderSize;
     public const int CacheRegionSize    = CacheSlotCount * CacheSlotSize;
 
+    // ---- filesystem op result scratch (Increment 3) -----------------------
+    // Where the IvtFsOp dispatcher parks a filesystem op's return value (an allocated block
+    // number, a chain's next pointer, etc.), read back from memory by a synchronous test
+    // dispatch — same rationale as CacheResult.
+    public const int FsResultOffset = CacheSlotTableBase + CacheRegionSize;
+
     // Total OS region size.
-    public const int TotalSize = CacheSlotTableBase + CacheRegionSize;
+    public const int TotalSize = FsResultOffset + 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)
