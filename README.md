@@ -1,14 +1,14 @@
 # CSharpOS
 
-A learning project that emulates a complete operating system in C#. The emulator includes a custom CPU with its own instruction set, a multi-level feedback queue (MLFQ) scheduler, a buddy memory allocator, a trap system, and a live Spectre.Console TUI dashboard with time-travel debugging.
+A learning project that emulates a complete operating system in C#. The emulator includes a custom CPU with its own instruction set, a multi-level feedback queue (MLFQ) scheduler, a buddy memory allocator, demand-paged virtual memory with copy-on-write fork, an ISA filesystem (block allocator, buffer cache, directories, and file syscalls, all compiled to the CPU's own instruction set), a trap system, and a live Spectre.Console TUI dashboard with time-travel debugging.
 
 ## Projects
 
 | Project | Purpose |
 |---|---|
 | `CSharpOS` | Core library — CPU, assembler, OS base classes, OS layout, plugin loader |
-| `BasicOSPlugin` | Concrete OS personality — MLFQ scheduler, buddy allocator, I/O routines (all compiled to ISA at boot) |
-| `CSharpOSConsole` | Console host — interactive menu, per-process terminal windows, Spectre.Console dashboard |
+| `BasicOSPlugin` | Concrete OS personality — MLFQ scheduler, buddy allocator, demand paging, filesystem, I/O routines (all compiled to ISA at boot) |
+| `CSharpOSConsole` | Console host — interactive menu, shared focused-process screen, Spectre.Console dashboard |
 | `OSTests` | xUnit test suite |
 
 ## Prerequisites
@@ -27,7 +27,7 @@ dotnet build
 dotnet run --project CSharpOSConsole
 ```
 
-The menu lets you pick one of 8 demo scenarios. After selecting a scenario you are also prompted for visualizer detail level (1 minimal / 2 normal / 3 high) and rendering performance level.
+The menu lets you pick one of 12 demo scenarios. After selecting a scenario you are also prompted for visualizer detail level (1 minimal / 2 normal / 3 high) and rendering performance level.
 
 ### Demo scenarios
 
@@ -41,8 +41,12 @@ The menu lets you pick one of 8 demo scenarios. After selecting a scenario you a
 | 6 | Memory churn — short jobs continuously load and exit; watch the buddy tree |
 | 7 | Fill & drain — mixed-size jobs fill heap then drain; watch coalescing/reclaim |
 | 8 | Scheduler + memory — counter + average run while short jobs churn the heap |
+| 9 | Shell — interactive: type a command id to fork/exec a program (fork/exec/wait/setfocus) |
+| 10 | Two guessing games — Tab switches focus between them (process switching) |
+| 11 | Spawn tree — a parent forks two children; watch the Process tree panel |
+| 12 | String I/O demo — type a name in the Screen panel, press Enter (`OUTS`/`INS` in action) |
 
-Modes 1–5 open a separate terminal window per process for I/O. Modes 6–8 mirror program output inside the dashboard panel instead.
+There is one shared Screen panel showing the focused process's I/O; `Tab` switches focus between running processes. Typed input is sent as an int or a string depending on what the focused process is waiting on.
 
 ### Dashboard controls (during a run)
 
@@ -52,6 +56,7 @@ Modes 1–5 open a separate terminal window per process for I/O. Modes 6–8 mir
 | `s` | Single-step one instruction |
 | `←` / `→` | Scrub backward / forward through recorded history |
 | `o` | Toggle program I/O panel |
+| `Tab` | Switch the focused (foreground) process |
 | `q` | Quit the current run |
 
 ### Custom OS plugin
@@ -102,8 +107,8 @@ See `CSharpOSConsole/Programs.cs` for more examples including memory loads/store
 
 | Document | Description |
 |---|---|
-| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 41 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
-| [docs/OS-Architecture.md](docs/OS-Architecture.md) | OS structure and function — memory layout with exact offsets, IVT dispatch model, MLFQ scheduler, buddy allocator, device table, Bin disk, process lifecycle (spawn/fork/exec/wait/exit), and the plugin loading mechanism. |
+| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 48 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
+| [docs/OS-Architecture.md](docs/OS-Architecture.md) | OS structure and function — memory layout with exact offsets, IVT dispatch model, MLFQ scheduler, buddy allocator, device table, Bin disk, demand paging/COW fork, the ISA filesystem (cache, block allocator, directories, file syscalls), process lifecycle (spawn/fork/exec/wait/exit), and the plugin loading mechanism. |
 
 ## Architecture overview
 
@@ -111,42 +116,35 @@ See `CSharpOSConsole/Programs.cs` for more examples including memory loads/store
 
 The `Hardware` class emulates a 32-bit CPU. The register file has 24 registers (EAX–EDX, ESI, EDI, ESP, EBP, EIP, EFLAGS, six segment registers, R8–R15). Instructions are fixed-width 4-byte words with one-byte opcodes.
 
-**Privilege levels:**
-- **User** — preemptible; traps are evaluated before each instruction.
-- **Kernel** — preemptible; used when a process is executing a kernel-mode handler.
-- **Privileged** — atomic run-to-OSRET; used for OS scheduler/allocator routines in the OS memory region.
+**Privilege levels:** two hardware levels, like real hardware — **User** and **Kernel**. There is no third "privileged" level; atomicity of the OS scheduler/allocator/filesystem routines is the hardware **interrupt-enable flag**, not a level. The syscall handler runs in Kernel mode with interrupts enabled (preemptible); the OS's ISA routines (scheduler, allocator, filesystem, paging) run in Kernel mode with interrupts masked (atomic, run-to-`OSRET`). See `docs/ISA.md` for the full mode-transition rules.
 
 ### Instruction set
+
+48 opcodes, grouped by category (full table with encodings in `docs/ISA.md`):
 
 | Mnemonic | Opcode | Description |
 |---|---|---|
 | MOV reg, reg | 0x01 | Register-to-register move |
-| MOV reg, imm32 | 0x02 | Load 32-bit immediate |
+| MOV reg, imm8 | 0x02 | Load 8-bit immediate (zero-extended) |
 | MOV reg, imm16 | 0x03 | Load 16-bit immediate (zero-extended) |
 | LOAD reg, [reg] | 0x05 | Load word from memory |
 | STORE [reg], reg | 0x06 | Store word to memory |
-| ADD | 0x10 | Add |
-| SUB | 0x11 | Subtract |
-| MUL | 0x12 | Multiply |
-| DIV | 0x13 | Divide |
+| ADD / SUB / MUL / DIV | 0x10–0x13 | Arithmetic (sets flags) |
 | CMP | 0x14 | Compare (sets flags) |
-| INC | 0x15 | Increment |
-| DEC | 0x16 | Decrement |
-| JMP | 0x20 | Unconditional jump |
-| JZ | 0x21 | Jump if zero |
-| JNZ | 0x22 | Jump if not zero |
-| CALL | 0x23 | Call subroutine |
-| RET | 0x24 | Return |
-| JS | 0x25 | Jump if sign (negative) |
-| JNS | 0x26 | Jump if not sign |
-| OUT reg | 0x30 | Output register value |
-| IN reg | 0x31 | Read input into register |
+| INC / DEC | 0x15–0x16 | Increment / decrement |
+| AND / OR / XOR / NOT | 0x17–0x1A | Bitwise logic |
+| SHL / SHR | 0x1B–0x1C | Logical shift (count in a register) |
+| JMP / JZ / JNZ / CALL / RET / JS / JNS | 0x20–0x26 | Control flow |
+| OUT / IN | 0x30–0x31 | User-mode I/O syscalls (trap to kernel) |
 | HLT | 0x32 | Halt (terminate process) |
-| IRET | 0x33 | Return from interrupt |
-| SAVEREGS | 0x40 | Save register file to process table |
-| LOADREGS | 0x41 | Load register file from process table |
-| SETLAYOUT | 0x42 | Set per-process memory layout |
-| OSRET | 0x43 | Return from OS privileged routine |
+| IRET | 0x33 | Return from a kernel-mode syscall handler |
+| FORK / EXEC / WAIT / EXIT / SETFOCUS | 0x34–0x38 | Process control |
+| SAVEREGS / LOADREGS / SETLAYOUT / OSRET | 0x40–0x43 | OS-privileged context switch primitives |
+| DREAD / DWRITE / DLEN | 0x44–0x46 | Disk slot transfers (Kernel-only) |
+| OUTS / INS | 0x47–0x48 | String output / line input |
+| INK / INPOLL | 0x49–0x4A | Raw keypress input (blocking / non-blocking) |
+| FBREAD / FBWRITE | 0x4B–0x4C | Filesystem block transfers (Kernel-only) |
+| FSYS | 0x4D | User-mode filesystem syscall (open/read/write/close/exec-by-path) |
 
 ### OS memory layout
 
@@ -161,8 +159,10 @@ The OS occupies a dedicated region below all process memory. At boot, `BasicOSPl
 The data section contains:
 - Process count, current index, MLFQ boost timer
 - Quantum thresholds (4 levels × 4 bytes)
-- Process table (up to 8 entries × 160 bytes each)
+- Process table (up to 8 entries × 192 bytes each, including an 8-entry file-descriptor table per process)
 - Buddy allocator bitmap (256-bit compact bitset)
+- Per-process page tables, a shared physical frame pool, and paging/swap/COW bookkeeping (see `docs/OS-Architecture.md`, "Virtual memory and demand paging")
+- A write-back buffer cache, filesystem scratch space, and the open-file table backing the ISA filesystem (see the Filesystem section below)
 
 ### MLFQ scheduler
 
@@ -174,7 +174,7 @@ Four priority levels (0 = highest, 3 = lowest). New processes start at level 0.
 
 ### Buddy allocator
 
-Allocations are power-of-two blocks from a 256-bit compact bitmap. The tree is stored in the OS data region; the allocator and deallocator routines are ISA code that run in Privileged mode. The dashboard's buddy tree panel reconstructs the tree from the bitmap and the process table on every frame.
+Allocations are power-of-two blocks from a 256-bit compact bitmap. The tree is stored in the OS data region; the allocator and deallocator routines are ISA code that run in Kernel mode with interrupts masked (atomic — see Privilege levels above). The dashboard's buddy tree panel reconstructs the tree from the bitmap and the process table on every frame.
 
 ### Trap system
 
@@ -183,3 +183,17 @@ Allocations are power-of-two blocks from a 256-bit compact bitmap. The tree is s
 - **LOAD/STORE** from outside the process's own memory range raises a fault.
 
 New trap handlers implement `ITrapProvider` (in `CSharpOS`) and are discovered automatically by `BasicOS.CollectTraps()` via reflection.
+
+### Filesystem
+
+CSharpOS has a complete filesystem, and — like the scheduler and allocator — it is implemented as ISA code that runs on the emulated CPU, not as C# called from outside. The disk (`CSharpOS/Disk/Bin.cs`) has a second, block-addressed region separate from the process-image slots; the filesystem lives there:
+
+- **Buffer cache** — a write-back cache in the OS memory region (`cache_*` ISA routines) with LRU eviction, dirty tracking, pinning, and periodic flush. All filesystem block I/O goes through it.
+- **Block allocator** — a superblock + free bitmap + per-block free-chaining, so a file's blocks can be scattered and linked (`fs_format`/`fs_alloc_block`/`fs_free_block`/`fs_chain_*`).
+- **Directories** — nested directories with word-per-char names and full path traversal (`/a/b/c`), so files are addressed by absolute path.
+- **File syscalls** — a single user-mode instruction, `FSYS`, gives processes open/read/write/close, plus exec-by-path (replace the running process's image with a program stored as a file in the filesystem rather than a disk image slot).
+- **Boot auto-format** — the filesystem is formatted automatically the first time the machine boots on a fresh disk; a `.bin` disk image that was already formatted (and persisted via `Bin.Save`/`Bin.Load`) is left alone.
+
+Programs still boot from disk image slots via `OperatingSystem.LoadProcess` in the general case; `FSYS` exec-by-path is the first path that launches a program stored in the filesystem instead. A shell process that resolves programs by filesystem path (rather than by disk slot number) is future work.
+
+See `docs/OS-Architecture.md`, section "The ISA filesystem", for the full design, and `docs/ISA.md` for the `FSYS`/`FBREAD`/`FBWRITE` instruction reference.

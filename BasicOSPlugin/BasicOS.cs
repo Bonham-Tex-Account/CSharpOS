@@ -26,6 +26,29 @@ public class BasicOS : OperatingSystem
     {
     }
 
+    // ---- boot ------------------------------------------------------------
+
+    /// <summary>
+    /// Formats the filesystem on first boot so the FS is usable without a caller running the
+    /// format op by hand. Skipped when the disk's superblock already carries the FS magic — so
+    /// a persisted disk loaded from a .bin keeps its files rather than being wiped. The magic is
+    /// read from the disk (not the cache), which is empty on a fresh machine.
+    /// </summary>
+    protected override void OnBooted(Hardware hw)
+    {
+        if (hw.Disk.FileBlockCount <= 0)
+        {
+            return;
+        }
+        byte[] superBlock = hw.Disk.ReadFileBlock(FsLayout.SuperBlock);
+        int magic = superBlock[FsLayout.SuperMagicOffset] | (superBlock[FsLayout.SuperMagicOffset + 1] << 8);
+        if (magic == FsLayout.SuperMagic)
+        {
+            return;
+        }
+        hw.RunOsRoutineSynchronously(Hardware.IvtFsOp, Hardware.FsOpFormat);
+    }
+
     // ---- helper functions ------------------------------------------------
 
     // Discovers all ITrapProvider implementations in this assembly via reflection

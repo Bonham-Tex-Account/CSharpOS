@@ -27,7 +27,14 @@ This document describes how the CSharpOS operating system is structured and how 
     - [Swap backing for DATA pages](#swap-backing-for-data-pages)
     - [Copy-on-write fork](#copy-on-write-fork)
     - [Paging subroutines](#paging-subroutines)
-13. [Process lifecycle](#process-lifecycle)
+13. [The ISA filesystem](#the-isa-filesystem)
+    - [On-disk layout](#on-disk-layout)
+    - [Write-back buffer cache](#write-back-buffer-cache)
+    - [Block allocator and free-chaining](#block-allocator-and-free-chaining)
+    - [Directories and path traversal](#directories-and-path-traversal)
+    - [Open-file table and file syscalls](#open-file-table-and-file-syscalls)
+    - [Exec-by-path and boot auto-format](#exec-by-path-and-boot-auto-format)
+14. [Process lifecycle](#process-lifecycle)
     - [Boot creation (Spawn)](#boot-creation-spawn)
     - [Scheduling and context switching](#scheduling-and-context-switching)
     - [I/O: blocking and waking](#io-blocking-and-waking)
@@ -36,21 +43,21 @@ This document describes how the CSharpOS operating system is structured and how 
     - [Wait](#wait)
     - [Exit / HLT](#exit--hlt)
     - [Invalid-instruction fault](#invalid-instruction-fault)
-14. [Dynamic OS plugin loading](#dynamic-os-plugin-loading)
-15. [How the pieces fit together (end-to-end)](#how-the-pieces-fit-together-end-to-end)
+15. [Dynamic OS plugin loading](#dynamic-os-plugin-loading)
+16. [How the pieces fit together (end-to-end)](#how-the-pieces-fit-together-end-to-end)
 
 ---
 
 ## Overview
 
-CSharpOS emulates a complete operating system on a custom 32-bit CPU (the `Hardware` class). The distinguishing design choice is that **the OS scheduler, memory allocator, and process-control routines are compiled to the CSharpOS ISA and run on the same CPU** — not implemented as C# methods called from the outside. The C# layer is responsible only for:
+CSharpOS emulates a complete operating system on a custom 32-bit CPU (the `Hardware` class). The distinguishing design choice is that **the OS scheduler, memory allocator, process-control routines, virtual memory manager, and filesystem are all compiled to the CSharpOS ISA and run on the same CPU** — not implemented as C# methods called from the outside. The C# layer is responsible only for:
 
 - Setting up the OS image in memory at boot.
 - Loading initial programs (driving the ISA allocator).
 - Fielding device interrupts from the host (keyboard input, output completion).
 - Providing an event feed for the visualizer.
 
-Everything else — scheduling, buddy allocation, context-switching, fork/exec/wait, and the kernel-mode I/O syscall path — executes as ISA instructions in the OS memory region.
+Everything else — scheduling, buddy allocation, context-switching, fork/exec/wait, the kernel-mode I/O syscall path, demand paging, and the filesystem (buffer cache, block allocator, directories, file syscalls) — executes as ISA instructions in the OS memory region.
 
 ---
 
@@ -63,19 +70,26 @@ At boot, `Hardware.ReserveOsMemory(OsLayout.TotalSize)` places the OS at address
 ```
 Address 0
 +------------------------------------------------------------+
-| Interrupt Vector Table (IVT)                               |  64 bytes (16 × 4)
+| Interrupt Vector Table (IVT)                               |  80 bytes (20 × 4)
 +------------------------------------------------------------+  offset 0x000 (= 0)
-| OS code (assembled ISA routines)                           |  starts at OsLayout.CodeBase = 64
+| OS code (assembled ISA routines)                           |  starts at OsLayout.CodeBase = 80
 |   ContextSwitch, Schedule, Block, WakeInput, WakeOutput,  |
-|   Halt, InvalidInstruction, BuddyAlloc, DiskLoad, Spawn,  |
-|   Fork, Exec, Wait, Syscall, PageFault + shared exit_body,|
-|   alloc_sub, free_sub, release_frames, flush_frames,      |
-|   zero_swap_slots, pair_resolve, resolve_cow, cow_share,  |
-|   resume_mlfq                                             |
-+------------------------------------------------------------+  up to OsLayout.DataBase = 12288
-| OS data section (runtime-seeded by C#)                     |  starts at OsLayout.DataBase = 12288
-|   Scheduler state header (52 bytes)                        |
-|   Process table  (8 × 176 = 1408 bytes)                   |
+|   WakeKey, Halt, InvalidInstruction, BuddyAlloc, DiskLoad,|
+|   Spawn, Fork, Exec, Wait, Syscall, PageFault, CacheOp,   |
+|   FsOp, FsSyscall + shared exit_body, alloc_sub, free_sub,|
+|   release_frames, flush_frames, zero_swap_slots,          |
+|   pair_resolve, resolve_cow, cow_share,                   |
+|   cache_find/get/dirty/write_through/pin/unpin/discard/   |
+|     flush, fs_format/alloc_block/free_block/chain_*,      |
+|   fs_hash/root_dir/dir_lookup/dir_insert/dir_remove,      |
+|   fs_extract_component/path_resolve/mkdir,                |
+|   oft_alloc/resolve_parent/create_file/open_core/         |
+|     close_core, oft_from_fd/fs_grow_chain/fs_read_core/   |
+|     fs_write_core, fs_exec_core, resume_mlfq              |
++------------------------------------------------------------+  up to OsLayout.DataBase = 20480
+| OS data section (runtime-seeded by C#)                     |  starts at OsLayout.DataBase = 20480
+|   Scheduler state header (48 bytes)                        |
+|   Process table  (8 × 192 = 1536 bytes)                   |
 |   Buddy bitmap   (8 × 4 = 32 bytes)                        |
 |   Privileged scratch stack (64 bytes)                      |
 |   Page tables    (8 processes × 64 PTEs × 4 = 2048 bytes) |
@@ -84,8 +98,12 @@ Address 0
 |   Zero page      (256 bytes, always zero)                  |
 |   Swap scratch   (256 bytes, fork transfer buffer)         |
 |   COW partner table (8 × 4 = 32 bytes)                    |
+|   Cache header + slot table (12 + 13 × 276 = 3600 bytes)  |
+|   FS result + scratch + path scratch (4+40+48 = 92 bytes) |
+|   Open-file table (8 × 24 = 192 bytes)                     |
+|   FS open + read/write scratch (8+12 words = 80 bytes)    |
 +------------------------------------------------------------+
-| (total OS region)                                          |  OsLayout.TotalSize = 17584 bytes
+| (total OS region)                                          |  OsLayout.TotalSize = 29880 bytes
 +------------------------------------------------------------+  <-- heap start (process allocations)
 ```
 
@@ -93,24 +111,32 @@ Address 0
 
 | Field | Absolute address | Size | Description |
 |-------|-----------------|------|-------------|
-| ProcessCount | 12288 | 4 | Number of process-table slots in use (high-water mark). |
-| CurrentIndex | 12292 | 4 | Index of the currently running process; −1 when CPU is idle. |
-| BuddyHeapStart | 12296 | 4 | Absolute address where the managed heap begins (= OsMemorySize). |
-| BuddyHeapSize | 12300 | 4 | Buddy heap size in bytes (largest power of 2 ≤ available RAM). |
-| BoostTimer | 12304 | 4 | Countdown ticks until the next MLFQ global priority boost. |
-| QuantumTable | 12308 | 16 | 4 × 4-byte tick thresholds per MLFQ level: [1, 2, 4, 255]. |
-| BuddyMinBlock | 12324 | 4 | Minimum allocatable block size in bytes (default: 256). |
-| BuddyLevels | 12328 | 4 | Buddy tree depth = log2(HeapSize / MinBlock). |
-| NextPid | 12332 | 4 | Monotonic PID counter; incremented each time a process is created. Starts at 1 (0 = "no process"). |
-| ProcessTable | 12336 | 1408 | 8 entries × 176 bytes (see entry layout below). |
-| BuddyBitmap | 13744 | 32 | 8 × 32-bit words; 1 bit per buddy tree node (1=free, 0=used/split). |
-| PrivilegedStack | 13776 | 64 | Scratch stack for CALL/RET within the atomic OS routines. |
-| PageTables | 13840 | 2048 | 8 processes × 64 PTEs × 4 bytes. PTE ≥ 0: resident frame base. PTE = −1: unmapped. PTE = −2: non-resident RAM-home. PTE ≤ −3: non-resident swap-backed. PTE ≤ −4096: copy-on-write share. |
-| FrameTable | 15888 | 128 | 4 frames × 32 bytes each (see frame table layout below). |
-| FramePool | 16016 | 1024 | 4 frames × 256 bytes. Frame f lives at `FramePoolBase + f * PageSize`. |
-| ZeroPage | 17040 | 256 | Always-zero OS scratch page; `DWRITE` source when zeroing a swap slot. |
-| SwapScratch | 17296 | 256 | Transfer page for fork's per-slot deep-copy (DREAD src → scratch, DWRITE scratch → dst). |
-| CowPartners | 17552 | 32 | 8 × 4 bytes. `CowPartner[i]` = the partner process-table slot index, or −1 when no COW share is active. |
+| ProcessCount | 20480 | 4 | Number of process-table slots in use (high-water mark). |
+| CurrentIndex | 20484 | 4 | Index of the currently running process; −1 when CPU is idle. |
+| BuddyHeapStart | 20488 | 4 | Absolute address where the managed heap begins (= OsMemorySize). |
+| BuddyHeapSize | 20492 | 4 | Buddy heap size in bytes (largest power of 2 ≤ available RAM). |
+| BoostTimer | 20496 | 4 | Countdown ticks until the next MLFQ global priority boost. |
+| QuantumTable | 20500 | 16 | 4 × 4-byte tick thresholds per MLFQ level: [1, 2, 4, 255]. |
+| BuddyMinBlock | 20516 | 4 | Minimum allocatable block size in bytes (default: 256). |
+| BuddyLevels | 20520 | 4 | Buddy tree depth = log2(HeapSize / MinBlock). |
+| NextPid | 20524 | 4 | Monotonic PID counter; incremented each time a process is created. Starts at 1 (0 = "no process"). |
+| ProcessTable | 20528 | 1536 | 8 entries × 192 bytes (see entry layout below). |
+| BuddyBitmap | 22064 | 32 | 8 × 32-bit words; 1 bit per buddy tree node (1=free, 0=used/split). |
+| PrivilegedStack | 22096 | 64 | Scratch stack for CALL/RET within the atomic OS routines. |
+| PageTables | 22160 | 2048 | 8 processes × 64 PTEs × 4 bytes. PTE ≥ 0: resident frame base. PTE = −1: unmapped. PTE = −2: non-resident RAM-home. PTE ≤ −3: non-resident swap-backed. PTE ≤ −4096: copy-on-write share. |
+| FrameTable | 24208 | 128 | 4 frames × 32 bytes each (see frame table layout below). |
+| FramePool | 24336 | 1024 | 4 frames × 256 bytes. Frame f lives at `FramePoolBase + f * PageSize`. |
+| ZeroPage | 25360 | 256 | Always-zero OS scratch page; `DWRITE` source when zeroing a swap slot. |
+| SwapScratch | 25616 | 256 | Transfer page for fork's per-slot deep-copy (DREAD src → scratch, DWRITE scratch → dst). |
+| CowPartners | 25872 | 32 | 8 × 4 bytes. `CowPartner[i]` = the partner process-table slot index, or −1 when no COW share is active. |
+| CacheHeader | 25904 | 12 | Clock counter, flush timer, and the `IvtCacheOp`/`IvtFsOp` result slot (4 bytes each). |
+| CacheSlotTable | 25916 | 3588 | 13 cache slots × 276 bytes each (see [Write-back buffer cache](#write-back-buffer-cache)). |
+| FsResult | 29504 | 4 | Result of the last `IvtFsOp`/`IvtFsSyscall` dispatch. |
+| FsScratch | 29508 | 40 | 10 words of directory-layer scratch (name/hash/type/first/dir/entryBlock/freeBlock/argA/argB + one spare). |
+| FsPath | 29548 | 60 | Path-resolve loop state (cursor, current dir, last-component flag) + a 12-word extracted-component buffer. |
+| Oft | 29608 | 192 | Open-file table: 8 entries × 24 bytes (see [Open-file table and file syscalls](#open-file-table-and-file-syscalls)). |
+| FsOpen | 29800 | 32 | `fs_open_core` spill scratch (absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset). |
+| FsRw | 29832 | 48 | `fs_read_core`/`fs_write_core` spill scratch (fd/buf/count/proc/oft/curBlock/remaining/charInBlock/bufPtr/copied/counter). |
 
 **Frame table entry layout (32 bytes, one entry per physical frame):**
 
@@ -156,14 +182,14 @@ There is **no per-process kernel section**: the syscall handler is shared OS cod
 
 ### Process table entry layout
 
-Each entry is 176 bytes. Source: `Hardware.ProcessEntry*` constants.
+Each entry is 192 bytes. Source: `Hardware.ProcessEntry*` constants.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 96 | Register file | 24 × 4-byte register values. The EIP slot (register index 8, offset 32) holds the saved IP as a program-relative offset (not absolute). |
 | 96 | 4 | Level | Saved `PrivilegeLevel` (0=User, 1=Kernel). |
 | 100 | 4 | State | `ProcessState` enum: Ready(0), Blocked(1), Terminated(2), Zombie(3). |
-| 104 | 4 | WaitReason | `WaitReason` enum: None(0), Input(1), Output(2), ChildProcess(3). |
+| 104 | 4 | WaitReason | `WaitReason` enum: None(0), Input(1), Output(2), ChildProcess(3), StringInput(4), KeyInput(5). |
 | 108 | 4 | ProgramAddress | Absolute physical address where the program image begins. Set to −1 if allocation failed. |
 | 112 | 4 | ProgramSize | Size of the program image in bytes. |
 | 116 | 4 | RequiredMemory | Size of the data memory region. |
@@ -177,8 +203,8 @@ Each entry is 176 bytes. Source: `Hardware.ProcessEntry*` constants.
 | 148 | 4 | ExitStatus | Exit status written by HLT/EXIT or −1 on a fault. |
 | 152 | 4 | DiskSlot | Disk slot index holding this process's program image. |
 | 156 | 4 | (spare) | Reserved. |
-| 160 | 16 | FdTable | 4 × 4-byte file descriptor → device-id mappings. fd 0 = stdin, fd 1 = stdout, fd 2–3 unused. |
-| **176** | — | *(total)* | `ProcessEntrySize = 176` |
+| 160 | 32 | FdTable | 8 × 4-byte file descriptor → device-id/OFT mappings. fd 0 = stdin, fd 1 = stdout, fd 2–7 hold `OFT index + 1` for open files (0 = free — a zeroed table means no open files, no seeding required). |
+| **192** | — | *(total)* | `ProcessEntrySize = 192` |
 
 The register-file region (offset 0–95) is the save area written by `SAVEREGS` and read by `LOADREGS`. Because EIP is stored as a base-relative offset, the same saved context works after a `FORK` (the child's copy is at a different physical base but the offset is unchanged).
 
@@ -198,7 +224,9 @@ The register-file region (offset 0–95) is the save area written by `SAVEREGS` 
 
 6. **`SeedOsData`.** The C# side writes runtime values into the data section: heap parameters, the MLFQ quantum table, the initial buddy bitmap (root node free), and the initial PID counter.
 
-7. **Process loading.** `os.LoadProcess(process)` (called per program) resolves the disk slot, runs `hw.RunOsRoutineSynchronously(IvtSpawn, entry)` to allocate and load the process in ISA, then seeds the fd table and reads back the assigned PID from C# (no per-process kernel image to copy — the syscall handler is shared OS code).
+7. **`OnBooted` (post-boot hook).** A virtual hook, called once the image is written and seeded; the base class does nothing. `BasicOS` overrides it to format the filesystem (`fs_format`, via `IvtFsOp`) — but only if the disk's superblock doesn't already carry the filesystem magic, so a disk loaded from a persisted `.bin` keeps its files instead of being reformatted. See [Exec-by-path and boot auto-format](#exec-by-path-and-boot-auto-format).
+
+8. **Process loading.** `os.LoadProcess(process)` (called per program) resolves the disk slot, runs `hw.RunOsRoutineSynchronously(IvtSpawn, entry)` to allocate and load the process in ISA, then seeds the fd table and reads back the assigned PID from C# (no per-process kernel image to copy — the syscall handler is shared OS code).
 
 ---
 
@@ -228,7 +256,7 @@ Atomic OS-routine instructions (those running with interrupts masked) are never 
 
 ## Interrupt vector table (IVT) and dispatch model
 
-The IVT occupies the first 64 bytes of the OS region (`IvtSlotCount = 16` slots × 4 bytes, `IvtSize = 64`). Each slot holds the absolute address of the corresponding OS routine. Hardware reads slot `s` as `ReadWord(0 + s * 4)` and jumps there in Kernel mode. Slot `IvtSyscall` is special: `EnterKernel` jumps there directly **without** masking interrupts (so the syscall handler stays preemptible), while all other dispatched routines mask interrupts and run atomically.
+The IVT occupies the first 80 bytes of the OS region (`IvtSlotCount = 20` slots × 4 bytes, `IvtSize = 80`). Each slot holds the absolute address of the corresponding OS routine. Hardware reads slot `s` as `ReadWord(0 + s * 4)` and jumps there in Kernel mode. Slot `IvtSyscall` is special: `EnterKernel` jumps there directly **without** masking interrupts (so the syscall handler stays preemptible), while all other dispatched routines — including `IvtFsSyscall`, which `FSYS` reaches via the ordinary atomic `DispatchOsRoutine` path (the same mechanism as `FORK`/`EXEC`/`WAIT`/`EXIT`, not `EnterKernel`) — mask interrupts and run atomically.
 
 `Hardware.DispatchOsRoutine(int slot)` (or the overload with an EAX argument):
 1. `CaptureInterruptedContext()` — snapshots the live register file plus the current IP (as a base-relative offset) into `trapFrame`; records the current privilege level in `interruptedLevel`.
@@ -254,8 +282,12 @@ The IVT occupies the first 64 bytes of the OS region (`IvtSlotCount = 16` slots 
 | 11 | Exec | `EXEC` instruction |
 | 12 | Wait | `WAIT` instruction |
 | 13 | Spawn | `LoadProcess` via RunOsRoutineSynchronously |
-| 14 | Syscall | `EnterKernel` (IN/OUT trap); jumped to directly, NOT dispatched — interrupts stay enabled |
+| 14 | Syscall | `EnterKernel` (IN/OUT/OUTS/INS/INK/INPOLL trap); jumped to directly, NOT dispatched — interrupts stay enabled |
 | 15 | PageFault | C# MMU (`TryTranslateData`) when a user data access hits a non-resident PTE |
+| 16 | WakeKey | Raw-key interrupt with a process waiting in `INK` |
+| 17 | CacheOp | `IvtFsOp`'s block/directory/file routines and the periodic context-switch flush hook (buffer-cache control) |
+| 18 | FsOp | Internal filesystem selector (block allocator, directories, path resolve, open/close cores) — used by `FsImage` and by tests; not directly reachable from user mode |
+| 19 | FsSyscall | `FSYS` instruction (dispatched atomically, like `FORK`/`EXEC`/`WAIT`/`EXIT` — not via `EnterKernel`) |
 
 ---
 
@@ -329,7 +361,7 @@ The buddy allocator manages physical RAM above the OS region. It is implemented 
 2. Set the node's bit to 1 (free).
 3. Merge loop: if the buddy node is also free, clear both, set their parent free, ascend. Repeat until root or buddy is used.
 
-**Default parameters:** `BuddyDefaultMinBlock = 256` bytes. `OsLayout.TotalSize = 17584` bytes. With a typical 32 KiB machine, the heap starts at 17584 bytes, leaving about 14 KiB; the largest power of 2 fitting is 8 192 bytes, giving `BuddyLevels = log2(8192 / 256) = 5`.
+**Default parameters:** `BuddyDefaultMinBlock = 256` bytes. `OsLayout.TotalSize = 29880` bytes. Tests commonly size a machine as `Test.MinMachineSize = OsLayout.TotalSize + 4096` (see `OSTests/TestSupport.cs`); with that sizing the heap starts at 29880 bytes with exactly 4096 bytes available, giving `BuddyLevels = log2(4096 / 256) = 4`. A larger machine yields a larger power-of-2 heap and correspondingly more levels.
 
 ---
 
@@ -342,30 +374,42 @@ The buddy allocator manages physical RAM above the OS region. It is implemented 
 
 **Device ids for processes:** by convention, each process's private I/O device has id equal to its process-table slot index. This shim is installed by `LoadProcess` and `IvtFork`.
 
-**File descriptor table:** each process-table entry holds `FdCount = 4` file descriptors starting at `ProcessEntryFdTable` (absolute offset 160). Each fd is a 4-byte device id. fd 0 = stdin, fd 1 = stdout. `Hardware.FdDevice(fd)` resolves the running process's fd to a device id; `Hardware.FocusedInputDevice()` resolves the foreground process's stdin.
+**File descriptor table:** each process-table entry holds `FdCount = 8` file descriptors starting at `ProcessEntryFdTable` (absolute offset 160). Each fd is a 4-byte word. fd 0 = stdin, fd 1 = stdout (both hold a device id). fd 2–7 are reserved for open files: a nonzero value there holds `OFT index + 1` (0 = free), resolved through the open-file table — see [Open-file table and file syscalls](#open-file-table-and-file-syscalls). `Hardware.FdDevice(fd)` resolves the running process's fd to a device id; `Hardware.FocusedInputDevice()` resolves the foreground process's stdin.
 
 **Focus (foreground process):** `Hardware.activeProcess` is the slot index of the foreground process. Keyboard input from `RaiseInputInterrupt()` (no device argument) is delivered to the focused process's stdin device. The host can cycle focus; `SETFOCUS` (instruction 0x38) updates `activeProcess` by scanning the process table for the target PID.
 
 **I/O flow (character device):**
 - **Output:** `Hardware.KernelOutput(value)` resolves fd 1 → device id, checks `OutputBusy`, delivers via `Output(value, deviceId)` (fires `ProgramOutput` event), and sets `OutputBusy = true`. When the host signals output completion via `RaiseOutputComplete(deviceId)`, the interrupt is enqueued; on the next tick, `TryDispatchPendingInterrupt` clears `OutputBusy` and dispatches `IvtWakeOutput`.
-- **Input:** `Hardware.KernelInput(register)` resolves fd 0 → device id, checks the input queue. If empty: records the process as a waiter on that device and calls `BlockCurrent(WaitReason.Input)`. When input arrives via `RaiseInputInterrupt(value, deviceId)`, it is buffered in the device queue; if there is a waiter, `IvtWakeInput` is dispatched with the waiter's process index in EAX.
+- **Input (int, `IN`):** `Hardware.KernelInput(register)` resolves fd 0 → device id, checks the input queue. If empty: records the process as a waiter on that device and calls `BlockCurrent(WaitReason.Input)`. When input arrives via `RaiseInputInterrupt(value, deviceId)`, it is buffered in the device queue; if there is a waiter, `IvtWakeInput` is dispatched with the waiter's process index in EAX.
+- **String input (`INS`):** blocks with `WaitReason.StringInput` on a per-device string queue (a full line, not a single value); woken the same way as `Input` via `IvtWakeInput`.
+- **Raw key input (`INK`):** blocks with `WaitReason.KeyInput` on a per-device key queue (one raw keycode per keypress, not line-buffered); woken by the dedicated `IvtWakeKey` slot. `INPOLL` reads this same queue without blocking, returning −1 when it is empty.
 
 ---
 
 ## Bin disk (block device)
 
-`CSharpOS/Disk/Bin.cs` implements a flat, fixed-slot block store. The disk's backing store is a `byte[]` of size `slotCount * slotSize`, with a directory of `bool[] occupied` and `int[] lengths` (actual content length per slot, which may be less than `slotSize`).
+`CSharpOS/Disk/Bin.cs` implements a flat, fixed-slot block store, plus a second, independent block-addressed region used by the filesystem.
+
+**Slot region:** the disk's backing store is a `byte[]` of size `slotCount * slotSize`, with a directory of `bool[] occupied` and `int[] lengths` (actual content length per slot, which may be less than `slotSize`).
 
 **Default geometry:** 576 slots × 1024 bytes. The `Hardware` convenience constructor uses `DefaultDiskSlots + OsLayout.SwapSlotCount` = 64 + 512 = 576 total slots. Slots 0–63 hold process program images; slots 64–575 are the deterministic swap region used by demand paging (8 processes × 64 pages per process).
 
-**C# API:**
+**C# API (slot region):**
 - `Store(byte[] data)` — writes to the first free slot; returns slot index or −1 if full.
 - `Store(int slot, byte[] data)` — overwrites a specific slot.
 - `Load(int slot)` — returns a fresh copy of the slot's content at its true length.
 - `Free(int slot)` — marks the slot empty and zeroes its storage.
 - `GetLength(int slot)` — returns the stored byte count (throws if slot is free).
 
-**ISA interface:** the `DREAD`, `DWRITE`, and `DLEN` instructions (all Kernel-only) delegate to `hw.DiskRead`, `hw.DiskWrite`, and `hw.DiskLength`, which call through to the `Bin` behind the `Device` at `DiskDeviceId`. Addresses passed to `DREAD`/`DWRITE` are absolute (Kernel mode program base = 0).
+**ISA interface (slot region):** the `DREAD`, `DWRITE`, and `DLEN` instructions (all Kernel-only) delegate to `hw.DiskRead`, `hw.DiskWrite`, and `hw.DiskLength`, which call through to the `Bin` behind the `Device` at `DiskDeviceId`. Addresses passed to `DREAD`/`DWRITE` are absolute (Kernel mode program base = 0).
+
+**File-block region:** a second, independent backing store inside the same `Bin` — fixed-size, block-addressed, with no directory (a block is either all-zero or holds whatever was last written; there is no "free" concept at this layer, only at the filesystem layer above it). Default geometry: `DefaultFileBlockCount = 256` blocks × `DefaultFileBlockSize = 256` bytes (a 64 KiB file space), independent of the 576 slots above — the two regions never overlap or share addresses.
+
+- `ReadFileBlock(int block)` — returns a fresh copy of the block; **never throws for an unwritten block** (returns zeros — raw block-device semantics).
+- `WriteFileBlock(int block, byte[] data)` — `data` must be exactly `FileBlockSize` bytes, else `ArgumentException`.
+- `Save(string path)` / `Load(string path)` — persist **only** the file-block region (a `.bin` file with a `0x43534653` "CSFS" magic + geometry header). The slot region (process images, swap) is not persisted — it rebuilds from the loaded programs at boot, and swap is transient by design.
+
+**ISA interface (file-block region):** the `FBREAD`/`FBWRITE` instructions (Kernel-only) delegate to `hw.FileBlockRead`/`hw.FileBlockWrite`, which call `Bin.ReadFileBlock`/`WriteFileBlock` directly (no `Device`/device-id indirection — the filesystem's buffer cache is the layer that manages concurrency and write-back). See [The ISA filesystem](#the-isa-filesystem) for how the cache and block allocator use these two instructions.
 
 ---
 
@@ -502,6 +546,97 @@ Fork does not eagerly copy DATA page content. The full ISA fork flow is:
 
 ---
 
+## The ISA filesystem
+
+CSharpOS has a complete filesystem, built the same way as the scheduler and buddy allocator: it is compiled to the CSharpOS ISA and runs on the emulated CPU, not implemented as C# called from outside. It lives entirely in the disk's **file-block region** (see [Bin disk (block device)](#bin-disk-block-device)) and the OS RAM region's cache/scratch fields (see the OS data section table above). It was built in increments; each subsection below corresponds to one layer of that build.
+
+Source: `CSharpOS/Disk/FsLayout.cs` (on-disk structure), `CSharpOS/Disk/FsImage.cs` (host-side file-staging helper), `BasicOSPlugin/OsRoutines.Cache.cs` (buffer cache), `BasicOSPlugin/OsRoutines.Fs.cs` (block allocator, directories, path resolution, syscalls).
+
+### On-disk layout
+
+The file-block region is `FsLayout.BlockCount = 256` blocks of `FsLayout.BlockSize = 256` bytes each (`Hardware.DefaultFileBlockCount`/`DefaultFileBlockSize`):
+
+| Block | Role |
+|-------|------|
+| 0 (`SuperBlock`) | Magic (`0x5346`) at offset 0, block count at 4, free count at 8, root-directory block number at 12 (`SuperRootDirOffset`). |
+| 1 (`BitmapBlock`) | Free bitmap: 256 bits (one per block) packed into `BitmapWords = 8` 32-bit words; bit = 1 means allocated. |
+| 2..255 (`FirstDataBlock`..) | Allocatable data blocks. Block 2 is always the root directory (reserved by `fs_format`). |
+
+Every block reserves its last 4 bytes (`NextPtrOffset = 252`) as a next-block link (`EndOfChain = -1`), so files and directories are **chains** of blocks that need not be contiguous; the usable payload per block is `PayloadBytes = 252` bytes. File content is stored **word-per-char** (one byte value per 4-byte word, matching the `OUTS`/`INS`/user-pointer convention), so a block holds `CharsPerBlock = 63` characters of file content, or `DirEntriesPerBlock = 3` directory entries (`DirEntryBytes = 64` each) when used as a directory block.
+
+**Directory entry** (64 bytes): `type`@0 (0=free, 1=file, 2=dir) · `hash`@4 (fast-reject on lookup) · `firstBlock`@8 · `size`@12 (bytes, files only) · `name`@16 (`NameMaxChars = 12` words, word-per-char, null-padded).
+
+### Write-back buffer cache
+
+All filesystem block I/O goes through an in-OS-region write-back cache (`IvtCacheOp`, slot 17; `cache_*` ISA subroutines in `OsRoutines.Cache.cs`) — the block allocator and directory layer never call `FBREAD`/`FBWRITE` directly. `CacheSlotCount = 13` slots (≈ `BlockCount / 20`), each `CacheSlotSize = 276` bytes (20-byte header + `FileBlockSize = 256` data):
+
+| Offset | Field | Notes |
+|--------|-------|-------|
+| 0 | Valid | 0 = empty (the whole pool starts empty), 1 = holds a block. |
+| 4 | Block | The file-block number cached here. |
+| 8 | Dirty | 1 = modified since load; written back on eviction or flush. |
+| 12 | Pin | Pin count; a pinned slot (count > 0) is never chosen as an eviction victim. |
+| 16 | Stamp | LRU stamp — the manager writes the shared `CacheClock` value on every access. |
+| 20 | Data | The block's 256 bytes. |
+
+**Eviction:** `cache_get` (the workhorse, called on every access) returns the resident data address on a hit (bumping the stamp) or, on a miss, evicts a victim (first an invalid slot, else the unpinned slot with the lowest stamp — LRU), writes it back via `FBWRITE` if dirty, `FBREAD`s the requested block in, and returns the new data address. `cache_dirty` marks a resident block dirty without writing it back (lazy write-back); `cache_write_through` writes it back immediately (`FBWRITE`) and clears dirty. `cache_pin`/`cache_unpin` bump/floor-decrement a slot's pin count. `cache_discard` drops a block with **no** write-back (clears valid+dirty+pin — used when a block is freed, so stale data is never written to a block that has been given away). `cache_flush` writes back every dirty, unpinned, valid slot and clears their dirty bits; it runs periodically (`CacheFlushInterval = 200` context-switch ticks, hooked into `EmitContextSwitch`) and on demand.
+
+### Block allocator and free-chaining
+
+`IvtFsOp` (slot 18) dispatches on `EAX`; selectors 0–4 are the block layer (`fs_format`, `fs_alloc_block`, `fs_free_block`, `fs_chain_next`, `fs_chain_set_next`). `fs_format` writes the superblock (magic + geometry), zeroes the bitmap except bits 0 and 1 (superblock and bitmap block are always "allocated"), and allocates block 2 as the root directory — all through the cache. `fs_alloc_block` scans the bitmap for a clear bit, sets it, and initializes the new block's next-link to `EndOfChain`; `fs_free_block` clears the bit and calls `cache_discard` (no write-back of the freed block's stale content). `fs_chain_next`/`fs_chain_set_next` read/write a block's next-block link.
+
+**Register convention:** `EDX`/`EDI` are used to carry a value across `cache_*` calls (the cache subroutines never touch them). Anything that must survive `fs_alloc_block`/`fs_chain_set_next` — which **do** clobber `EDX`/`EDI` — is spilled to `OsLayout.FsScratch*` memory instead.
+
+### Directories and path traversal
+
+A directory is just a block chain of directory entries (see On-disk layout above), so directory ISA routines are `IvtFsOp` selectors 5–9 built on top of the block layer:
+
+| Selector | Routine | Behavior |
+|----------|---------|----------|
+| 5 | `fs_root_dir` | Reads the root directory's block number from the superblock. |
+| 6 | `fs_hash` | `EAX` = name address → `EAX` = hash (`h = h*31 + c` over the word-per-char name). Used for a fast reject before the byte-for-byte name comparison. |
+| 7 | `fs_dir_lookup` | `EBX` = dir block, `ECX` = name → entry address or −1. Walks the chain, hash-rejects, then verifies the full name; stashes the matched block in `FsScratchEntryBlock`. |
+| 8 | `fs_dir_insert` | `EBX` = dir, `ECX` = name, `EDX` = type, `ESI` = first block → new entry address or −1. Rejects duplicates via `fs_dir_lookup`; finds a free slot in the chain or extends it with `fs_alloc_block` + `fs_chain_set_next`. |
+| 9 | `fs_dir_remove` | `EAX` = dir, `ECX` = name → 0/−1. Marks the matched entry `type = free`. |
+
+**Nested directories and paths** (selectors 10–11, in `OsRoutines.Fs.cs`'s path subroutines): `fs_mkdir` (`EBX` = parent dir, `ECX` = name → new dir block or −1; allocates a block and inserts a `type = dir` entry, freeing the block again if the name is a duplicate) and `fs_path_resolve` (`EBX` = path → final entry address or −1; walks `/a/b/c` one word-per-char component at a time via `fs_extract_component`, descending only through `type = dir` entries — a `type = file` component that isn't the last one fails the resolve). A trailing slash resolves the last named component; an empty or `/`-only path resolves to −1. Because directory lookups clobber registers between components, all loop state (read cursor, current directory, last-component flag, and the extracted component buffer) lives in `OsLayout.FsPath*` memory rather than registers.
+
+### Open-file table and file syscalls
+
+The open-file table (OFT) is a fixed array of `MaxOpenFiles = 8` entries (24 bytes each, at `OsLayout.OftBase`), independent of any one process:
+
+| Offset | Field | Notes |
+|--------|-------|-------|
+| 0 | InUse | 0 = free slot. |
+| 4 | FirstBlock | First data block of the open file. |
+| 8 | Offset | Current read/write cursor, in bytes. |
+| 12 | Size | Current file size, in bytes. |
+| 16 | DirBlock | The directory block holding this file's entry (so writes can grow `size` in place). |
+| 20 | EntryOffset | Byte offset of the entry within `DirBlock`. |
+
+A process's fd table (`ProcessEntryFdTable`, fds 2–7) stores `OFT index + 1` per open fd (0 = free), so `oft_from_fd` (`EBX` = fd, `ECX` = proc → OFT entry address) is a pure memory lookup with no scanning.
+
+`FSYS` (0x4D) is the sole user-mode entry point — see `docs/ISA.md`, section "Filesystem", for the exact opcode/register encoding. Internally it dispatches `IvtFsSyscall` (slot 19), which routes to:
+
+- **`fs_open_core`** (`EBX` = absolute path, `ECX` = flags, `EDX` = proc → fd or −1): resolves the path via `fs_path_resolve`; if missing and `FsysCreateFlag` is set, creates it (`fs_create_file`, which resolves the parent directory via `fs_resolve_parent` and inserts a `type = file` entry); rejects directories; fills a free OFT slot (`oft_alloc`) and a free fd slot.
+- **`fs_close_core`** (`EBX` = fd, `ECX` = proc → 0/−1): clears the fd and its OFT slot (pure memory, no disk I/O).
+- **`fs_read_core`** (`EBX` = fd, `ECX` = absolute buffer, `EDX` = count, `ESI` = proc → chars read or −1): reads through the cache starting at the OFT's current offset, clamped to `size - offset`, and advances the offset.
+- **`fs_write_core`** (same signature, "written" instead of "read"): grows the file's block chain as needed (`fs_grow_chain`, which walks and extends the chain via `fs_alloc_block`+`fs_chain_set_next` — it reuses the same `FsRw*` scratch fields the caller is using, so callers restore them afterward), marks written blocks dirty (`cache_dirty`, lazy write-back), advances the offset, and grows `size` in both the OFT entry and the on-disk directory entry if the write extended the file.
+
+The `IvtFsOp` selectors (12 = Open, 13 = Close) reach the same `fs_open_core`/`fs_close_core` cores with an **absolute** path/buffer and an **explicit** process index — used by isolation tests and by `FsImage`. `FSYS` translates the user's virtual pointer (`ProgramAddress + ptr`) to an absolute address and always operates on the calling process; that is the only difference between the two entry points.
+
+### Exec-by-path and boot auto-format
+
+**Exec-by-path** (`FsysExec = 4`, `fs_exec_core`): replaces the running process's image with a program stored as a file in the filesystem, rather than a disk image slot. `EBX` = absolute path. It resolves the file's directory entry (holding its entry address in `R12` — `LoadField` clobbers `EAX`, so the address can't live there across the lookup), then reuses the same teardown/realloc/resume sequence as slot-based `EXEC` ([Exec](#exec)): `free_sub` releases the old region, `resolve_cow`/`release_frames`/`zero_swap_slots` tear down paging state, `alloc_sub` allocates a region sized to the file, the file's block chain is copied into the new `ProgramAddress` (instead of a `DREAD` from a disk slot), and it `OSRET`s into the new image. Returns −1 (in the caller's saved `EAX`) if the path is missing or names a directory; **it never returns on success** — the calling process resumes running the new image instead.
+
+**Boot auto-format:** `OperatingSystem.AttachHardware` calls a virtual `OnBooted(hw)` hook after seeding; `BasicOS.OnBooted` reads the disk's superblock directly (not through the cache, which is empty on a fresh machine) and runs `fs_format` only if the magic doesn't already match `FsLayout.SuperMagic`. This means a freshly created `Hardware` gets a usable, empty filesystem with no caller action required, while a disk loaded from a persisted `.bin` (via `Bin.Load`) keeps its files instead of being wiped.
+
+**Populating the filesystem from the host:** `FsImage.WriteFile(hw, path, content)` drives the same `fs_open_core`/`fs_write_core`/`fs_close_core` cores (through the `IvtFsOp` selectors, using a reserved scratch process index) to stage a file before any user process runs — so a program later launched via `FSYS` exec-by-path is byte-for-byte what a user process would have produced by writing it itself. It stages the path and content in the free heap just above the OS region, so it must be called before any process memory is allocated there.
+
+**Current boot model:** `OperatingSystem.LoadProcess` (the general process-launch path — see [Boot creation (Spawn)](#boot-creation-spawn)) still loads programs from disk image **slots**, not the filesystem. `FSYS` exec-by-path is, so far, the only path that launches a program stored in the filesystem. A shell process that resolves programs by filesystem path instead of by disk slot number is future work.
+
+---
+
 ## Process lifecycle
 
 ### Boot creation (Spawn)
@@ -579,6 +714,8 @@ When a process's `OUT` or `IN` executes in user mode:
 7. Zero the register file (96 bytes). Set `EIP = 0`, `ESP = TotalSize − KernelStackSize`.
 8. Reset scheduling state (level = User, state = Ready, priority = 0, ticks = 0); preserve `Pid` and `ParentPid`.
 9. `LOADREGS`/`SETLAYOUT`/`OSRET` to resume the same process running the new image. `SeedPageTableIfNew` runs on the first resume and seeds the new process's page table fresh.
+
+**Filesystem exec-by-path (`FSYS` syscall 4, `fs_exec_core`):** a second exec path, layered on the filesystem instead of a disk image slot — see [Exec-by-path and boot auto-format](#exec-by-path-and-boot-auto-format). It follows the same teardown/realloc/resume shape as slot-based `EXEC` above, but sources the new image from a file's block chain (via the buffer cache) instead of a `DREAD` from a disk slot, and is dispatched through `IvtFsSyscall` rather than `IvtExec`.
 
 ### Wait
 

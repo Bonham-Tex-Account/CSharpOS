@@ -49,7 +49,18 @@ public abstract class OperatingSystem : IOperatingSystem
         {
             hw.WriteBytes(0, BuildOsImage(0));
             SeedOsData(hw);
+            OnBooted(hw);
         }
+    }
+
+    /// <summary>
+    /// Post-boot hook, called once the OS image is written and its data seeded. The base
+    /// does nothing; an OS with a filesystem overrides this to format the disk on first boot.
+    /// Kept as a hook (rather than inlined) so the base makes no assumption that every OS
+    /// image defines the filesystem IVT routines.
+    /// </summary>
+    protected virtual void OnBooted(Hardware hw)
+    {
     }
 
     // Initialises the OS data structures: no current process, empty process table,

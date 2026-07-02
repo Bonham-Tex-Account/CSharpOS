@@ -10,7 +10,7 @@
 | OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn, DiskLoad), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
 | OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) |
 | OsRoutines.Cache.cs | EmitCacheOp + EmitCacheSubroutines (cache_find/get/dirty/write_through/pin/unpin/discard/flush) |
-| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) |
+| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) + EmitFsExecSubroutine (fs_exec_core) |
 | Traps/IretTrapProvider.cs | Blocks IRET in user mode |
 | Traps/LoadBoundsTrapProvider.cs | Bounds-checks LOAD in user mode |
 | Traps/StoreBoundsTrapProvider.cs | Bounds-checks STORE in user mode |
@@ -61,6 +61,7 @@ EmitFsPathSubroutines→ labels "fs_extract_component/path_resolve/mkdir" (CALL/
 EmitFsSyscall        → IvtFsSyscall (slot 19)           (FSYS wrapper; deliver via SAVEREGS/OSRET)
 EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
 EmitFsRwSubroutines  → labels "oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core" (CALL/RET)
+EmitFsExecSubroutine → label "fs_exec_core" (CALL; resumes on success)  (Inc 6)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
 
@@ -114,6 +115,7 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_grow_chain` | EmitFsRwSubroutines | fs_write_core | EBX=firstBlock,ECX=neededBlocks → 0/-1; walk+extend chain (alloc+link). **Reuses FsRwRemaining/CurBlock/Counter/BufPtr as scratch** — callers restore them after |
 | `fs_read_core` | EmitFsRwSubroutines | IvtFsOp Read, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars read or -1; clamp at size-offset, advance offset |
 | `fs_write_core` | EmitFsRwSubroutines | IvtFsOp Write, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars written or -1; grow chain, cache_dirty, advance offset, grow size + dir entry |
+| `fs_exec_core` | EmitFsExecSubroutine | fs_syscall (FsysExec) | EBX=absPath → replace running image with the FS file; resolves file entry, tears down (free/resolve_cow/release_frames/zero_swap), reallocs, copies chain→ProgramAddress, OSRETs. Returns -1 (missing/dir); **never returns on success**. Holds entry addr in R12 (LoadField clobbers EAX) |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---
@@ -149,6 +151,8 @@ All defined in OsRoutines.cs; the helpers group starts at :2007.
 | `StoreFieldReg(asm, entryReg, fieldOffset, srcReg)` | :2007 | *(entryReg + fieldOffset) = srcReg |
 | `StoreFieldImm(asm, entryReg, fieldOffset, imm)` | :2007 | *(entryReg + fieldOffset) = immediate |
 | `StoreFieldMinusOne(asm, entryReg, fieldOffset)` | :2007 | *(entryReg + fieldOffset) = -1 |
+
+**Gotcha:** `LoadField`/`StoreFieldReg`/`StoreFieldImm`/`StoreFieldMinusOne` all **clobber EAX and EBP** (they build the field address in EBP and the offset immediate in EAX). Never keep a value you still need in EAX/EBP across one of these; in particular, an entry/struct address reused across several `LoadField`s must live in a different register (e.g. `fs_exec_core` holds the dir-entry addr in R12). `SpillStore`/`SpillLoad` clobber **EBP** only.
 | `Imm16(asm, reg, value)` | :2007 | MovImm16 for 16-bit constants (OsLayout offsets > 255) |
 | `SetupPrivilegedStack(asm)` | :2007 | ESP = PrivilegedStackTop (required before first CALL) |
 | `FrameEntryAddress(asm, frameReg, dest)` | :897 | dest = FrameTableBase + frame * FrameTableEntryBytes |
