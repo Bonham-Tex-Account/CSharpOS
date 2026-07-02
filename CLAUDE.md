@@ -31,7 +31,7 @@ BasicOSPlugin/
   OsRoutines.Paging.cs     partial — PageFault + frame/swap/COW subs
   OsRoutines.Cache.cs      partial — IvtCacheOp + cache_* subs
   OsRoutines.Fs.cs         partial — IvtFsOp + fs_* block/chain/dir subs
-  Traps/  IretTrapProvider.cs  LoadBoundsTrapProvider.cs  StoreBoundsTrapProvider.cs
+  Traps/  IretTrapProvider.cs  (Load/StoreBoundsTrapProvider removed in Phase 2 — MMU is sole memory protection)
 CSharpOSConsole/
   Visualization/  VisualizerModel.cs  HardwareEventBridge.cs  SpectreDashboard.cs
                   PlainTextRenderer.cs  NoOpRenderer.cs  FrameHistory.cs
@@ -173,25 +173,25 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 |--------|------|------|
 | BuddyBitmapOffset | +1584 | 32 bytes (BuddyBitmapWords=8 × 4) |
 | PrivilegedStackOffset | +1616 | 64 bytes |
-| PrivilegedStackTop / PageTableBase | +1680 | PageTableRegionSize=2048 (8 procs × 64 pages × 4 bytes) |
-| FrameTableBase | +3728 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
-| FramePoolBase | +3856 | FramePoolSize=1024 (4 frames × PageSize=256) |
-| ZeroPageBase | +4880 | 256 bytes (always-zero DWRITE source) |
-| SwapScratchBase | +5136 | 256 bytes (fork slot-copy transfer buffer) |
-| CowPartnerBase | +5392 | 32 bytes (8 procs × 4 bytes each) |
-| CacheClockOffset / FlushTimer / Result | +5424 / +5428 / +5432 | 3 × 4 (cache header) |
-| CacheSlotTableBase | +5436 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
-| FsResultOffset | +9024 | 4 (IvtFsOp return slot) |
-| FsScratchBase | +9028 | 40 (FsScratchWords=10: Name/Hash/Type/First/Dir/EntryBlock/FreeBlock/ArgA/ArgB + spare) |
-| FsPathBase | +9068 | FsPathPos/Dir/Last (+0/+4/+8) then FsPathComponentBase (+12, NameMaxChars words) |
-| OftBase | +9128 | OftRegionSize=192 (MaxOpenFiles=8 × OftEntryBytes=24: inUse/firstBlock/offset/size/dirBlock/entryOffset) |
-| FsOpenBase | +9320 | 32 (fs_open_core spill scratch: absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset) |
-| FsRwBase | +9352 | 48 (FsRwWords=12: fs_read_core/fs_write_core spill: Fd/Buf/Count/Proc/Oft/CurBlock/Remaining/CharInBlock/BufPtr/Copied/Counter + spare) |
-| **TotalSize** | **+9400** (= 29880 abs, with DataBase 20480) | — |
+| PrivilegedStackTop / PageTableBase | +1680 | PageTableRegionSize=4096 (8 procs × **128** pages × 4 bytes) — doubled in Phase 2 |
+| FrameTableBase | +5776 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
+| FramePoolBase | +5904 | FramePoolSize=1024 (4 frames × PageSize=256) |
+| ZeroPageBase | +6928 | 256 bytes (always-zero DWRITE source) |
+| SwapScratchBase | +7184 | 256 bytes (fork slot-copy transfer buffer) |
+| CowPartnerBase | +7440 | 32 bytes (8 procs × 4 bytes each) |
+| CacheClockOffset / FlushTimer / Result | +7472 / +7476 / +7480 | 3 × 4 (cache header) |
+| CacheSlotTableBase | +7484 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
+| FsResultOffset | +11072 | 4 (IvtFsOp return slot) |
+| FsScratchBase | +11076 | 40 (FsScratchWords=10: Name/Hash/Type/First/Dir/EntryBlock/FreeBlock/ArgA/ArgB + spare) |
+| FsPathBase | +11116 | FsPathPos/Dir/Last (+0/+4/+8) then FsPathComponentBase (+12, NameMaxChars words) |
+| OftBase | +11176 | OftRegionSize=192 (MaxOpenFiles=8 × OftEntryBytes=24: inUse/firstBlock/offset/size/dirBlock/entryOffset) |
+| FsOpenBase | +11368 | 32 (fs_open_core spill scratch: absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset) |
+| FsRwBase | +11400 | 48 (FsRwWords=12: fs_read_core/fs_write_core spill: Fd/Buf/Count/Proc/Oft/CurBlock/Remaining/CharInBlock/BufPtr/Copied/Counter + spare) |
+| **TotalSize** | **+11448** (= 31928 abs, with DataBase 20480) | — |
 
 `OftAddress(i) = OftBase + i * 24`. A process fd slot (2..7) holds `OFT index + 1` (0 = free), so a zeroed fd table = no open files (no seeding).
 
-`SwapSlot(proc, page) = 64 + proc * 64 + page` (disk slot, DataBase-independent). `PageTableAddress(i)`, `FrameTableEntry(f)`, `FrameBase(f)`, `CowPartnerAddress(i)`, `CacheSlotAddress(i)` are all `OsLayout.<Base> + i * <stride>` — read the stride from the region's Size column.
+`SwapSlot(proc, page) = 64 + proc * 128 + page` (disk slot, DataBase-independent; stride = SwapSlotsPerProcess = MaxPagesPerProcess = 128). `PageTableAddress(i)`, `FrameTableEntry(f)`, `FrameBase(f)`, `CowPartnerAddress(i)`, `CacheSlotAddress(i)` are all `OsLayout.<Base> + i * <stride>` — read the stride from the region's Size column.
 
 ### Cache Slot Fields (276 bytes per slot)
 | Offset | Field | Notes |
@@ -303,7 +303,7 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | Constant | Value |
 |----------|-------|
 | PageSize | 256 |
-| MaxPagesPerProcess | 64 |
+| MaxPagesPerProcess | 128 (= 32 KiB mapped user space/process; raised from 64 in Phase 2) |
 | PageTableEntryBytes | 4 |
 | FrameCount | 4 |
 | FrameTableEntryBytes | 32 |
@@ -318,14 +318,14 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | DefaultDiskSlots | 64 (image slots) |
 | DefaultDiskSlotSize | 1024 bytes |
 | SwapBase | 64 (swap slots start after image slots) |
-| SwapSlotsPerProcess | 64 |
-| SwapSlotCount | 512 (8 procs × 64 pages) |
+| SwapSlotsPerProcess | 128 |
+| SwapSlotCount | 1024 (8 procs × 128 pages) |
 | DiskDeviceId | 256 |
-| Total disk slots (default) | 576 (64 + 512) |
+| Total disk slots (default) | 1088 (64 + 1024) |
 | DefaultFileBlockSize | 256 bytes (== PageSize by convention) |
 | DefaultFileBlockCount | 256 (file-block region; 64 KiB file space) |
 
-**File-block region** (Inc 1): a second backing store inside the same `Bin`, block-addressed (not slot-addressed). `Bin.ReadFileBlock(block)` reads a fresh copy (zeros if never written — raw block-device semantics, never throws for empty); `Bin.WriteFileBlock(block, data)` requires exactly `FileBlockSize` bytes. `Bin.Save(path)`/`Load(path)` persist **only** the file-block region (magic `0x43534653` "CSFS" + geometry header) — images rebuild from programs at boot, swap is transient. Moved via privileged `FBREAD`/`FBWRITE` (0x4B/0x4C). Default disk is now `Bin(576, 1024, 256, 256)`.
+**File-block region** (Inc 1): a second backing store inside the same `Bin`, block-addressed (not slot-addressed). `Bin.ReadFileBlock(block)` reads a fresh copy (zeros if never written — raw block-device semantics, never throws for empty); `Bin.WriteFileBlock(block, data)` requires exactly `FileBlockSize` bytes. `Bin.Save(path)`/`Load(path)` persist **only** the file-block region (magic `0x43534653` "CSFS" + geometry header) — images rebuild from programs at boot, swap is transient. Moved via privileged `FBREAD`/`FBWRITE` (0x4B/0x4C). Default disk is now `Bin(1088, 1024, 256, 256)` (64 image + 1024 swap slots).
 
 ### Filesystem Cache (Inc 2)
 | Constant | Value |
@@ -428,6 +428,8 @@ Atomicity is the **hardware interrupt-enable flag** (`hw.InterruptsEnabled()`), 
 
 **Program base:** User=`currentProcessInstructionStart`; Kernel=0 (absolute). JMP/CALL/RET targets are base-relative; saved EIP stored base-relative (position-independent).
 
+**Memory protection (Phase 2):** the **MMU is the sole mechanism**. User data accesses (LOAD/STORE/CALL/RET stack) translate through the per-process page table; a page outside the process's mapped extent (`UnmappedPage`, or a page ≥ MaxPagesPerProcess) is a **protection fault** → `RaiseProtectionFault` terminates the process (exit -1) via the IvtInvalidInstruction teardown. There is no linear fallback and no LOAD/STORE bounds trap (both removed). Kernel mode addresses memory absolutely (unrestricted), so syscall/OS code is not translated. `LoadProcess` rejects a process whose user extent (program+memory+stack) exceeds `MaxPagesPerProcess*PageSize` (32 KiB).
+
 ---
 
 ## Session Cost Log
@@ -456,6 +458,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-02 | Test-suite navigation metadata: new `OSTests/CLAUDE.md` (subsystem→file jump table for 50 files, shared `Test` helper reference, test conventions) to cut the cost of finding a test case; root CLAUDE.md folder map updated | ~12K (inline) | Extracted class summaries + sample test names via scripted grep instead of reading 50 files. Then delegated README/docs refresh to the docs-sync-writer agent. |
 | 2026-07-02 | Docs refresh (README.md + docs/ISA.md + docs/OS-Architecture.md) for the whole FS subsystem (Inc 1–6), string/key I/O, two-level privilege, paging | 214K (agent) | docs-sync-writer agent; verified numbers against OsLayout.cs. Caught that FSYS dispatches atomically (like FORK), not via EnterKernel. Flagged: no FS demo in the console yet; Mkdir/Readdir/Unlink have ISA routines but no FSYS number. |
 | 2026-07-03 | Rectification Phase 0 (hygiene): removed dead `IvtDiskLoad` (slot 9) + renumbered slots 9–18 (IvtSlotCount 20→19, CodeBase 80→76); deleted empty `GeneralFunctionality.cs`; untracked `claude-memory/`; fixed OS/CLAUDE.md LoadProcess flow (IvtSpawn not Allocate→DiskLoad); documented SETFOCUS as C#-only | ~15K (inline) | Plan `keen-churning-manatee.md` phase 0/6. All refs by named constant so renumber was mechanical; 1 test (OsSeedDataTests) referenced IvtDiskLoad→swapped to IvtSpawn. 602 tests (was 603, −1 deleted placeholder). |
+| 2026-07-03 | Rectification Phase 2 (MMU = sole protection): MaxPagesPerProcess 64→128 (page-table region 2048→4096, SwapSlotCount→1024, default Bin→1088, TotalSize→+11448); removed both linear fallbacks in TryTranslateData → `RaiseProtectionFault` (reuses IvtInvalidInstruction kill path); LoadProcess size guard; **deleted** Load/StoreBoundsTrapProvider + IsAddressInProcessRanges/GetCurrentProcessRanges/MemoryRange; migrated ~23 bounds/range tests | ~50K (inline) | Plan phase 2/6. `userExtent` includes the user stack, so legit code/data/stack pages never hit the fallback — only genuine OOB does. 603 tests (5 new MemoryProtectionTests). **Deferred:** ISA exec size guard (oversized exec already fails safe via the protection fault; C# LoadProcess guard covers the boot path). |
 | 2026-07-03 | Rectification Phase 1 (FS correctness): `fs_unlink` (fixes chain leak) + `fs_mkdir_path` + `fs_readdir` + `fs_resolve_dir` + `oft_find_first` (EmitFsMaintSubroutines); FsOp 16–18, FSYS 5–7; maintain superblock FreeCount; single-open reject; pin superblock+bitmap; fixed `cache_flush` to write back pinned dirty slots | ~40K (inline) | Plan phase 1/6. 16 isolation (FsMaintTests) + 3 end-to-end (FsSyscallTests) = 621 tests. Pin exposed the flush-skips-pinned bug (pinned superblock never persisted). |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
@@ -467,7 +470,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | PTE value | Meaning |
 |-----------|---------|
 | ≥ 0 | Resident; value = frame's physical base in FramePool |
-| -1 (UnmappedPage) | Outside process; linear fallback |
+| -1 (UnmappedPage) | Outside the process's mapped extent; a user access → **protection fault** (kills the process). No linear fallback |
 | -2 (NonResidentPage) | RAM-home code/stack page; not in a frame |
 | ≤ -3 (SwapPte) | Private swap-backed DATA page; slot = -pte - 3 |
 | ≤ -4096 (CowPte) | COW-shared DATA page; slot = -pte - 4096 |

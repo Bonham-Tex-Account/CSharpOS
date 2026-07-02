@@ -306,11 +306,6 @@ public partial class Hardware
     // which case keyboard input falls back to device 0 (the bare-harness default).
     private int activeProcess = -1;
 
-    // Set once the first process layout is loaded; guards the user-mode bounds
-    // check in IsAddressInProcessRanges so plain unit tests that never call
-    // LoadProcessLayout are not rejected.
-    private bool processLayoutLoaded;
-
     private int currentProcessMemoryStart;
     private int currentProcessMemorySize;
     private int currentProcessStackStart;
@@ -591,59 +586,8 @@ public partial class Hardware
         return state;
     }
 
-    // ===== Process Ranges (IsAddressInProcessRanges, GetCurrentProcessRanges) =
-    public bool IsAddressInProcessRanges(int address)
-    {
-        if (!processLayoutLoaded)
-        {
-            return true;
-        }
-        foreach (MemoryRange range in GetCurrentProcessRanges())
-        {
-            if (address >= range.Start && address < range.Start + range.Size)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public List<MemoryRange> GetCurrentProcessRanges()
-    {
-        List<MemoryRange> ranges = new List<MemoryRange>
-        {
-            new MemoryRange { Start = currentProcessMemoryStart,      Size = currentProcessMemorySize },
-            new MemoryRange { Start = currentProcessStackStart,       Size = currentProcessStackSize },
-            new MemoryRange { Start = currentProcessKernelStackStart, Size = currentProcessKernelStackSize },
-            new MemoryRange { Start = currentProcessInstructionStart, Size = currentProcessInstructionSize }
-        };
-
-        ranges.Sort((MemoryRange a, MemoryRange b) => a.Start.CompareTo(b.Start));
-
-        List<MemoryRange> merged = new List<MemoryRange>();
-        MemoryRange current = ranges[0];
-
-        for (int i = 1; i < ranges.Count; i++)
-        {
-            MemoryRange next = ranges[i];
-            if (current.Start + current.Size >= next.Start)
-            {
-                current = new MemoryRange
-                {
-                    Start = current.Start,
-                    Size = Math.Max(current.Start + current.Size, next.Start + next.Size) - current.Start
-                };
-            }
-            else
-            {
-                merged.Add(current);
-                current = next;
-            }
-        }
-
-        merged.Add(current);
-        return merged;
-    }
+    // (Process memory-range queries were removed with the bounds traps: the MMU is now the
+    // sole memory-protection mechanism — see TryTranslateData / RaiseProtectionFault.)
 
     // ---- helper functions ------------------------------------------------
     public void Output(int value)
@@ -890,13 +834,14 @@ public partial class Hardware
         int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
         int page = virtualAddress / OsLayout.PageSize;
         int offset = virtualAddress % OsLayout.PageSize;
-        // Anything the page table cannot describe (no running process or an out-of-range
-        // page) falls back to the linear mapping; the bounds traps still guard genuinely
-        // out-of-bounds accesses.
+        // A page the table cannot describe (beyond the per-process page count) is outside the
+        // address space: a protection fault that terminates the process. The MMU is the sole
+        // memory-protection mechanism — there is no linear fallback and no bounds trap.
         if (index < 0 || index >= OsLayout.MaxProcesses || page < 0 || page >= OsLayout.MaxPagesPerProcess)
         {
-            physical = currentProcessInstructionStart + virtualAddress;
-            return true;
+            RaiseProtectionFault(page);
+            physical = 0;
+            return false;
         }
 
         int pte = ReadWord(osMemoryBase + OsLayout.PageTableAddress(index) + page * OsLayout.PageTableEntryBytes);
@@ -910,9 +855,11 @@ public partial class Hardware
         }
         if (pte < 0)
         {
-            // Unmapped page (-1, outside the process): linear fallback.
-            physical = currentProcessInstructionStart + virtualAddress;
-            return true;
+            // Unmapped page (-1): a virtual page beyond the process's mapped extent → an
+            // out-of-bounds access. Terminate the process (protection fault).
+            RaiseProtectionFault(page);
+            physical = 0;
+            return false;
         }
         // Resident: the PTE holds the page's frame base in the physical frame pool.
         int frameIndex = (pte - OsLayout.FramePoolBase) / OsLayout.PageSize;
@@ -964,6 +911,27 @@ public partial class Hardware
     {
         instructionPointer = currentInstructionAddress;
         DispatchOsRoutine(IvtPageFault, faultingPage);
+    }
+
+    // Terminates the running user process for touching a virtual page outside its address
+    // space (an out-of-bounds or unmapped access). Routed through the same OS teardown as an
+    // invalid instruction (exit status -1) so the machine frees the process and schedules the
+    // next. Unlike a page fault the IP is not rewound — the faulting instruction does not
+    // re-run. Only reached from the User + OS-managed translation path.
+    private void RaiseProtectionFault(int faultingPage)
+    {
+        instructionCount = 0;
+        byte opcode = memory[currentInstructionAddress];
+        InvalidInstruction?.Invoke(this, new InvalidInstructionArgs
+        {
+            Opcode = opcode,
+            B1 = memory[currentInstructionAddress + 1],
+            B2 = memory[currentInstructionAddress + 2],
+            B3 = memory[currentInstructionAddress + 3],
+            Reason = "Memory access outside process bounds"
+        });
+        ProcessTerminated?.Invoke(this, new ProcessTerminatedArgs { Device = CurrentDeviceId() });
+        DispatchOsRoutine(IvtInvalidInstruction, opcode);
     }
 
     // (Re)seeds the page table for the process in slot `index` when that slot is first
@@ -1336,7 +1304,6 @@ public partial class Hardware
     // slot live at the front of the memory region (RegisterStateAddress == currentProcessMemoryStart).
     private void SetProcessLayout(int programAddress, int programSize, int requiredMemory, int requiredStackSize)
     {
-        processLayoutLoaded = true;
         currentProcessInstructionStart  = programAddress;
         currentProcessInstructionSize   = programSize;
         currentProcessMemoryStart = programAddress + programSize;

@@ -185,6 +185,17 @@ public abstract class OperatingSystem : IOperatingSystem
         // (KernelStackSize) holds the syscall trap frame at its base.
         int total = programLength + process.RequiredMemory + process.RequiredStackSize + Hardware.KernelStackSize;
 
+        // The MMU maps only MaxPagesPerProcess pages of user space per process (the kernel
+        // stack beyond that is addressed absolutely). A larger user extent can't be translated
+        // and would protection-fault on its high pages, so reject it up front.
+        int userExtent = programLength + process.RequiredMemory + process.RequiredStackSize;
+        int maxUserExtent = OsLayout.MaxPagesPerProcess * OsLayout.PageSize;
+        if (userExtent > maxUserExtent)
+        {
+            log.WriteLine($"[LOAD FAILED] Process exceeds addressable memory ({userExtent} > {maxUserExtent}): {ProcessName(process, diskSlot)}");
+            return;
+        }
+
         int slot = FindFreeSlot(hw);
         if (slot < 0)
         {
