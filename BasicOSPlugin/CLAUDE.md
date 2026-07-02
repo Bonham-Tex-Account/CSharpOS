@@ -58,6 +58,8 @@ EmitCacheSubroutines → labels "cache_find/get/dirty/write_through/pin/unpin/di
 EmitFsSubroutines    → labels "fs_format/alloc_block/free_block/chain_next/chain_set_next" (CALL/RET)
 EmitFsDirSubroutines → labels "fs_hash/root_dir/dir_lookup/dir_insert/dir_remove" (CALL/RET)
 EmitFsPathSubroutines→ labels "fs_extract_component/path_resolve/mkdir" (CALL/RET)
+EmitFsSyscall        → IvtFsSyscall (slot 19)           (FSYS wrapper; deliver via SAVEREGS/OSRET)
+EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
 
@@ -102,6 +104,11 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_extract_component` | EmitFsPathSubroutines | fs_path_resolve | Pull next path component into FsPathComponentBase; advance FsPathPos; set FsPathLast; EAX=len (pure memory) |
 | `fs_path_resolve` | EmitFsPathSubroutines | IvtFsOp | EAX=path → final entry addr or -1; descends type=dir; loop state in FsPath* memory |
 | `fs_mkdir` | EmitFsPathSubroutines | IvtFsOp | EBX=parent,ECX=name → new dir block or -1; alloc block + insert type=dir entry (frees block on dup) |
+| `oft_alloc` | EmitFsFileSubroutines | fs_open_core | → EAX = free open-file-table index or -1 (pure memory scan) |
+| `fs_resolve_parent` | EmitFsFileSubroutines | fs_create_file | EAX=path → parent dir block or -1; leaves last component in FsPathComponentBase |
+| `fs_create_file` | EmitFsFileSubroutines | fs_open_core | path in FsOpenAbsPath → new file entry addr or -1; alloc block + insert type=file |
+| `fs_open_core` | EmitFsFileSubroutines | IvtFsOp Open, fs_syscall | EBX=absPath,ECX=flags,EDX=proc → fd or -1; resolve/create, fill OFT, alloc fd |
+| `fs_close_core` | EmitFsFileSubroutines | IvtFsOp Close, fs_syscall | EBX=fd,ECX=proc → 0/-1; clear OFT + fd slot (pure memory) |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---

@@ -124,7 +124,13 @@ public partial class Hardware
     // arguments in EBX/ECX; routes to the block allocator / free-chaining (and, later, the
     // directory tree). Result parked in OsLayout.FsResult. One slot grows across increments.
     public const int IvtFsOp               = 18;
-    public const int IvtSlotCount          = 19;
+    // User filesystem syscall (Increment 5). FSYS dispatches this atomic routine (like FORK
+    // dispatches IvtFork); it reads the syscall number in EAX and args in EBX/ECX/EDX from
+    // the trapped user registers, performs the op, and resumes the caller with the result in
+    // EAX. File ops don't block, so it runs atomically rather than through the preemptible
+    // IvtSyscall path (whose shared privileged stack couldn't survive preemption mid-op).
+    public const int IvtFsSyscall          = 19;
+    public const int IvtSlotCount          = 20;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
@@ -155,6 +161,18 @@ public partial class Hardware
     // Nested directories (Inc 4b).
     public const int FsOpMkdir        = 10; // create subdirectory (name ECX) in dir EBX → new dir block, or -1
     public const int FsOpPathResolve  = 11; // resolve path at EBX (e.g. "/a/b/c") → entry addr, or -1
+    // File-syscall cores (Inc 5), reached directly for testing (the FSYS wrapper below calls
+    // the same routines). Paths here are ABSOLUTE addresses; the wrapper translates the user
+    // pointer first. EDX carries the owning process index so an fd is allocated in its table.
+    public const int FsOpOpen         = 12; // open/create absolute path EBX (flags ECX) for proc EDX → fd, or -1
+    public const int FsOpClose        = 13; // close fd EBX for proc ECX → 0, or -1
+
+    // FSYS syscall numbers (EAX) and flags.
+    public const int FsysOpen   = 0; // EBX=path ptr, ECX=flags → fd, or -1
+    public const int FsysRead   = 1; // EBX=fd, ECX=buf ptr, EDX=len → bytes read (Inc 5b)
+    public const int FsysWrite  = 2; // EBX=fd, ECX=buf ptr, EDX=len → bytes written (Inc 5b)
+    public const int FsysClose  = 3; // EBX=fd → 0, or -1
+    public const int FsysCreateFlag = 1; // OPEN: create the file if it does not exist
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------
     // Printable ASCII (32–126) is delivered as-is. Special keys use values above
@@ -418,6 +436,7 @@ public partial class Hardware
             case IvtPageFault:          return "PageFault";
             case IvtCacheOp:            return "CacheOp";
             case IvtFsOp:               return "FsOp";
+            case IvtFsSyscall:          return "FsSyscall";
             default:                    return $"slot {slot}";
         }
     }
@@ -1582,6 +1601,20 @@ public partial class Hardware
         if (OsManaged)
         {
             DispatchOsRoutine(IvtFork);
+            return;
+        }
+        trapTaken = true;
+    }
+
+    // FSYS: a user filesystem syscall. Dispatches the atomic IvtFsSyscall routine, which
+    // reads the syscall number/args from the trapped user registers and resumes the caller
+    // with the result in EAX. Mirrors Fork's dispatch (no eaxArg, so the live EAX/EBX/ECX/EDX
+    // the user set survive into the routine).
+    public void FsSyscall()
+    {
+        if (OsManaged)
+        {
+            DispatchOsRoutine(IvtFsSyscall);
             return;
         }
         trapTaken = true;

@@ -229,8 +229,42 @@ public static class OsLayout
     public const int FsPathComponentBase = FsPathBase + 12;  // NameMaxChars words: the extracted name
     public const char FsPathSeparator    = '/';
 
+    // ---- open-file table + open-syscall scratch (Increment 5) -------------
+    // A system-wide table of open files. A process's fd slot (2..FdCount-1) stores an OFT
+    // index + 1 (0 = free), so a zeroed fd table means "no files open" without any seeding.
+    // Each OFT entry remembers the file's first block, the read/write byte offset, the file
+    // size, and the location of its directory entry (block + byte offset within the block)
+    // so a write can update the on-disk size.
+    public const int MaxOpenFiles     = 8;
+    public const int OftInUse         = 0;
+    public const int OftFirstBlock    = 4;
+    public const int OftOffset        = 8;
+    public const int OftSize          = 12;
+    public const int OftDirBlock      = 16;
+    public const int OftEntryOffset   = 20;   // byte offset of the dir entry within its block
+    public const int OftEntryBytes    = 24;
+    public const int OftBase          = FsPathComponentBase + FsLayout.NameMaxChars * 4;
+    public const int OftRegionSize    = MaxOpenFiles * OftEntryBytes;
+
+    // Working scratch for fs_open_core (spilled across the cache/dir calls it makes).
+    public const int FsOpenBase        = OftBase + OftRegionSize;
+    public const int FsOpenAbsPath     = FsOpenBase + 0;
+    public const int FsOpenFlags       = FsOpenBase + 4;
+    public const int FsOpenProc        = FsOpenBase + 8;
+    public const int FsOpenEntryAddr   = FsOpenBase + 12;
+    public const int FsOpenFirst       = FsOpenBase + 16;
+    public const int FsOpenSize        = FsOpenBase + 20;
+    public const int FsOpenDirBlock    = FsOpenBase + 24;
+    public const int FsOpenEntryOffset = FsOpenBase + 28;
+    public const int FsOpenWords        = 8;
+
+    public static int OftAddress(int index)
+    {
+        return OftBase + index * OftEntryBytes;
+    }
+
     // Total OS region size.
-    public const int TotalSize = FsPathComponentBase + FsLayout.NameMaxChars * 4;
+    public const int TotalSize = FsOpenBase + FsOpenWords * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)
