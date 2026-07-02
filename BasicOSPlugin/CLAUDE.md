@@ -10,7 +10,7 @@
 | OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn, DiskLoad), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
 | OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) |
 | OsRoutines.Cache.cs | EmitCacheOp + EmitCacheSubroutines (cache_find/get/dirty/write_through/pin/unpin/discard/flush) |
-| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) |
+| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) |
 | Traps/IretTrapProvider.cs | Blocks IRET in user mode |
 | Traps/LoadBoundsTrapProvider.cs | Bounds-checks LOAD in user mode |
 | Traps/StoreBoundsTrapProvider.cs | Bounds-checks STORE in user mode |
@@ -60,6 +60,7 @@ EmitFsDirSubroutines → labels "fs_hash/root_dir/dir_lookup/dir_insert/dir_remo
 EmitFsPathSubroutines→ labels "fs_extract_component/path_resolve/mkdir" (CALL/RET)
 EmitFsSyscall        → IvtFsSyscall (slot 19)           (FSYS wrapper; deliver via SAVEREGS/OSRET)
 EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
+EmitFsRwSubroutines  → labels "oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core" (CALL/RET)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
 
@@ -109,6 +110,10 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_create_file` | EmitFsFileSubroutines | fs_open_core | path in FsOpenAbsPath → new file entry addr or -1; alloc block + insert type=file |
 | `fs_open_core` | EmitFsFileSubroutines | IvtFsOp Open, fs_syscall | EBX=absPath,ECX=flags,EDX=proc → fd or -1; resolve/create, fill OFT, alloc fd |
 | `fs_close_core` | EmitFsFileSubroutines | IvtFsOp Close, fs_syscall | EBX=fd,ECX=proc → 0/-1; clear OFT + fd slot (pure memory) |
+| `oft_from_fd` | EmitFsRwSubroutines | fs_read_core/fs_write_core | EBX=fd(2..7),ECX=proc → EAX=OFT entry addr or -1 (pure memory) |
+| `fs_grow_chain` | EmitFsRwSubroutines | fs_write_core | EBX=firstBlock,ECX=neededBlocks → 0/-1; walk+extend chain (alloc+link). **Reuses FsRwRemaining/CurBlock/Counter/BufPtr as scratch** — callers restore them after |
+| `fs_read_core` | EmitFsRwSubroutines | IvtFsOp Read, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars read or -1; clamp at size-offset, advance offset |
+| `fs_write_core` | EmitFsRwSubroutines | IvtFsOp Write, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars written or -1; grow chain, cache_dirty, advance offset, grow size + dir entry |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---

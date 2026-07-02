@@ -166,6 +166,8 @@ public partial class Hardware
     // pointer first. EDX carries the owning process index so an fd is allocated in its table.
     public const int FsOpOpen         = 12; // open/create absolute path EBX (flags ECX) for proc EDX → fd, or -1
     public const int FsOpClose        = 13; // close fd EBX for proc ECX → 0, or -1
+    public const int FsOpRead         = 14; // read fd EBX into abs buf ECX, count EDX, proc ESI → chars read, or -1
+    public const int FsOpWrite        = 15; // write count EDX chars from abs buf ECX to fd EBX, proc ESI → chars written, or -1
 
     // FSYS syscall numbers (EAX) and flags.
     public const int FsysOpen   = 0; // EBX=path ptr, ECX=flags → fd, or -1
