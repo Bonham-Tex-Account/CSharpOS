@@ -31,6 +31,12 @@ public static class FsLayout
     public const int PayloadBytes  = NextPtrOffset;    // 252 usable bytes per block
     public const int EndOfChain    = -1;
 
+    // File content is stored word-per-char (one byte value per 4-byte word), matching the
+    // OUTS/INS string convention, so a file's chars/blocks are copied with plain word LOAD/
+    // STORE loops rather than byte masking. A file is a chain of blocks each holding this
+    // many chars in words [0, CharsPerBlock) with the next-block link in the last word.
+    public const int CharsPerBlock = PayloadBytes / 4;   // 63
+
     // Superblock fields (16-bit magic so the ISA formatter can build it with one MovImm16;
     // the .bin file header uses a separate 32-bit "CSFS" magic in Bin). FreeCount is written
     // by format but not yet maintained per-alloc — the bitmap is the source of truth.

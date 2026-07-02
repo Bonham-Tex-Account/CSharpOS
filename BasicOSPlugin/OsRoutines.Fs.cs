@@ -57,6 +57,12 @@ public static partial class OsRoutines
         asm.MovImm(R(R14), Hardware.FsOpClose);
         asm.Cmp(R(R13), R(R14));
         asm.Jz("fo_close");
+        asm.MovImm(R(R14), Hardware.FsOpRead);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_read");
+        asm.MovImm(R(R14), Hardware.FsOpWrite);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_write");
         asm.MovImm(R(R12), 0);                   // unknown op
         asm.Jmp("fo_result");
 
@@ -121,6 +127,14 @@ public static partial class OsRoutines
         asm.Jmp("fo_result");
         asm.Label("fo_close");
         asm.Call("fs_close_core");               // EBX=fd, ECX=proc index
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_read");
+        asm.Call("fs_read_core");                // EBX=fd, ECX=abs buf, EDX=count, ESI=proc
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_write");
+        asm.Call("fs_write_core");               // EBX=fd, ECX=abs buf, EDX=count, ESI=proc
         asm.Mov(R(R12), R(EAX));
 
         asm.Label("fo_result");
@@ -725,6 +739,12 @@ public static partial class OsRoutines
         asm.MovImm(R(R8), Hardware.FsysClose);
         asm.Cmp(R(EAX), R(R8));
         asm.Jz("fsy_close");
+        asm.MovImm(R(R8), Hardware.FsysRead);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_read");
+        asm.MovImm(R(R8), Hardware.FsysWrite);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_write");
         asm.MovImm(R(R15), 0);                   // unknown syscall → -1
         asm.Dec(R(R15));
         asm.Jmp("fsy_deliver");
@@ -744,6 +764,27 @@ public static partial class OsRoutines
         Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EBP));                // ECX = current process index
         asm.Call("fs_close_core");               // (EBX=fd, ECX=proc)
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_read");
+        // translate user buffer ptr (ECX) to absolute; fd in EBX, count in EDX, proc in ESI.
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EBP));                // ESI = proc index
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(ECX), R(R10));                 // ECX = absolute buffer addr
+        asm.Call("fs_read_core");                // (EBX=fd, ECX=abs buf, EDX=count, ESI=proc)
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_write");
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EBP));
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(ECX), R(R10));
+        asm.Call("fs_write_core");
         asm.Mov(R(R15), R(EAX));
 
         asm.Label("fsy_deliver");
@@ -998,6 +1039,390 @@ public static partial class OsRoutines
         asm.MovImm(R(EAX), 0);
         asm.Ret();
         asm.Label("close_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+    }
+
+    // ===== EmitFsRwSubroutines ===============================================
+    // Byte-level read/write across a file's block chain (Increment 5b). File content is stored
+    // word-per-char (CharsPerBlock per block), so copies are word LOAD/STORE loops. Every loop
+    // variable lives in OsLayout.FsRw* memory because the cache/chain calls clobber registers.
+    private static void EmitFsRwSubroutines(Assembler asm)
+    {
+        // ---- oft_from_fd: EBX=fd, ECX=proc → EAX = OFT entry addr, or -1 (pure memory) ----
+        asm.Label("oft_from_fd");
+        asm.MovImm(R(R8), 2);
+        asm.Cmp(R(EBX), R(R8));
+        asm.Js("off_fail");
+        asm.MovImm(R(R8), Hardware.FdCount);
+        asm.Cmp(R(EBX), R(R8));
+        asm.Jns("off_fail");
+        EntryAddress(asm, ECX, R9);              // R9 = process entry
+        asm.Mov(R(R10), R(EBX));
+        asm.MovImm(R(R8), 4);
+        asm.Mul(R(R10), R(R8));
+        asm.MovImm(R(R8), Hardware.ProcessEntryFdTable);
+        asm.Add(R(R10), R(R8));
+        asm.Add(R(R10), R(R9));                  // R10 = fd slot addr
+        asm.Load(R(R11), R(R10));
+        asm.MovImm(R(R8), 0);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jz("off_fail");                      // fd not open
+        asm.Dec(R(R11));                         // OFT index
+        asm.Mov(R(R12), R(R11));
+        asm.MovImm(R(R8), OsLayout.OftEntryBytes);
+        asm.Mul(R(R12), R(R8));
+        Imm16(asm, R8, OsLayout.OftBase);
+        asm.Add(R(R12), R(R8));
+        asm.Mov(R(EAX), R(R12));
+        asm.Ret();
+        asm.Label("off_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_grow_chain: EBX=firstBlock, ECX=neededBlocks → EAX = 0, or -1 (disk full).
+        // Walks/extends the chain until it has at least neededBlocks blocks. ----
+        asm.Label("fs_grow_chain");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EBX);
+        SpillStore(asm, OsLayout.FsRwCounter, ECX);      // needed
+        asm.MovImm(R(EBX), 1);
+        SpillStore(asm, OsLayout.FsRwRemaining, EBX);    // count = 1 (blocks so far)
+        asm.Label("gc_loop");
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        SpillLoad(asm, OsLayout.FsRwCounter, R9);
+        asm.Cmp(R(R8), R(R9));
+        asm.Jns("gc_done");                              // count >= needed
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");                       // EAX = next
+        asm.MovImm(R(EBX), 0);
+        asm.Dec(R(EBX));
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("gc_extend");                             // next == -1 → allocate
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);     // advance to existing next
+        asm.Jmp("gc_next");
+        asm.Label("gc_extend");
+        asm.Call("fs_alloc_block");                      // EAX = new block or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("gc_fail");
+        SpillStore(asm, OsLayout.FsRwBufPtr, EAX);       // temp: new block
+        asm.Mov(R(ECX), R(EAX));                         // next = new block
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);      // block = cur
+        asm.Call("fs_chain_set_next");
+        SpillLoad(asm, OsLayout.FsRwBufPtr, EAX);
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);     // advance to the new block
+        asm.Label("gc_next");
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Inc(R(R8));
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);
+        asm.Jmp("gc_loop");
+        asm.Label("gc_done");
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+        asm.Label("gc_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_read_core: EBX=fd, ECX=abs buf, EDX=count, ESI=proc → EAX = chars read or -1 ----
+        asm.Label("fs_read_core");
+        SpillStore(asm, OsLayout.FsRwFd, EBX);
+        SpillStore(asm, OsLayout.FsRwBuf, ECX);
+        SpillStore(asm, OsLayout.FsRwCount, EDX);
+        SpillStore(asm, OsLayout.FsRwProc, ESI);
+        SpillLoad(asm, OsLayout.FsRwFd, EBX);
+        SpillLoad(asm, OsLayout.FsRwProc, ECX);
+        asm.Call("oft_from_fd");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("read_fail");
+        SpillStore(asm, OsLayout.FsRwOft, EAX);
+        asm.Mov(R(R8), R(EAX));
+        LoadField(asm, R8, OsLayout.OftSize, R9);        // size
+        LoadField(asm, R8, OsLayout.OftOffset, R10);     // offset
+        asm.Mov(R(R11), R(R9));
+        asm.Sub(R(R11), R(R10));                         // avail = size - offset
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R11), R(EBX));
+        asm.Jns("read_avail_ok");
+        asm.MovImm(R(R11), 0);
+        asm.Label("read_avail_ok");
+        SpillLoad(asm, OsLayout.FsRwCount, R12);
+        asm.Cmp(R(R12), R(R11));
+        asm.Js("read_count_ok");
+        asm.Mov(R(R12), R(R11));                         // count = min(count, avail)
+        asm.Label("read_count_ok");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R12), R(EBX));
+        asm.Jns("read_count_pos");
+        asm.MovImm(R(R12), 0);
+        asm.Label("read_count_pos");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R12), R(EBX));
+        asm.Jz("read_zero");
+        SpillStore(asm, OsLayout.FsRwCopied, R12);
+        SpillStore(asm, OsLayout.FsRwRemaining, R12);
+        LoadField(asm, R8, OsLayout.OftFirstBlock, R13);
+        asm.MovImm(R(EBX), FsLayout.CharsPerBlock);
+        asm.Mov(R(R14), R(R10));
+        asm.Div(R(R14), R(EBX));                         // skip = offset / CharsPerBlock
+        asm.Mov(R(R15), R(R14));
+        asm.MovImm(R(EAX), FsLayout.CharsPerBlock);
+        asm.Mul(R(R15), R(EAX));
+        asm.Mov(R(EBX), R(R10));
+        asm.Sub(R(EBX), R(R15));                         // charInBlock = offset - skip*CPB
+        SpillStore(asm, OsLayout.FsRwCharInBlock, EBX);
+        SpillStore(asm, OsLayout.FsRwCurBlock, R13);
+        SpillLoad(asm, OsLayout.FsRwBuf, EBX);
+        SpillStore(asm, OsLayout.FsRwBufPtr, EBX);
+        SpillStore(asm, OsLayout.FsRwCounter, R14);      // skip count
+        asm.Label("read_skip");
+        SpillLoad(asm, OsLayout.FsRwCounter, R8);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("read_copy_loop");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        SpillLoad(asm, OsLayout.FsRwCounter, R8);
+        asm.Dec(R(R8));
+        SpillStore(asm, OsLayout.FsRwCounter, R8);
+        asm.Jmp("read_skip");
+        asm.Label("read_copy_loop");
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("read_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("cache_get");
+        asm.Mov(R(R9), R(EAX));                          // block data addr
+        SpillLoad(asm, OsLayout.FsRwCharInBlock, R10);
+        asm.MovImm(R(EBX), FsLayout.CharsPerBlock);
+        asm.Sub(R(EBX), R(R10));
+        asm.Mov(R(R11), R(EBX));                         // availInBlock
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Mov(R(R12), R(R8));
+        asm.Cmp(R(R12), R(R11));
+        asm.Js("read_n_ok");
+        asm.Mov(R(R12), R(R11));                         // n = min(remaining, availInBlock)
+        asm.Label("read_n_ok");
+        asm.Mov(R(R13), R(R10));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(R13), R(EBX));
+        asm.Add(R(R13), R(R9));                          // src = block + charInBlock*4
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);        // dst
+        asm.MovImm(R(R15), 0);
+        asm.Label("read_word");
+        asm.Cmp(R(R15), R(R12));
+        asm.Jns("read_word_done");
+        asm.Mov(R(EBX), R(R15));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));
+        asm.Mov(R(ECX), R(R13));
+        asm.Add(R(ECX), R(EBX));
+        asm.Load(R(ECX), R(ECX));                        // char from file
+        asm.Mov(R(EBP), R(R14));
+        asm.Add(R(EBP), R(EBX));
+        asm.Store(R(EBP), R(ECX));                       // → user buffer
+        asm.Inc(R(R15));
+        asm.Jmp("read_word");
+        asm.Label("read_word_done");
+        asm.Mov(R(EBX), R(R12));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));
+        asm.Add(R(R14), R(EBX));
+        SpillStore(asm, OsLayout.FsRwBufPtr, R14);       // bufPtr += n*4
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Sub(R(R8), R(R12));
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);     // remaining -= n
+        asm.MovImm(R(EBX), 0);
+        SpillStore(asm, OsLayout.FsRwCharInBlock, EBX);  // charInBlock = 0 for the next block
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("read_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Jmp("read_copy_loop");
+        asm.Label("read_done");
+        SpillLoad(asm, OsLayout.FsRwOft, R8);
+        LoadField(asm, R8, OsLayout.OftOffset, R9);
+        SpillLoad(asm, OsLayout.FsRwCopied, R10);
+        asm.Add(R(R9), R(R10));
+        StoreFieldReg(asm, R8, OsLayout.OftOffset, R9);  // offset += copied
+        asm.Mov(R(EAX), R(R10));
+        asm.Ret();
+        asm.Label("read_zero");
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+        asm.Label("read_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_write_core: EBX=fd, ECX=abs buf, EDX=count, ESI=proc → EAX = chars written or -1 ----
+        asm.Label("fs_write_core");
+        SpillStore(asm, OsLayout.FsRwFd, EBX);
+        SpillStore(asm, OsLayout.FsRwBuf, ECX);
+        SpillStore(asm, OsLayout.FsRwCount, EDX);
+        SpillStore(asm, OsLayout.FsRwProc, ESI);
+        SpillLoad(asm, OsLayout.FsRwFd, EBX);
+        SpillLoad(asm, OsLayout.FsRwProc, ECX);
+        asm.Call("oft_from_fd");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("write_fail");
+        SpillStore(asm, OsLayout.FsRwOft, EAX);
+        asm.Mov(R(R8), R(EAX));
+        LoadField(asm, R8, OsLayout.OftOffset, R10);     // offset
+        SpillLoad(asm, OsLayout.FsRwCount, R12);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R12), R(EBX));
+        asm.Jns("write_count_ok");
+        asm.MovImm(R(R12), 0);
+        asm.Label("write_count_ok");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R12), R(EBX));
+        asm.Jz("write_zero");
+        SpillStore(asm, OsLayout.FsRwCopied, R12);
+        SpillStore(asm, OsLayout.FsRwRemaining, R12);
+        // grow the chain to hold offset + count chars
+        asm.Mov(R(R13), R(R10));
+        asm.Add(R(R13), R(R12));                         // end = offset + count
+        asm.MovImm(R(EBX), FsLayout.CharsPerBlock);
+        asm.Dec(R(EBX));
+        asm.Add(R(R13), R(EBX));                         // end + CPB - 1
+        asm.MovImm(R(EBX), FsLayout.CharsPerBlock);
+        asm.Div(R(R13), R(EBX));                         // needed = ceil(end / CPB)
+        LoadField(asm, R8, OsLayout.OftFirstBlock, EBX);
+        asm.Mov(R(ECX), R(R13));
+        asm.Call("fs_grow_chain");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("write_fail");                            // disk full
+        // re-derive walk state (grow clobbered the FsRw scratch, including FsRwRemaining
+        // which grow reuses as its own block counter — restore it from FsRwCopied=count).
+        SpillLoad(asm, OsLayout.FsRwCopied, R8);
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);
+        SpillLoad(asm, OsLayout.FsRwOft, R8);
+        LoadField(asm, R8, OsLayout.OftOffset, R10);
+        LoadField(asm, R8, OsLayout.OftFirstBlock, R13);
+        asm.MovImm(R(EBX), FsLayout.CharsPerBlock);
+        asm.Mov(R(R14), R(R10));
+        asm.Div(R(R14), R(EBX));                         // skip
+        asm.Mov(R(R15), R(R14));
+        asm.MovImm(R(EAX), FsLayout.CharsPerBlock);
+        asm.Mul(R(R15), R(EAX));
+        asm.Mov(R(EBX), R(R10));
+        asm.Sub(R(EBX), R(R15));
+        SpillStore(asm, OsLayout.FsRwCharInBlock, EBX);
+        SpillStore(asm, OsLayout.FsRwCurBlock, R13);
+        SpillLoad(asm, OsLayout.FsRwBuf, EBX);
+        SpillStore(asm, OsLayout.FsRwBufPtr, EBX);
+        SpillStore(asm, OsLayout.FsRwCounter, R14);      // skip
+        asm.Label("write_skip");
+        SpillLoad(asm, OsLayout.FsRwCounter, R8);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("write_copy_loop");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        SpillLoad(asm, OsLayout.FsRwCounter, R8);
+        asm.Dec(R(R8));
+        SpillStore(asm, OsLayout.FsRwCounter, R8);
+        asm.Jmp("write_skip");
+        asm.Label("write_copy_loop");
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("write_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("cache_get");
+        asm.Mov(R(R9), R(EAX));
+        SpillLoad(asm, OsLayout.FsRwCharInBlock, R10);
+        asm.MovImm(R(EBX), FsLayout.CharsPerBlock);
+        asm.Sub(R(EBX), R(R10));
+        asm.Mov(R(R11), R(EBX));
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Mov(R(R12), R(R8));
+        asm.Cmp(R(R12), R(R11));
+        asm.Js("write_n_ok");
+        asm.Mov(R(R12), R(R11));
+        asm.Label("write_n_ok");
+        asm.Mov(R(R13), R(R10));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(R13), R(EBX));
+        asm.Add(R(R13), R(R9));                          // dst = block + charInBlock*4
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);        // src
+        asm.MovImm(R(R15), 0);
+        asm.Label("write_word");
+        asm.Cmp(R(R15), R(R12));
+        asm.Jns("write_word_done");
+        asm.Mov(R(EBX), R(R15));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));
+        asm.Mov(R(ECX), R(R14));
+        asm.Add(R(ECX), R(EBX));
+        asm.Load(R(ECX), R(ECX));                        // char from user buffer
+        asm.Mov(R(EBP), R(R13));
+        asm.Add(R(EBP), R(EBX));
+        asm.Store(R(EBP), R(ECX));                       // → file block
+        asm.Inc(R(R15));
+        asm.Jmp("write_word");
+        asm.Label("write_word_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("cache_dirty");                         // the block was modified
+        asm.Mov(R(EBX), R(R12));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);
+        asm.Add(R(R14), R(EBX));
+        SpillStore(asm, OsLayout.FsRwBufPtr, R14);
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Sub(R(R8), R(R12));
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);
+        asm.MovImm(R(EBX), 0);
+        SpillStore(asm, OsLayout.FsRwCharInBlock, EBX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("write_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Jmp("write_copy_loop");
+        asm.Label("write_done");
+        SpillLoad(asm, OsLayout.FsRwOft, R8);
+        LoadField(asm, R8, OsLayout.OftOffset, R9);
+        SpillLoad(asm, OsLayout.FsRwCopied, R10);
+        asm.Add(R(R9), R(R10));                          // new offset
+        StoreFieldReg(asm, R8, OsLayout.OftOffset, R9);
+        LoadField(asm, R8, OsLayout.OftSize, R11);
+        asm.Cmp(R(R11), R(R9));
+        asm.Jns("write_ret");                            // old size already covers it
+        StoreFieldReg(asm, R8, OsLayout.OftSize, R9);    // grow the size to the new offset
+        SpillStore(asm, OsLayout.FsRwCounter, R9);       // stash new size (Counter is free now)
+        // write the new size into the on-disk directory entry. Load the entry offset into
+        // EDX first — EDX survives cache_get, whereas LoadField would clobber the block
+        // address cache_get returns in EAX.
+        LoadField(asm, R8, OsLayout.OftEntryOffset, EDX);
+        LoadField(asm, R8, OsLayout.OftDirBlock, EAX);
+        asm.Call("cache_get");
+        asm.Add(R(EAX), R(EDX));                          // entry addr in the cached block
+        SpillLoad(asm, OsLayout.FsRwCounter, R9);         // new size
+        StoreFieldReg(asm, EAX, FsLayout.DirEntrySizeField, R9);
+        SpillLoad(asm, OsLayout.FsRwOft, R8);
+        LoadField(asm, R8, OsLayout.OftDirBlock, EAX);
+        asm.Call("cache_dirty");
+        asm.Label("write_ret");
+        SpillLoad(asm, OsLayout.FsRwCopied, EAX);
+        asm.Ret();
+        asm.Label("write_zero");
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+        asm.Label("write_fail");
         asm.MovImm(R(EAX), 0);
         asm.Dec(R(EAX));
         asm.Ret();

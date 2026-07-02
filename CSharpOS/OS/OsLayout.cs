@@ -258,13 +258,29 @@ public static class OsLayout
     public const int FsOpenEntryOffset = FsOpenBase + 28;
     public const int FsOpenWords        = 8;
 
+    // Working scratch for fs_read_core / fs_write_core (byte-level I/O across a block chain;
+    // every loop variable is spilled here because the cache/chain calls clobber registers).
+    public const int FsRwBase        = FsOpenBase + FsOpenWords * 4;
+    public const int FsRwFd          = FsRwBase + 0;
+    public const int FsRwBuf         = FsRwBase + 4;
+    public const int FsRwCount       = FsRwBase + 8;
+    public const int FsRwProc        = FsRwBase + 12;
+    public const int FsRwOft         = FsRwBase + 16;   // OFT entry addr for this fd
+    public const int FsRwCurBlock    = FsRwBase + 20;   // current block in the walk
+    public const int FsRwRemaining   = FsRwBase + 24;   // chars left to copy
+    public const int FsRwCharInBlock = FsRwBase + 28;   // char position within the current block
+    public const int FsRwBufPtr      = FsRwBase + 32;   // running user-buffer address
+    public const int FsRwCopied      = FsRwBase + 36;   // total chars to copy / return value
+    public const int FsRwCounter     = FsRwBase + 40;   // generic loop counter (skip / grow)
+    public const int FsRwWords        = 12;
+
     public static int OftAddress(int index)
     {
         return OftBase + index * OftEntryBytes;
     }
 
     // Total OS region size.
-    public const int TotalSize = FsOpenBase + FsOpenWords * 4;
+    public const int TotalSize = FsRwBase + FsRwWords * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)
