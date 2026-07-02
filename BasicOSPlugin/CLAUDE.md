@@ -2,13 +2,20 @@
 
 ## Files
 
-| File | Role |
+`OsRoutines` is one `public static partial class` split across four files by subsystem. **To locate any Emit method or ISA routine, Grep its name** (each has a `// ===== Name ===` marker) — do NOT rely on line numbers (they drift on every edit). The table says which file to open.
+
+| File | Holds (Grep the `// ===== ` marker to jump) |
 |------|------|
 | BasicOS.cs | Concrete OS; `(TextWriter)` ctor for plugin loader; CollectTraps via reflection |
-| OsRoutines.cs | All ISA emit methods; `BuildOsImage()` entry point |
+| OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn, DiskLoad), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
+| OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) |
+| OsRoutines.Cache.cs | EmitCacheOp + EmitCacheSubroutines (cache_find/get/dirty/write_through/pin/unpin/discard/flush) |
+| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) |
 | Traps/IretTrapProvider.cs | Blocks IRET in user mode |
 | Traps/LoadBoundsTrapProvider.cs | Bounds-checks LOAD in user mode |
 | Traps/StoreBoundsTrapProvider.cs | Bounds-checks STORE in user mode |
+
+Cross-file calls resolve two ways: C# calls (e.g. BuildOsImage → EmitFsOp) work because it's one partial class; ISA `asm.Call("cache_get")` are runtime label strings the assembler resolves at Build, independent of which file emitted the label.
 
 ---
 
@@ -49,6 +56,7 @@ EmitResolveCow       → label "resolve_cow" (CALL/RET)   OsRoutines.cs:743
 EmitCowShare         → label "cow_share" (CALL/RET)     OsRoutines.cs:826
 EmitCacheSubroutines → labels "cache_find/get/dirty/write_through/pin/unpin/discard/flush" (CALL/RET)
 EmitFsSubroutines    → labels "fs_format/alloc_block/free_block/chain_next/chain_set_next" (CALL/RET)
+EmitFsDirSubroutines → labels "fs_hash/root_dir/dir_lookup/dir_insert/dir_remove" (CALL/RET)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
 
@@ -61,7 +69,9 @@ Guards: `OsLayout.CodeBase + code.Length > OsLayout.DataBase` → throws.
 
 ## Named ISA Subroutines (CALL/RET)
 
-All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack` sets ESP=PrivilegedStackTop=13840) before the first CALL in a routine.
+All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack` sets ESP=PrivilegedStackTop) before the first CALL in a routine.
+
+> The `:NNN` line refs below are **stale** (they predate the cache/FS work and the file split). Ignore them — Grep the Emit method name and open the file per the Files table. Kept only as a rough grouping hint.
 
 | Label | Emit method (OsRoutines.cs line) | Called from | Purpose |
 |-------|----------------------------------|-------------|---------|
@@ -83,6 +93,11 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_alloc_block` | EmitFsSubroutines | IvtFsOp, future dir/file routines | Scan bitmap for a clear bit → set it, init next=-1; EAX→block or -1 |
 | `fs_free_block` | EmitFsSubroutines | IvtFsOp | Clear the bitmap bit + cache_discard the block; EAX=block |
 | `fs_chain_next`/`fs_chain_set_next` | EmitFsSubroutines | IvtFsOp | Read / write a block's next-block link (offset 252) |
+| `fs_hash` | EmitFsDirSubroutines | dir_lookup/insert, IvtFsOp | Hash a word-per-char name; EAX=nameAddr → EAX=hash (h=h*31+c) |
+| `fs_root_dir` | EmitFsDirSubroutines | IvtFsOp | Read root dir block from superblock → EAX |
+| `fs_dir_lookup` | EmitFsDirSubroutines | dir_insert/remove, IvtFsOp | EAX=dir,ECX=name → entry addr or -1; hash-reject + name-verify; stashes block in FsScratchEntryBlock |
+| `fs_dir_insert` | EmitFsDirSubroutines | IvtFsOp | EBX=dir,ECX=name,EDX=type,ESI=first → entry addr or -1 (dup/full); finds free slot or extends chain |
+| `fs_dir_remove` | EmitFsDirSubroutines | IvtFsOp | EAX=dir,ECX=name → 0/-1; marks entry type=free |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---

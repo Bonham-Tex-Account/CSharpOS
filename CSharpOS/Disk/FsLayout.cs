@@ -38,5 +38,21 @@ public static class FsLayout
     public const int SuperMagicOffset      = 0;
     public const int SuperBlockCountOffset = 4;
     public const int SuperFreeCountOffset  = 8;
-    public const int SuperRootDirOffset    = 12;      // set by the directory layer (Inc 4)
+    public const int SuperRootDirOffset    = 12;      // block number of the root directory
+
+    // ---- directory entries (Increment 4) ----------------------------------
+    // A directory is a chain of blocks; each block holds DirEntriesPerBlock fixed-size
+    // entries. Names are stored word-per-char (one character per 4-byte word, null-padded)
+    // to match OUTS/INS and the user path pointer, so name comparison is a direct word loop.
+    public const int NameMaxChars = 12;               // 12 words = 48 bytes of name
+    public const int DirTypeFree = 0;                 // empty slot
+    public const int DirTypeFile = 1;
+    public const int DirTypeDir  = 2;
+    public const int DirEntryType       = 0;          // DirType* (0 = free slot)
+    public const int DirEntryHash       = 4;          // name hash (fast reject on lookup)
+    public const int DirEntryFirstBlock = 8;          // first data block of the file/subdir
+    public const int DirEntrySizeField  = 12;         // size in bytes (file) / unused (dir)
+    public const int DirEntryName       = 16;         // NameMaxChars words, null-padded
+    public const int DirEntryBytes      = DirEntryName + NameMaxChars * 4;   // 64
+    public const int DirEntriesPerBlock = PayloadBytes / DirEntryBytes;      // 252/64 = 3
 }

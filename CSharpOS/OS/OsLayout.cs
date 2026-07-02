@@ -199,8 +199,22 @@ public static class OsLayout
     // dispatch — same rationale as CacheResult.
     public const int FsResultOffset = CacheSlotTableBase + CacheRegionSize;
 
+    // ---- filesystem routine scratch (Increment 4) -------------------------
+    // The cache subroutines clobber almost every register (only EDX/EDI reliably survive a
+    // cache_get), so the directory routines spill any state that must persist across a nested
+    // cache/chain call to these fixed OS-RAM words instead of registers.
+    public const int FsScratchBase       = FsResultOffset + 4;
+    public const int FsScratchName       = FsScratchBase + 0;   // lookup/insert: name buffer addr
+    public const int FsScratchHash       = FsScratchBase + 4;   // lookup: target name hash
+    public const int FsScratchType       = FsScratchBase + 8;   // insert: entry type
+    public const int FsScratchFirst      = FsScratchBase + 12;  // insert: first-block field
+    public const int FsScratchDir        = FsScratchBase + 16;  // insert: directory block
+    public const int FsScratchEntryBlock = FsScratchBase + 20;  // block holding the matched/new entry
+    public const int FsScratchFreeBlock  = FsScratchBase + 24;  // insert: newly chained block
+    public const int FsScratchWords      = 8;                   // one spare
+
     // Total OS region size.
-    public const int TotalSize = FsResultOffset + 4;
+    public const int TotalSize = FsScratchBase + FsScratchWords * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)

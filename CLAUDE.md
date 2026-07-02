@@ -26,7 +26,11 @@ CSharpOS/
   Structs/      MemoryRange.cs  Trap.cs
   Events/       *Args.cs (11 event arg classes)
 BasicOSPlugin/
-  BasicOS.cs  OsRoutines.cs
+  BasicOS.cs
+  OsRoutines.cs            partial class — core: BuildOsImage, scheduling, lifecycle, buddy, syscall, helpers
+  OsRoutines.Paging.cs     partial — PageFault + frame/swap/COW subs
+  OsRoutines.Cache.cs      partial — IvtCacheOp + cache_* subs
+  OsRoutines.Fs.cs         partial — IvtFsOp + fs_* block/chain/dir subs
   Traps/  IretTrapProvider.cs  LoadBoundsTrapProvider.cs  StoreBoundsTrapProvider.cs
 CSharpOSConsole/
   Visualization/  VisualizerModel.cs  HardwareEventBridge.cs  SpectreDashboard.cs
@@ -138,7 +142,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 17 | IvtCacheOp | — | EmitCacheOp | FS buffer-cache control: EAX=op, EBX=block → result in CacheResult |
 | 18 | IvtFsOp | — | EmitFsOp | FS block layer: EAX=op, EBX=block, ECX=next → result in FsResult |
 
-Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext (see `Hardware.FsOp*`).
+Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove (see `Hardware.FsOp*`).
 
 ---
 
@@ -181,7 +185,8 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | CacheResultOffset | 17720 | 4 (IvtCacheOp return slot) |
 | CacheSlotTableBase | 17724 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
 | FsResultOffset | 21312 | 4 (IvtFsOp return slot) |
-| **TotalSize** | **21316** | — |
+| FsScratchBase | 21316 | 32 (FsScratchWords=8; dir routines spill cross-cache-call state here) |
+| **TotalSize** | **21348** | — |
 
 `PageTableAddress(i) = 13968 + i * 256`
 `FrameTableEntry(f) = 16016 + f * 32`
@@ -341,7 +346,9 @@ Distinct from OsLayout (OS RAM). File-block region blocks:
 | 1 (BitmapBlock) | free bitmap, 256 bits = BitmapWords=8 words; bit=1 → allocated |
 | 2+ (FirstDataBlock) | allocatable data blocks |
 
-Each block: payload bytes 0..251, `NextPtrOffset=252` holds the next-block link (`EndOfChain=-1`) for free-chaining. Block layer is ISA `fs_*` subroutines via `IvtFsOp`, all through the cache: `fs_format` (bits 0,1 set), `fs_alloc_block` (scan bitmap for a clear bit → set + init next=-1), `fs_free_block` (clear bit + cache_discard), `fs_chain_next`/`fs_chain_set_next`. **Convention:** EDX/EDI carry a value across `cache_*` calls (the cache subroutines never touch EDX/EDI).
+Each block: payload bytes 0..251, `NextPtrOffset=252` holds the next-block link (`EndOfChain=-1`) for free-chaining. Block layer is ISA `fs_*` subroutines via `IvtFsOp`, all through the cache: `fs_format` (bits 0,1 set, allocs root dir → block 2 stored @ SuperRootDirOffset), `fs_alloc_block` (scan bitmap for a clear bit → set + init next=-1), `fs_free_block` (clear bit + cache_discard), `fs_chain_next`/`fs_chain_set_next`. **Convention:** EDX/EDI carry a value across `cache_*` calls (the cache subroutines never touch EDX/EDI); state that must survive `fs_alloc_block`/`fs_chain_set_next` (which do clobber EDX/EDI) is spilled to `OsLayout.FsScratch*`.
+
+**Directory entries (Inc 4a):** a directory is a block chain; `DirEntryBytes=64`, `DirEntriesPerBlock=3`. Entry: `type`@0 (0=free,1=file,2=dir) · `hash`@4 · `firstBlock`@8 · `size`@12 · `name`@16 (`NameMaxChars=12` words, word-per-char, null-padded). ISA dir routines via `IvtFsOp`: `fs_hash` (h=h*31+c), `fs_root_dir`, `fs_dir_lookup` (hash-reject then name-verify; stashes matched block in FsScratchEntryBlock), `fs_dir_insert` (dup-reject via lookup, find free slot or extend chain), `fs_dir_remove` (type=free). **Nested dirs / path traversal = Inc 4b (pending).**
 
 ### Buddy Allocator
 | Constant | Value |
@@ -428,6 +435,8 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-01 | Filesystem roadmap Inc 0 (FdCount 4→8, ProcessEntrySize 176→192) + Inc 1 (Bin file-block region + .bin persistence + FBREAD/FBWRITE 0x4B/0x4C) | ~30K (inline) | Traced full syscall path first (EnterKernel/EmitSyscall) to de-risk plan. 26 new tests (532 total). ISA filesystem chosen over C#. |
 | 2026-07-01 | Filesystem Inc 2: RAM write-back cache + ISA cache manager (IvtCacheOp slot 17, IVT 17→18, CodeBase 68→72; cache_find/get/dirty/write_through/pin/unpin/discard/flush; LRU+write-back+pin; periodic flush hooked into ContextSwitch) | ~40K (inline) | 12 new tests (544 total), all passed first run. Write-through included per user. TotalSize 17712→21312. |
 | 2026-07-01 | Filesystem Inc 3: ISA block allocator + free-chaining (FsLayout.cs on-disk struct; IvtFsOp slot 18, IVT 18→19, CodeBase 72→76; fs_format/alloc_block/free_block/chain_next/chain_set_next, all through the cache) | ~35K (inline) | 10 new tests (554 total), all passed first run. ISA format routine chosen. EDX/EDI carry values across cache_* calls. |
+| 2026-07-01 | Filesystem Inc 4a: ISA directory layer (word-per-char names; FsScratch spill region; fs_hash/root_dir/dir_lookup/dir_insert/dir_remove; dup rejection, chain extension). Format now allocs root dir @block 2 | ~45K (inline) | 10 new dir tests + 6 Inc-3 tests updated for root-dir reservation (564 total), all green. Heavy register-spill-to-memory pattern. Nested/path traversal deferred to Inc 4b. |
+| 2026-07-01 | Refactor: split OsRoutines.cs (3021 lines) into partial-class files (core + Paging + Cache + Fs) via scripted line-slicing; CLAUDE index switched from drifting line numbers to Grep-stable marker names + file map | ~15K (inline) | Pure code motion, 564 tests still green. FS work now opens OsRoutines.Fs.cs (~520 lines) not the whole file. Scripted with PowerShell to keep file content out of context. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 
