@@ -10,7 +10,7 @@
 | OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
 | OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) |
 | OsRoutines.Cache.cs | EmitCacheOp + EmitCacheSubroutines (cache_find/get/dirty/write_through/pin/unpin/discard/flush) |
-| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) + EmitFsExecSubroutine (fs_exec_core) |
+| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) + EmitFsExecSubroutine (fs_exec_core) + EmitFsMaintSubroutines (oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir/fs_resolve_dir) |
 | Traps/IretTrapProvider.cs | Blocks IRET in user mode |
 | Traps/LoadBoundsTrapProvider.cs | Bounds-checks LOAD in user mode |
 | Traps/StoreBoundsTrapProvider.cs | Bounds-checks STORE in user mode |
@@ -61,6 +61,7 @@ EmitFsSyscall        → IvtFsSyscall (slot 18)           (FSYS wrapper; deliver
 EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
 EmitFsRwSubroutines  → labels "oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core" (CALL/RET)
 EmitFsExecSubroutine → label "fs_exec_core" (CALL; resumes on success)  (Inc 6)
+EmitFsMaintSubroutines→ labels "oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir/fs_resolve_dir" (Phase 1)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
 
@@ -92,7 +93,7 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `cache_dirty`/`cache_write_through` | EmitCacheSubroutines | IvtCacheOp | Mark resident block dirty (lazy) / FBWRITE now + clean |
 | `cache_pin`/`cache_unpin` | EmitCacheSubroutines | IvtCacheOp | Bump / floor-decrement a slot's pin count (pinned = never evicted) |
 | `cache_discard` | EmitCacheSubroutines | IvtCacheOp | Drop a block with no write-back (clear valid+dirty+pin) |
-| `cache_flush` | EmitCacheSubroutines | IvtCacheOp, ContextSwitch periodic hook | FBWRITE every dirty unpinned valid slot, clear dirty |
+| `cache_flush` | EmitCacheSubroutines | IvtCacheOp, ContextSwitch periodic hook | FBWRITE every dirty valid slot (**pinned or not** — pinning blocks eviction, not write-back), clear dirty |
 | `fs_format` | EmitFsSubroutines | IvtFsOp | Write superblock (magic/geom) + empty bitmap (bits 0,1 set) through the cache |
 | `fs_alloc_block` | EmitFsSubroutines | IvtFsOp, future dir/file routines | Scan bitmap for a clear bit → set it, init next=-1; EAX→block or -1 |
 | `fs_free_block` | EmitFsSubroutines | IvtFsOp | Clear the bitmap bit + cache_discard the block; EAX=block |
@@ -115,6 +116,11 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_read_core` | EmitFsRwSubroutines | IvtFsOp Read, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars read or -1; clamp at size-offset, advance offset |
 | `fs_write_core` | EmitFsRwSubroutines | IvtFsOp Write, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars written or -1; grow chain, cache_dirty, advance offset, grow size + dir entry |
 | `fs_exec_core` | EmitFsExecSubroutine | fs_syscall (FsysExec) | EBX=absPath → replace running image with the FS file; resolves file entry, tears down (free/resolve_cow/release_frames/zero_swap), reallocs, copies chain→ProgramAddress, OSRETs. Returns -1 (missing/dir); **never returns on success**. Holds entry addr in R12 (LoadField clobbers EAX) |
+| `oft_find_first` | EmitFsMaintSubroutines | fs_unlink, fs_open_core | EAX=firstBlock → EAX=1 if any in-use OFT handle references that file, else 0 (pure memory) |
+| `fs_unlink` | EmitFsMaintSubroutines | IvtFsOp Unlink, fs_syscall | EAX=absPath → 0/-1; refuse a dir or an open file, free the whole block chain (reads next before freeing each block), then fs_dir_remove |
+| `fs_mkdir_path` | EmitFsMaintSubroutines | IvtFsOp MkdirPath, fs_syscall | EAX=absPath → new dir block/-1; fs_resolve_parent + fs_mkdir |
+| `fs_readdir` | EmitFsMaintSubroutines | IvtFsOp ReadDir, fs_syscall | EBX=dir block, ECX=index, EDX=out → copies n-th in-use 64-byte entry to out, returns type or -1; skips type=free |
+| `fs_resolve_dir` | EmitFsMaintSubroutines | fs_syscall (Readdir) | EAX=absPath → dir block/-1; like fs_path_resolve but returns the dir's firstBlock and maps `/`/all-separators → root |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---

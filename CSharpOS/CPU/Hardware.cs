@@ -169,6 +169,10 @@ public partial class Hardware
     public const int FsOpClose        = 13; // close fd EBX for proc ECX → 0, or -1
     public const int FsOpRead         = 14; // read fd EBX into abs buf ECX, count EDX, proc ESI → chars read, or -1
     public const int FsOpWrite        = 15; // write count EDX chars from abs buf ECX to fd EBX, proc ESI → chars written, or -1
+    // Directory maintenance by absolute path (Phase 1 rectification).
+    public const int FsOpUnlink       = 16; // delete the file at abs path EBX (frees its whole block chain) → 0, or -1
+    public const int FsOpMkdirPath    = 17; // create a directory at abs path EBX → new dir block, or -1
+    public const int FsOpReadDir      = 18; // copy dir EBX's ECX-th in-use entry (64 bytes) into abs buf EDX → entry type, or -1 past end
 
     // FSYS syscall numbers (EAX) and flags.
     public const int FsysOpen   = 0; // EBX=path ptr, ECX=flags → fd, or -1
@@ -176,6 +180,9 @@ public partial class Hardware
     public const int FsysWrite  = 2; // EBX=fd, ECX=buf ptr, EDX=len → bytes written (Inc 5b)
     public const int FsysClose  = 3; // EBX=fd → 0, or -1
     public const int FsysExec   = 4; // EBX=path ptr → replace the running image with the FS file (Inc 6); no return on success, -1 on failure
+    public const int FsysUnlink = 5; // EBX=path ptr → 0, or -1 (Phase 1)
+    public const int FsysMkdir  = 6; // EBX=path ptr → 0, or -1 (Phase 1)
+    public const int FsysReaddir= 7; // EBX=dir path ptr, ECX=index, EDX=out ptr → entry type, or -1 past end (Phase 1)
     public const int FsysCreateFlag = 1; // OPEN: create the file if it does not exist
 
     // ---- raw keycode constants (for INK / INPOLL) -------------------------

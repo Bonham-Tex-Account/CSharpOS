@@ -63,6 +63,15 @@ public static partial class OsRoutines
         asm.MovImm(R(R14), Hardware.FsOpWrite);
         asm.Cmp(R(R13), R(R14));
         asm.Jz("fo_write");
+        asm.MovImm(R(R14), Hardware.FsOpUnlink);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_unlink");
+        asm.MovImm(R(R14), Hardware.FsOpMkdirPath);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_mkdirpath");
+        asm.MovImm(R(R14), Hardware.FsOpReadDir);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jz("fo_readdir");
         asm.MovImm(R(R12), 0);                   // unknown op
         asm.Jmp("fo_result");
 
@@ -136,6 +145,20 @@ public static partial class OsRoutines
         asm.Label("fo_write");
         asm.Call("fs_write_core");               // EBX=fd, ECX=abs buf, EDX=count, ESI=proc
         asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_unlink");
+        asm.Mov(R(EAX), R(EBX));                 // abs path
+        asm.Call("fs_unlink");
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_mkdirpath");
+        asm.Mov(R(EAX), R(EBX));                 // abs path
+        asm.Call("fs_mkdir_path");
+        asm.Mov(R(R12), R(EAX));
+        asm.Jmp("fo_result");
+        asm.Label("fo_readdir");
+        asm.Call("fs_readdir");                  // EBX=dir block, ECX=index, EDX=abs out buf
+        asm.Mov(R(R12), R(EAX));
 
         asm.Label("fo_result");
         Imm16(asm, EBP, OsLayout.FsResultOffset);
@@ -199,6 +222,13 @@ public static partial class OsRoutines
         asm.Store(R(R9), R(EDI));                // root dir block
         asm.MovImm(R(EAX), FsLayout.SuperBlock);
         asm.Call("cache_dirty");
+        // Pin the superblock and bitmap in the cache: nearly every FS op reads them, so they
+        // must never be chosen as eviction victims. Also exercises the cache pin path in
+        // production (not just tests). They are resident here (just written above).
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_pin");
+        asm.MovImm(R(EAX), FsLayout.BitmapBlock);
+        asm.Call("cache_pin");
         asm.Ret();
 
         // ---- fs_alloc_block: → EAX = allocated block, or -1 if full ----
@@ -256,6 +286,18 @@ public static partial class OsRoutines
         asm.Store(R(R8), R(EAX));
         asm.Mov(R(EAX), R(EDX));
         asm.Call("cache_dirty");
+        // maintain the superblock free count (one block just left the free pool). EDX (the
+        // block) survives cache_get/cache_dirty, which never touch EDX/EDI.
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_get");
+        asm.Mov(R(R8), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.SuperFreeCountOffset);
+        asm.Add(R(R8), R(EAX));                   // R8 = &FreeCount
+        asm.Load(R(R9), R(R8));
+        asm.Dec(R(R9));
+        asm.Store(R(R8), R(R9));
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_dirty");
         asm.Mov(R(EAX), R(EDX));                  // return the block number
         asm.Ret();
         asm.Label("fa_full");
@@ -291,6 +333,17 @@ public static partial class OsRoutines
         asm.Call("cache_dirty");
         asm.Mov(R(EAX), R(EDX));
         asm.Call("cache_discard");               // drop the freed block's cached copy
+        // maintain the superblock free count (one block just returned to the free pool).
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_get");
+        asm.Mov(R(R8), R(EAX));
+        asm.MovImm(R(EAX), FsLayout.SuperFreeCountOffset);
+        asm.Add(R(R8), R(EAX));
+        asm.Load(R(R9), R(R8));
+        asm.Inc(R(R9));
+        asm.Store(R(R8), R(R9));
+        asm.MovImm(R(EAX), FsLayout.SuperBlock);
+        asm.Call("cache_dirty");
         asm.Ret();
 
         // ---- fs_chain_next: EAX = block → EAX = next-block link ----
@@ -748,6 +801,15 @@ public static partial class OsRoutines
         asm.MovImm(R(R8), Hardware.FsysExec);
         asm.Cmp(R(EAX), R(R8));
         asm.Jz("fsy_exec");
+        asm.MovImm(R(R8), Hardware.FsysUnlink);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_unlink");
+        asm.MovImm(R(R8), Hardware.FsysMkdir);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_mkdir");
+        asm.MovImm(R(R8), Hardware.FsysReaddir);
+        asm.Cmp(R(EAX), R(R8));
+        asm.Jz("fsy_readdir");
         asm.MovImm(R(R15), 0);                   // unknown syscall → -1
         asm.Dec(R(R15));
         asm.Jmp("fsy_deliver");
@@ -802,6 +864,56 @@ public static partial class OsRoutines
         asm.Add(R(EBX), R(R10));                 // EBX = absolute path addr
         asm.Call("fs_exec_core");                // resumes the process on success; returns -1 on failure
         asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_unlink");
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EBP));
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(EBX), R(R10));                 // EBX = absolute path addr
+        asm.Mov(R(EAX), R(EBX));
+        asm.Call("fs_unlink");
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_mkdir");
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EBP));
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(EBX), R(R10));                 // EBX = absolute path addr
+        asm.Mov(R(EAX), R(EBX));
+        asm.Call("fs_mkdir_path");               // EAX = new dir block, or -1
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+
+        asm.Label("fsy_readdir");
+        // translate the dir path ptr (EBX) and out ptr (EDX); index in ECX. Resolving the path
+        // clobbers registers, so stash the index + translated out ptr in FsScratchArg* (which
+        // fs_path_resolve/fs_readdir do not touch) and reload them after resolving the dir.
+        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EBP));
+        EntryAddress(asm, ESI, R9);
+        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
+        asm.Add(R(EBX), R(R10));                 // abs dir path
+        asm.Add(R(EDX), R(R10));                 // abs out buffer
+        SpillStore(asm, OsLayout.FsScratchArgA, ECX);   // index
+        SpillStore(asm, OsLayout.FsScratchArgB, EDX);   // out buffer
+        asm.Mov(R(EAX), R(EBX));
+        asm.Call("fs_resolve_dir");              // EAX = dir block, or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsy_readdir_fail");
+        asm.Mov(R(EBX), R(EAX));                 // dir block
+        SpillLoad(asm, OsLayout.FsScratchArgA, ECX);
+        SpillLoad(asm, OsLayout.FsScratchArgB, EDX);
+        asm.Call("fs_readdir");                  // EBX=dir, ECX=index, EDX=out → type or -1
+        asm.Mov(R(R15), R(EAX));
+        asm.Jmp("fsy_deliver");
+        asm.Label("fsy_readdir_fail");
+        asm.MovImm(R(R15), 0);
+        asm.Dec(R(R15));
 
         asm.Label("fsy_deliver");
         Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
@@ -967,6 +1079,14 @@ public static partial class OsRoutines
         SpillLoad(asm, OsLayout.FsOpenEntryAddr, EBX);
         asm.Sub(R(EBX), R(EAX));
         SpillStore(asm, OsLayout.FsOpenEntryOffset, EBX);
+        // Reject a second open of the same file (single-open policy): two OFT handles would
+        // each cache their own size/offset, so a write through one desyncs the other. Scan the
+        // open-file table for this file's first block.
+        SpillLoad(asm, OsLayout.FsOpenFirst, EAX);
+        asm.Call("oft_find_first");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jnz("open_fail");                    // already open
         // allocate an OFT slot and fill it
         asm.Call("oft_alloc");
         asm.MovImm(R(EBX), 0);
@@ -1622,6 +1742,223 @@ public static partial class OsRoutines
         asm.OsRet(R(EAX));
 
         asm.Label("fxc_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+    }
+
+    // ===== EmitFsMaintSubroutines ============================================
+    // Directory maintenance (Phase 1 rectification): unlink (delete a file and free its whole
+    // block chain — the old fs_dir_remove leaked the chain), mkdir-by-path, and readdir. Plus
+    // oft_find_first, the open-file-table scan shared by unlink (refuse to delete an open file)
+    // and fs_open_core (reject a second open of the same file). Path cores take EAX = abs path.
+    private static void EmitFsMaintSubroutines(Assembler asm)
+    {
+        // ---- oft_find_first: EAX = firstBlock → EAX = 1 if any in-use OFT handle references
+        // that file, else 0 (pure memory scan). ----
+        asm.Label("oft_find_first");
+        asm.Mov(R(R8), R(EAX));                  // target firstBlock
+        asm.MovImm(R(R9), 0);                    // i
+        asm.Label("ofd_loop");
+        asm.MovImm(R(R10), OsLayout.MaxOpenFiles);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jns("ofd_none");
+        asm.Mov(R(R11), R(R9));
+        asm.MovImm(R(R10), OsLayout.OftEntryBytes);
+        asm.Mul(R(R11), R(R10));
+        Imm16(asm, R10, OsLayout.OftBase);
+        asm.Add(R(R11), R(R10));                 // R11 = OFT entry addr
+        asm.Load(R(R12), R(R11));                // inUse
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(R12), R(R10));
+        asm.Jz("ofd_next");
+        asm.Mov(R(R12), R(R11));
+        asm.MovImm(R(R10), OsLayout.OftFirstBlock);
+        asm.Add(R(R12), R(R10));
+        asm.Load(R(R12), R(R12));                // this handle's firstBlock
+        asm.Cmp(R(R12), R(R8));
+        asm.Jz("ofd_found");
+        asm.Label("ofd_next");
+        asm.Inc(R(R9));
+        asm.Jmp("ofd_loop");
+        asm.Label("ofd_found");
+        asm.MovImm(R(EAX), 1);
+        asm.Ret();
+        asm.Label("ofd_none");
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+
+        // ---- fs_unlink: EAX = abs path → EAX = 0, or -1. Resolve the parent + entry, refuse a
+        // directory or an open file, free every block in the chain, then drop the dir entry. ----
+        asm.Label("fs_unlink");
+        asm.Call("fs_resolve_parent");           // EAX = parent dir block or -1; name in FsPathComponentBase
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("ul_fail");
+        SpillStore(asm, OsLayout.FsOpenDirBlock, EAX);   // parent dir block
+        Imm16(asm, ECX, OsLayout.FsPathComponentBase);
+        asm.Call("fs_dir_lookup");               // EAX = entry addr or -1 (EAX already = parent)
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("ul_fail");
+        asm.Mov(R(R8), R(EAX));                  // entry addr
+        asm.Load(R(R9), R(R8));                  // type
+        asm.MovImm(R(EBX), FsLayout.DirTypeFile);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jnz("ul_fail");                      // only regular files (directories are refused)
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EBX), FsLayout.DirEntryFirstBlock);
+        asm.Add(R(R9), R(EBX));
+        asm.Load(R(R9), R(R9));                  // firstBlock
+        SpillStore(asm, OsLayout.FsOpenFirst, R9);
+        asm.Mov(R(EAX), R(R9));
+        asm.Call("oft_find_first");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jnz("ul_fail");                      // the file is open → refuse
+        // free the whole block chain (read each block's next link before freeing it)
+        SpillLoad(asm, OsLayout.FsOpenFirst, R8);
+        SpillStore(asm, OsLayout.FsRwCurBlock, R8);
+        asm.Label("ul_free_loop");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("ul_free_done");                  // end of chain (-1)
+        asm.Call("fs_chain_next");               // EAX(block) → EAX = next
+        SpillStore(asm, OsLayout.FsRwCounter, EAX);
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_free_block");
+        SpillLoad(asm, OsLayout.FsRwCounter, EAX);
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Jmp("ul_free_loop");
+        asm.Label("ul_free_done");
+        SpillLoad(asm, OsLayout.FsOpenDirBlock, EAX);   // parent
+        Imm16(asm, ECX, OsLayout.FsPathComponentBase);
+        asm.Call("fs_dir_remove");               // clear the entry (name still in FsPathComponentBase)
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+        asm.Label("ul_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_mkdir_path: EAX = abs path → EAX = new dir block, or -1. ----
+        asm.Label("fs_mkdir_path");
+        asm.Call("fs_resolve_parent");           // EAX = parent or -1; name in FsPathComponentBase
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("mp_fail");
+        asm.Mov(R(EBX), R(EAX));                 // fs_mkdir wants EBX = parent dir
+        Imm16(asm, ECX, OsLayout.FsPathComponentBase);
+        asm.Call("fs_mkdir");                    // EAX = new dir block, or -1 (dup/full)
+        asm.Ret();
+        asm.Label("mp_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_readdir: EBX = dir block, ECX = index, EDX = out addr → EAX = entry type, or
+        // -1 past the last in-use entry. Copies the whole 64-byte dir entry to the out buffer
+        // (caller reads type/size/firstBlock/name at the DirEntry* offsets). ----
+        asm.Label("fs_readdir");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EBX);    // current dir block
+        SpillStore(asm, OsLayout.FsRwCounter, ECX);     // index countdown
+        SpillStore(asm, OsLayout.FsRwBufPtr, EDX);      // out buffer
+        asm.Label("rd_block");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("rd_end");                        // ran off the chain
+        asm.Call("cache_get");                   // EAX = block data addr
+        asm.Mov(R(R8), R(EAX));                  // R8 = block base (no cache calls in the entry loop)
+        asm.MovImm(R(R9), 0);                    // entry index i
+        asm.Label("rd_entry");
+        asm.MovImm(R(EBX), FsLayout.DirEntriesPerBlock);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jns("rd_next_block");
+        asm.Mov(R(R10), R(R9));
+        asm.MovImm(R(EBX), FsLayout.DirEntryBytes);
+        asm.Mul(R(R10), R(EBX));
+        asm.Add(R(R10), R(R8));                  // R10 = entry addr
+        asm.Load(R(R11), R(R10));                // type
+        asm.MovImm(R(EBX), FsLayout.DirTypeFree);
+        asm.Cmp(R(R11), R(EBX));
+        asm.Jz("rd_skip");                       // free slot: not counted
+        SpillLoad(asm, OsLayout.FsRwCounter, R12);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R12), R(EBX));
+        asm.Jz("rd_found");                      // countdown hit 0 → this entry
+        asm.Dec(R(R12));
+        SpillStore(asm, OsLayout.FsRwCounter, R12);
+        asm.Label("rd_skip");
+        asm.Inc(R(R9));
+        asm.Jmp("rd_entry");
+        asm.Label("rd_next_block");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Jmp("rd_block");
+        asm.Label("rd_found");
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R12);       // out
+        asm.MovImm(R(R13), 0);                   // byte offset j
+        asm.Label("rd_copy");
+        asm.MovImm(R(EBX), FsLayout.DirEntryBytes);
+        asm.Cmp(R(R13), R(EBX));
+        asm.Jns("rd_copy_done");
+        asm.Mov(R(R14), R(R10));
+        asm.Add(R(R14), R(R13));
+        asm.Load(R(R14), R(R14));                // word from the entry
+        asm.Mov(R(EBX), R(R12));
+        asm.Add(R(EBX), R(R13));
+        asm.Store(R(EBX), R(R14));               // → out buffer
+        asm.MovImm(R(EBX), 4);
+        asm.Add(R(R13), R(EBX));
+        asm.Jmp("rd_copy");
+        asm.Label("rd_copy_done");
+        asm.Load(R(EAX), R(R10));                // return the entry type
+        asm.Ret();
+        asm.Label("rd_end");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+
+        // ---- fs_resolve_dir: EAX = abs path → EAX = directory block, or -1. Like
+        // fs_path_resolve but returns the *directory's* first block and handles the root path
+        // ("/" or all-separators), which fs_path_resolve reports as -1. ----
+        asm.Label("fs_resolve_dir");
+        SpillStore(asm, OsLayout.FsOpenAbsPath, EAX);
+        asm.Call("fs_path_resolve");             // EAX = entry addr or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jns("rsd_entry");                    // resolved to a directory entry
+        // Not resolved: treat an all-separator path as the root directory.
+        SpillLoad(asm, OsLayout.FsOpenAbsPath, R8);
+        asm.Label("rsd_scan");
+        asm.Load(R(R9), R(R8));
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jz("rsd_root");                      // null terminator, only separators seen → root
+        asm.MovImm(R(EBX), OsLayout.FsPathSeparator);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jnz("rsd_fail");                     // a real component that did not resolve → fail
+        asm.MovImm(R(EBX), 4);
+        asm.Add(R(R8), R(EBX));
+        asm.Jmp("rsd_scan");
+        asm.Label("rsd_root");
+        asm.Call("fs_root_dir");                 // EAX = root dir block
+        asm.Ret();
+        asm.Label("rsd_entry");
+        asm.Mov(R(R8), R(EAX));                  // entry addr
+        asm.Load(R(R9), R(R8));                  // type
+        asm.MovImm(R(EBX), FsLayout.DirTypeDir);
+        asm.Cmp(R(R9), R(EBX));
+        asm.Jnz("rsd_fail");                     // not a directory
+        asm.Mov(R(R9), R(R8));
+        asm.MovImm(R(EBX), FsLayout.DirEntryFirstBlock);
+        asm.Add(R(R9), R(EBX));
+        asm.Load(R(EAX), R(R9));                 // dir block = entry.firstBlock
+        asm.Ret();
+        asm.Label("rsd_fail");
         asm.MovImm(R(EAX), 0);
         asm.Dec(R(EAX));
         asm.Ret();

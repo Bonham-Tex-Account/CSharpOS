@@ -17,6 +17,7 @@ sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
 | **FS open/close cores** (fs_open_core/close_core) | `FsOpenCloseTests` |
 | **FS byte read/write cores** (fs_read_core/write_core) | `FsReadWriteTests` |
 | **FS exec-by-path + boot auto-format + FsImage** (Inc 6) | `FsExecTests` |
+| **FS maintenance** (unlink/mkdir/readdir, FreeCount, single-open, pin) | `FsMaintTests` |
 | **FSYS syscall end-to-end** (through a live scheduler) | `FsSyscallTests` |
 | **FS write-back cache** (cache_* via `IvtCacheOp`) | `CacheManagerTests` |
 | **FBREAD/FBWRITE instructions** | `FileBlockInstructionTests` |
