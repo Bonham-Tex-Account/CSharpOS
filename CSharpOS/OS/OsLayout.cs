@@ -154,8 +154,53 @@ public static class OsLayout
     public const int CowPartnerBase = SwapScratchBase + PageSize;
     public const int CowPartnerRegionSize = MaxProcesses * 4;
 
+    // ---- filesystem RAM write-back cache (Increment 2) --------------------
+    // A fixed pool of RAM cache slots buffering the disk's file blocks: the ISA cache
+    // manager (OsRoutines) reads/writes file data here and only touches the disk on a miss,
+    // on eviction of a dirty slot, or on a periodic flush. Sized as a fraction of the disk's
+    // block count (≈ 1/20) — small on purpose so demos/tests exercise eviction. Placed after
+    // the COW table so every offset above is unchanged; only TotalSize grows.
+    //
+    // Header (3 words): a monotonic LRU clock the manager stamps slots with on each access;
+    // a periodic-flush countdown decremented once per context switch (the sim analog of a
+    // ~30 s timer — the only clean ISA clock, mirroring BoostTimer); and a scratch word the
+    // IvtCacheOp dispatcher parks a subroutine's return value in (RunOsRoutineSynchronously
+    // restores registers, so tests read the result from memory, not a register).
+    public const int CacheClockOffset      = CowPartnerBase + CowPartnerRegionSize;
+    public const int CacheFlushTimerOffset = CacheClockOffset + 4;
+    public const int CacheResultOffset     = CacheFlushTimerOffset + 4;
+    public const int CacheHeaderSize       = 12;
+
+    // Context-switch ticks between periodic flushes. Not literally 30 s — the simulation's
+    // periodic-write-back cadence, tunable like BoostInterval.
+    public const int CacheFlushInterval = 200;
+
+    // One slot per cached block. Slot fields (4-byte words then the block data):
+    //   valid  — 0 = empty (zero-init means the whole pool starts empty; no seeding needed)
+    //   block  — the file-block number this slot caches
+    //   dirty  — 1 = modified since load; written back on evict/flush (write-back)
+    //   pin    — pin count; a pinned slot is never chosen as an eviction victim
+    //   stamp  — LRU stamp (the manager writes the current clock on each access)
+    //   data   — the block's bytes (FileBlockSize)
+    public const int CacheSlotCount  = 13;   // ≈ Hardware.DefaultFileBlockCount / 20
+    public const int CacheValidField = 0;
+    public const int CacheBlockField = 4;
+    public const int CacheDirtyField = 8;
+    public const int CachePinField   = 12;
+    public const int CacheStampField = 16;
+    public const int CacheDataField  = 20;
+    public const int CacheSlotSize   = CacheDataField + Hardware.DefaultFileBlockSize; // 276
+    public const int CacheSlotTableBase = CacheClockOffset + CacheHeaderSize;
+    public const int CacheRegionSize    = CacheSlotCount * CacheSlotSize;
+
     // Total OS region size.
-    public const int TotalSize = CowPartnerBase + CowPartnerRegionSize;
+    public const int TotalSize = CacheSlotTableBase + CacheRegionSize;
+
+    // Absolute address of cache slot `i`.
+    public static int CacheSlotAddress(int i)
+    {
+        return CacheSlotTableBase + i * CacheSlotSize;
+    }
 
     public static int ProcessEntryAddress(int index)
     {

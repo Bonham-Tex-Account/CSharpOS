@@ -17,8 +17,8 @@
 `OsRoutines.BuildOsImage()` emits routines in this order, recording each start address:
 
 ```
-[IVT: 17 slots × 4 bytes = 68 bytes]
-[CodeBase = 68]
+[IVT: 18 slots × 4 bytes = 72 bytes]
+[CodeBase = 72]
 EmitContextSwitch    → IvtContextSwitch (slot 0)        OsRoutines.cs:124
 EmitSchedule         → IvtSchedule (slot 7)             OsRoutines.cs:208
 EmitBlock            → IvtBlockInput + IvtBlockOutput (slots 5 & 6, same address) :216
@@ -36,6 +36,7 @@ EmitExec             → IvtExec (slot 11)                OsRoutines.cs:1608
 EmitWait             → IvtWait (slot 12)                OsRoutines.cs:1091
 EmitSyscall          → IvtSyscall (slot 14)             OsRoutines.cs:1143
 EmitPageFault        → IvtPageFault (slot 15)           OsRoutines.cs:254
+EmitCacheOp          → IvtCacheOp (slot 17)             (dispatch → cache_* subs)
 EmitExitBody         → label "exit_body"                OsRoutines.cs:960
 EmitAllocSub         → label "alloc_sub" (CALL/RET)     OsRoutines.cs:1208
 EmitBuddyFree        → label "buddy_free_entry"         OsRoutines.cs:1721
@@ -45,8 +46,11 @@ EmitZeroSwapSlots    → label "zero_swap_slots" (CALL/RET) OsRoutines.cs:585
 EmitPairResolve      → label "pair_resolve" (CALL/RET)  OsRoutines.cs:627
 EmitResolveCow       → label "resolve_cow" (CALL/RET)   OsRoutines.cs:743
 EmitCowShare         → label "cow_share" (CALL/RET)     OsRoutines.cs:826
+EmitCacheSubroutines → labels "cache_find/get/dirty/write_through/pin/unpin/discard/flush" (CALL/RET)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
 ```
+
+*(Line numbers above predate the Inc 2 cache additions and have drifted; treat them as approximate.)*
 
 After assembly: writes IVT entries, pre-fills CowPartner table with -1 for all 8 slots.
 Guards: `OsLayout.CodeBase + code.Length > OsLayout.DataBase` → throws.
@@ -67,6 +71,12 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `pair_resolve` | EmitPairResolve :627 | EmitPageFault (COW write), resolve_cow | Resolve one COW page (page in R12): give both sharers private copies |
 | `resolve_cow` | EmitResolveCow :743 | IvtFork, exit_body, IvtExec | Loop all pages; call pair_resolve for each COW page; clear partnership |
 | `cow_share` | EmitCowShare :826 | IvtFork | Convert current process's DATA pages to COW (mark resident frames, re-encode PTEs) |
+| `cache_find` | EmitCacheSubroutines | cache_get/dirty/wt/pin/unpin/discard | Scan cache slots for a resident block; EAX=block → EAX=slot base or -1 |
+| `cache_get` | EmitCacheSubroutines | IvtCacheOp, future FS routines | Ensure block resident (hit→stamp; miss→evict LRU, write back if dirty, FBREAD); EAX=block → EAX=data addr or -1 |
+| `cache_dirty`/`cache_write_through` | EmitCacheSubroutines | IvtCacheOp | Mark resident block dirty (lazy) / FBWRITE now + clean |
+| `cache_pin`/`cache_unpin` | EmitCacheSubroutines | IvtCacheOp | Bump / floor-decrement a slot's pin count (pinned = never evicted) |
+| `cache_discard` | EmitCacheSubroutines | IvtCacheOp | Drop a block with no write-back (clear valid+dirty+pin) |
+| `cache_flush` | EmitCacheSubroutines | IvtCacheOp, ContextSwitch periodic hook | FBWRITE every dirty unpinned valid slot, clear dirty |
 | `resume_mlfq` | EmitResumeMlfq :1941 | Every scheduling tail | Outer loop P=0..3; inner round-robin from ECX+1; first Ready process at priority P wins |
 
 ---

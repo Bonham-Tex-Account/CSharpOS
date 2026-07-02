@@ -78,6 +78,11 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, OsLayout.BuddyMinBlockOffset, minBlock);
         WriteWord(hw, OsLayout.BuddyLevelsOffset, levels);
 
+        // Filesystem cache: the LRU clock and every slot's valid flag start zero (empty
+        // pool) from the zeroed image; only the periodic-flush countdown needs a nonzero
+        // seed so the first flush lands a full interval out rather than on tick one.
+        WriteWord(hw, OsLayout.CacheFlushTimerOffset, OsLayout.CacheFlushInterval);
+
         // Zero the bitmap then set the root node free (bit 0 of the first word).
         for (int w = 0; w < OsLayout.BuddyBitmapWords; w++)
         {
