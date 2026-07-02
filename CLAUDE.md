@@ -118,7 +118,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 
 ## IVT Slot Table
 
-`IvtSlotCount=20`, `IvtSize=80`, `CodeBase=80`
+`IvtSlotCount=19`, `IvtSize=76`, `CodeBase=76` (was 20/80/80 before Inc 6 rectification removed dead IvtDiskLoad; slots 9–18 shifted down one)
 
 | Slot | Constant | C# addr field | Emit Method | Purpose |
 |------|----------|--------------|-------------|---------|
@@ -130,18 +130,19 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 5 | IvtBlockInput | — | EmitBlock | Block current process on input/string/key (shared) |
 | 6 | IvtBlockOutput | — | EmitBlock | Block current process on output |
 | 7 | IvtSchedule | — | EmitSchedule | Pick next Ready process → resume_mlfq |
-| 8 | IvtAllocate | — | EmitBuddyAlloc | Buddy-alloc for staged entry (EAX=entry addr) |
-| 9 | IvtDiskLoad | — | EmitDiskLoad | DREAD program slot→RAM for staged entry |
-| 10 | IvtFork | — | EmitFork | Duplicate running process (COW data pages) |
-| 11 | IvtExec | — | EmitExec | Replace image; EAX=slot; resolve_cow+free+realloc |
-| 12 | IvtWait | — | EmitWait | Block until child PID terminates; EAX=pid |
-| 13 | IvtSpawn | — | EmitSpawn | Alloc+DREAD+seed regs (boot path) |
-| 14 | IvtSyscall | — | EmitSyscall | Shared IN/OUT/INK/INPOLL handler (preemptible, Kernel mode) |
-| 15 | IvtPageFault | — | EmitPageFault | Demand fault-in + COW-write resolve; EAX=page |
-| 16 | IvtWakeKey | — | EmitWakeEntry(KeyInput) | Wake first process waiting for a raw keypress |
-| 17 | IvtCacheOp | — | EmitCacheOp | FS buffer-cache control: EAX=op, EBX=block → result in CacheResult |
-| 18 | IvtFsOp | — | EmitFsOp | FS block/dir/file layer: EAX=op, args in EBX/ECX/EDX/ESI → result in FsResult |
-| 19 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
+| 8 | IvtAllocate | — | EmitBuddyAlloc | Buddy-alloc for staged entry (EAX=entry addr); allocator test entry point |
+| 9 | IvtFork | — | EmitFork | Duplicate running process (COW data pages) |
+| 10 | IvtExec | — | EmitExec | Replace image; EAX=slot; resolve_cow+free+realloc |
+| 11 | IvtWait | — | EmitWait | Block until child PID terminates; EAX=pid |
+| 12 | IvtSpawn | — | EmitSpawn | Alloc+DREAD+seed regs (boot path) |
+| 13 | IvtSyscall | — | EmitSyscall | Shared IN/OUT/INK/INPOLL handler (preemptible, Kernel mode) |
+| 14 | IvtPageFault | — | EmitPageFault | Demand fault-in + COW-write resolve; EAX=page |
+| 15 | IvtWakeKey | — | EmitWakeEntry(KeyInput) | Wake first process waiting for a raw keypress |
+| 16 | IvtCacheOp | — | EmitCacheOp | FS buffer-cache control: EAX=op, EBX=block → result in CacheResult |
+| 17 | IvtFsOp | — | EmitFsOp | FS block/dir/file layer: EAX=op, args in EBX/ECX/EDX/ESI → result in FsResult |
+| 18 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
+
+**Note:** SETFOCUS (0x38) has no IVT slot / ISA routine — it's intentionally C#-only (`Hardware.SetFocus`), because "focused process" is a hardware-side field (`activeProcess`) with no OS-memory representation; it's a device/foreground concern, not an OS service.
 
 Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for KeyInput blocking. IvtSyscall is jumped-to directly by `EnterKernel`, not dispatched (so interrupts stay enabled). IvtCacheOp op selectors (EAX): 0=Get, 1=Dirty, 2=WriteThrough, 3=Pin, 4=Unpin, 5=Discard, 6=Flush (see `Hardware.CacheOp*`). IvtFsOp op selectors (EAX): 0=Format, 1=AllocBlock, 2=FreeBlock, 3=ChainNext, 4=ChainSetNext, 5=RootDir, 6=Hash, 7=Lookup(EBX=dir,ECX=name), 8=Insert(EBX=dir,ECX=name,EDX=type,ESI=first), 9=Remove, 10=Mkdir(EBX=parent,ECX=name), 11=PathResolve(EBX=path), 12=Open(EBX=absPath,ECX=flags,EDX=proc), 13=Close(EBX=fd,ECX=proc), 14=Read(EBX=fd,ECX=absBuf,EDX=count,ESI=proc), 15=Write(EBX=fd,ECX=absBuf,EDX=count,ESI=proc) (see `Hardware.FsOp*`). FSYS syscall numbers (EAX): 0=Open(EBX=pathPtr,ECX=flags), 1=Read(EBX=fd,ECX=bufPtr,EDX=count), 2=Write(EBX=fd,ECX=bufPtr,EDX=count), 3=Close(EBX=fd), 4=Exec(EBX=pathPtr) — replace the running image with the FS file, no return on success/ -1 on failure (Inc 6); flag `FsysCreateFlag=1`. IvtFsOp Open/Close/Read/Write take an ABSOLUTE path/buffer + explicit proc index; FSYS translates the user pointer (ProgramAddress+ptr) and uses the current process.
 
@@ -452,6 +453,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-02 | Filesystem Inc 6: exec-by-path (FSYS 4 → fs_exec_core, EmitFsExecSubroutine) + boot auto-format (OnBooted hook in BasicOS, magic-guarded) + FsImage.WriteFile host helper + FS wired into program launch. DataBase 16384→20480 | ~55K (inline) | 4 end-to-end exec tests (603 total). Long debug hunt on a "block 900" crash: root cause was LoadField clobbering EAX while fs_exec_core held the entry addr there (memory[8]=IVT[2]≈900). Fixed by holding the entry addr in R12. Learned LoadField/StoreFieldReg clobber EAX+EBP. |
 | 2026-07-02 | Test-suite navigation metadata: new `OSTests/CLAUDE.md` (subsystem→file jump table for 50 files, shared `Test` helper reference, test conventions) to cut the cost of finding a test case; root CLAUDE.md folder map updated | ~12K (inline) | Extracted class summaries + sample test names via scripted grep instead of reading 50 files. Then delegated README/docs refresh to the docs-sync-writer agent. |
 | 2026-07-02 | Docs refresh (README.md + docs/ISA.md + docs/OS-Architecture.md) for the whole FS subsystem (Inc 1–6), string/key I/O, two-level privilege, paging | 214K (agent) | docs-sync-writer agent; verified numbers against OsLayout.cs. Caught that FSYS dispatches atomically (like FORK), not via EnterKernel. Flagged: no FS demo in the console yet; Mkdir/Readdir/Unlink have ISA routines but no FSYS number. |
+| 2026-07-03 | Rectification Phase 0 (hygiene): removed dead `IvtDiskLoad` (slot 9) + renumbered slots 9–18 (IvtSlotCount 20→19, CodeBase 80→76); deleted empty `GeneralFunctionality.cs`; untracked `claude-memory/`; fixed OS/CLAUDE.md LoadProcess flow (IvtSpawn not Allocate→DiskLoad); documented SETFOCUS as C#-only | ~15K (inline) | Plan `keen-churning-manatee.md` phase 0/6. All refs by named constant so renumber was mechanical; 1 test (OsSeedDataTests) referenced IvtDiskLoad→swapped to IvtSpawn. 602 tests (was 603, −1 deleted placeholder). |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

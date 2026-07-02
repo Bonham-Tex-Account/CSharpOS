@@ -7,7 +7,7 @@
 | File | Holds (Grep the `// ===== ` marker to jump) |
 |------|------|
 | BasicOS.cs | Concrete OS; `(TextWriter)` ctor for plugin loader; CollectTraps via reflection |
-| OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn, DiskLoad), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
+| OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
 | OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) |
 | OsRoutines.Cache.cs | EmitCacheOp + EmitCacheSubroutines (cache_find/get/dirty/write_through/pin/unpin/discard/flush) |
 | OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) + EmitFsExecSubroutine (fs_exec_core) |
@@ -36,15 +36,14 @@ EmitWakeBody         → (shared tail, no IVT entry)      OsRoutines.cs:1903
 EmitHalt             → IvtHalt (slot 1)                 OsRoutines.cs:229
 EmitInvalidInstruction→ IvtInvalidInstruction (slot 2)  OsRoutines.cs:244
 EmitBuddyAlloc       → IvtAllocate (slot 8)             OsRoutines.cs:1183
-EmitDiskLoad         → IvtDiskLoad (slot 9)             OsRoutines.cs:1352
-EmitSpawn            → IvtSpawn (slot 13)               OsRoutines.cs:1368
-EmitFork             → IvtFork (slot 10)                OsRoutines.cs:1424
-EmitExec             → IvtExec (slot 11)                OsRoutines.cs:1608
-EmitWait             → IvtWait (slot 12)                OsRoutines.cs:1091
-EmitSyscall          → IvtSyscall (slot 14)             OsRoutines.cs:1143
-EmitPageFault        → IvtPageFault (slot 15)           OsRoutines.cs:254
-EmitCacheOp          → IvtCacheOp (slot 17)             (dispatch → cache_* subs)
-EmitFsOp             → IvtFsOp (slot 18)                (dispatch → fs_* subs)
+EmitSpawn            → IvtSpawn (slot 12)               OsRoutines.cs:1368
+EmitFork             → IvtFork (slot 9)                 OsRoutines.cs:1424
+EmitExec             → IvtExec (slot 10)                OsRoutines.cs:1608
+EmitWait             → IvtWait (slot 11)                OsRoutines.cs:1091
+EmitSyscall          → IvtSyscall (slot 13)             OsRoutines.cs:1143
+EmitPageFault        → IvtPageFault (slot 14)           OsRoutines.cs:254
+EmitCacheOp          → IvtCacheOp (slot 16)             (dispatch → cache_* subs)
+EmitFsOp             → IvtFsOp (slot 17)                (dispatch → fs_* subs)
 EmitExitBody         → label "exit_body"                OsRoutines.cs:960
 EmitAllocSub         → label "alloc_sub" (CALL/RET)     OsRoutines.cs:1208
 EmitBuddyFree        → label "buddy_free_entry"         OsRoutines.cs:1721
@@ -58,7 +57,7 @@ EmitCacheSubroutines → labels "cache_find/get/dirty/write_through/pin/unpin/di
 EmitFsSubroutines    → labels "fs_format/alloc_block/free_block/chain_next/chain_set_next" (CALL/RET)
 EmitFsDirSubroutines → labels "fs_hash/root_dir/dir_lookup/dir_insert/dir_remove" (CALL/RET)
 EmitFsPathSubroutines→ labels "fs_extract_component/path_resolve/mkdir" (CALL/RET)
-EmitFsSyscall        → IvtFsSyscall (slot 19)           (FSYS wrapper; deliver via SAVEREGS/OSRET)
+EmitFsSyscall        → IvtFsSyscall (slot 18)           (FSYS wrapper; deliver via SAVEREGS/OSRET)
 EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
 EmitFsRwSubroutines  → labels "oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core" (CALL/RET)
 EmitFsExecSubroutine → label "fs_exec_core" (CALL; resumes on success)  (Inc 6)
@@ -198,9 +197,10 @@ All defined in OsRoutines.cs; the helpers group starts at :2007.
 ```csharp
 public class BasicOS : OperatingSystem
 {
-    public override int OsMemorySize => OsLayout.TotalSize;          // 17584
+    public override int OsMemorySize => OsLayout.TotalSize;          // 29880 (DataBase 20480 + 9400)
     public override byte[] BuildOsImage(int osMemoryBase) => OsRoutines.BuildOsImage();
     public BasicOS(TextWriter log) : base(CollectTraps(), log) { }
+    protected override void OnBooted(Hardware hw) { /* magic-guarded FS auto-format */ }
     private static List<Trap> CollectTraps() { /* reflection */ }
 }
 ```
