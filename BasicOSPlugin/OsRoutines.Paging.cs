@@ -25,12 +25,6 @@ public static partial class OsRoutines
     // R14 = the faulting page's swap slot (or -1 when RAM-home), R15 = the chosen frame.
     private static void EmitPageFault(Assembler asm)
     {
-        // PageSize, the page-table stride, and the PTE size are powers of two; shift by
-        // their log2 (computed at emit time) instead of multiplying.
-        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
-        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
-        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
-
         asm.Mov(R(R12), R(EAX));                    // R12 = faulting page (helpers clobber EAX)
 
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
@@ -40,97 +34,143 @@ public static partial class OsRoutines
 
         // Read the faulting PTE. A RESIDENT entry (>= 0) means the MMU re-raised the fault
         // for a write to a copy-on-write frame -> resolve the page privately and resume.
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
         EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift); // R9 = &PTE[cur][page]
         asm.Load(R(R8), R(R9));                       // R8 = pte
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R8), R(EAX));
         asm.Jns("pf_cow_write");                      // pte >= 0: resident COW write fault
 
-        // Non-resident demand fault. Decode the backing into R14:
+        // Non-resident demand fault: fault the page in (page_in — Phase 3 rectification
+        // extracted the frame claim/evict/fill/map body into its own CALL/RET subroutine so
+        // it is reusable outside this async, MMU-triggered path too).
+        SetupPrivilegedStack(asm);
+        asm.Call("page_in");                          // page (R12) already set
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                      // resume_mlfq anchor = current index
+        asm.Jmp("resume_mlfq");
+
+        // --- resident copy-on-write write fault: resolve the page privately, then resume ---
+        // The MMU re-raised the fault because the running process wrote a read-only COW
+        // frame. pair_resolve gives both sharers private copies and makes this process's
+        // frame writable; the faulting instruction then re-runs and the write commits.
+        asm.Label("pf_cow_write");
+        SetupPrivilegedStack(asm);
+        asm.Call("pair_resolve");                     // resolves current process's page R12
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                     // resume_mlfq anchor = current index
+        asm.Jmp("resume_mlfq");
+    }
+
+    // ===== EmitPageIn (page_in subroutine) ====================================
+    // page_in: ensures virtual page R12 of the CURRENT process is resident, mapping it into a
+    // frame from the shared pool (claiming a free one, or evicting the LRU victim with
+    // write-back if dirty). Extracted from EmitPageFault's original demand-fault body (Phase 3
+    // rectification) so it is reusable as a plain CALL/RET worker — from the fault handler
+    // itself, and from ensure_user_page (proactive residency for kernel-mediated user-buffer
+    // access via OUTS/INS/FSYS). Assumes the caller has already set up a valid stack
+    // (SetupPrivilegedStack) and that page R12 is legitimately non-resident
+    // (pte <= NonResidentPage) — callers branch on residency/mapping BEFORE calling this.
+    //   Input: R12 = page. Clobbers essentially every scratch register. Ends with Ret — does
+    //   not touch scheduling (unlike the original inline body, which fell into resume_mlfq).
+    private static void EmitPageIn(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
+
+        asm.Label("page_in");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R13), R(EAX));                   // R13 = current index
+
+        // Decode the faulting PTE's backing into R14:
         //   COW page (pte <= -SwapCowBias): R14 = shared swap slot (DREAD read-only).
         //   private swap page (pte <= -3):  R14 = own swap slot.
         //   RAM-home page (-2):             R14 = -1.
+        EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift);
+        asm.Load(R(R8), R(R9));                       // R8 = pte
         asm.MovImm16(R(EAX), OsLayout.SwapCowBias);
         asm.MovImm(R(EBX), 0);
         asm.Sub(R(EBX), R(EAX));                      // EBX = -SwapCowBias
         asm.Cmp(R(R8), R(EBX));
-        asm.Jns("pf_src_notcow");                     // pte >= -bias: not COW
+        asm.Jns("pgi_src_notcow");                    // pte >= -bias: not COW
         asm.MovImm(R(EAX), 0);
         asm.Sub(R(EAX), R(R8));
         asm.MovImm16(R(EBX), OsLayout.SwapCowBias);
         asm.Sub(R(EAX), R(EBX));                      // EAX = -pte - SwapCowBias = shared slot
         asm.Mov(R(R14), R(EAX));
-        asm.Jmp("pf_src_done");
-        asm.Label("pf_src_notcow");
+        asm.Jmp("pgi_src_done");
+        asm.Label("pgi_src_notcow");
         asm.Mov(R(R11), R(R8));
         asm.MovImm(R(EAX), OsLayout.SwapPteBias);
         asm.Add(R(R11), R(EAX));                      // R11 = pte + bias
         asm.MovImm(R(EAX), 1);
         asm.Cmp(R(R11), R(EAX));
-        asm.Js("pf_src_swap");                        // pte + bias < 1  =>  swap-backed
+        asm.Js("pgi_src_swap");                       // pte + bias < 1  =>  swap-backed
         asm.MovImm(R(R14), 0);
         asm.Dec(R(R14));                              // R14 = -1  (RAM-home marker)
-        asm.Jmp("pf_src_done");
-        asm.Label("pf_src_swap");
+        asm.Jmp("pgi_src_done");
+        asm.Label("pgi_src_swap");
         asm.MovImm(R(R14), 0);
         asm.Sub(R(R14), R(R11));                      // R14 = -(pte + bias) = swap slot
-        asm.Label("pf_src_done");
+        asm.Label("pgi_src_done");
 
         // --- find a free frame (Occupied == 0) ---
         asm.MovImm(R(ESI), 0);                       // ESI = f
-        asm.Label("pf_free");
+        asm.Label("pgi_free");
         asm.MovImm(R(EAX), OsLayout.FrameCount);
         asm.Cmp(R(ESI), R(EAX));
-        asm.Jns("pf_lru");                           // no free frame -> evict LRU
-        FrameEntryAddress(asm, ESI, R9);             // R9 = &frame[f]
+        asm.Jns("pgi_lru");                           // no free frame -> evict LRU
+        FrameEntryAddress(asm, ESI, R9);              // R9 = &frame[f]
         LoadField(asm, R9, OsLayout.FrameOccupiedField, R10);
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R10), R(EAX));
-        asm.Jz("pf_take_free");                      // Occupied == 0
+        asm.Jz("pgi_take_free");                      // Occupied == 0
         asm.Inc(R(ESI));
-        asm.Jmp("pf_free");
+        asm.Jmp("pgi_free");
 
-        asm.Label("pf_take_free");
-        asm.Mov(R(R15), R(ESI));                     // frame = the free frame
-        asm.Jmp("pf_fill");                          // empty frame: no eviction needed
+        asm.Label("pgi_take_free");
+        asm.Mov(R(R15), R(ESI));                      // frame = the free frame
+        asm.Jmp("pgi_fill");                          // empty frame: no eviction needed
 
         // --- pool full: choose the LRU victim (smallest LastUse stamp) ---
-        asm.Label("pf_lru");
-        asm.MovImm(R(R15), 0);                       // victim = frame 0
+        asm.Label("pgi_lru");
+        asm.MovImm(R(R15), 0);                        // victim = frame 0
         FrameEntryAddress(asm, R15, R9);
         LoadField(asm, R9, OsLayout.FrameLastUseField, EDX); // EDX = minUse
-        asm.MovImm(R(ESI), 1);                       // scan from frame 1
-        asm.Label("pf_lru_scan");
+        asm.MovImm(R(ESI), 1);                        // scan from frame 1
+        asm.Label("pgi_lru_scan");
         asm.MovImm(R(EAX), OsLayout.FrameCount);
         asm.Cmp(R(ESI), R(EAX));
-        asm.Jns("pf_evict");                         // scanned all frames
+        asm.Jns("pgi_evict");                         // scanned all frames
         FrameEntryAddress(asm, ESI, R9);
         LoadField(asm, R9, OsLayout.FrameLastUseField, R10);
         asm.Cmp(R(R10), R(EDX));
-        asm.Jns("pf_lru_next");                      // R10 >= minUse: not older
+        asm.Jns("pgi_lru_next");                      // R10 >= minUse: not older
         asm.Mov(R(EDX), R(R10));                      // new minimum
         asm.Mov(R(R15), R(ESI));                      // new victim
-        asm.Label("pf_lru_next");
+        asm.Label("pgi_lru_next");
         asm.Inc(R(ESI));
-        asm.Jmp("pf_lru_scan");
+        asm.Jmp("pgi_lru_scan");
 
         // --- evict the victim frame R15 (it is occupied); branch on its backing ---
-        asm.Label("pf_evict");
-        FrameEntryAddress(asm, R15, R9);             // R9 = &frame[victim]
+        asm.Label("pgi_evict");
+        FrameEntryAddress(asm, R15, R9);              // R9 = &frame[victim]
         LoadField(asm, R9, OsLayout.FrameSwapField, R8); // R8 = victim swap slot (-1 if RAM-home)
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R8), R(EAX));
-        asm.Js("pf_evict_ram");                      // R8 < 0: RAM-home victim
+        asm.Js("pgi_evict_ram");                      // R8 < 0: RAM-home victim
 
         // -- swap-backed victim: DWRITE the frame back to its swap slot if dirty --
         LoadField(asm, R9, OsLayout.FrameDirtyField, R10);
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R10), R(EAX));
-        asm.Jz("pf_evict_swap_unmap");               // clean: drop without write-back
-        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (src)
-        asm.MovImm16(R(R10), OsLayout.PageSize);     // R10 = length
-        asm.DWrite(R(R8), R(R11), R(R10));           // swap slot <- frame
-        asm.Label("pf_evict_swap_unmap");
+        asm.Jz("pgi_evict_swap_unmap");               // clean: drop without write-back
+        FrameBaseAddress(asm, R15, R11, pageShift);   // R11 = frame base (src)
+        asm.MovImm16(R(R10), OsLayout.PageSize);      // R10 = length
+        asm.DWrite(R(R8), R(R11), R(R10));            // swap slot <- frame
+        asm.Label("pgi_evict_swap_unmap");
         // owner PTE := the non-resident encoding for this slot, preserving COW: a COW victim
         // goes back to CowPte (still shared), a private victim to SwapPte.
         FrameEntryAddress(asm, R15, R9);
@@ -141,30 +181,30 @@ public static partial class OsRoutines
         EmitPteAddress(asm, ESI, EDI, R11, EDX, tableStrideShift, pteShift); // R11 = &PTE
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(ECX), R(EAX));
-        asm.Jz("pf_eu_swapbias");
+        asm.Jz("pgi_eu_swapbias");
         asm.MovImm16(R(R10), OsLayout.SwapCowBias);
-        asm.Jmp("pf_eu_havebias");
-        asm.Label("pf_eu_swapbias");
+        asm.Jmp("pgi_eu_havebias");
+        asm.Label("pgi_eu_swapbias");
         asm.MovImm(R(R10), OsLayout.SwapPteBias);
-        asm.Label("pf_eu_havebias");
+        asm.Label("pgi_eu_havebias");
         asm.Mov(R(EAX), R(R8));
         asm.Add(R(EAX), R(R10));                      // EAX = slot + bias
         asm.MovImm(R(R10), 0);
         asm.Sub(R(R10), R(EAX));                      // R10 = -(slot + bias)
         asm.Store(R(R11), R(R10));
-        asm.Jmp("pf_fill");
+        asm.Jmp("pgi_fill");
 
         // -- RAM-home victim: copy the frame back to its block home if dirty --
-        asm.Label("pf_evict_ram");
+        asm.Label("pgi_evict_ram");
         LoadField(asm, R9, OsLayout.FrameDirtyField, R10);
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R10), R(EAX));
-        asm.Jz("pf_evict_ram_unmap");                // clean: drop without write-back
-        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (src)
+        asm.Jz("pgi_evict_ram_unmap");                // clean: drop without write-back
+        FrameBaseAddress(asm, R15, R11, pageShift);   // R11 = frame base (src)
         FrameEntryAddress(asm, R15, R9);
         LoadField(asm, R9, OsLayout.FrameHomeField, R8);  // R8 = home (dst)
-        EmitPageCopy(asm, R11, R8, "pf_wbr", R10);   // frame -> home
-        asm.Label("pf_evict_ram_unmap");
+        EmitPageCopy(asm, R11, R8, "pgi_wbr", R10);   // frame -> home
+        asm.Label("pgi_evict_ram_unmap");
         FrameEntryAddress(asm, R15, R9);
         LoadField(asm, R9, OsLayout.FrameOwnerProcField, ESI); // ESI = oldProc
         LoadField(asm, R9, OsLayout.FrameOwnerPageField, EDI); // EDI = oldPage
@@ -173,18 +213,18 @@ public static partial class OsRoutines
         asm.Dec(R(EAX));
         asm.Dec(R(EAX));                              // EAX = NonResidentPage (-2)
         asm.Store(R(R11), R(EAX));
-        asm.Jmp("pf_fill");
+        asm.Jmp("pgi_fill");
 
         // --- fill frame R15 from the faulting page's backing (DREAD for swap, copy for RAM) ---
-        asm.Label("pf_fill");
+        asm.Label("pgi_fill");
         asm.MovImm(R(EAX), 0);
         asm.Cmp(R(R14), R(EAX));
-        asm.Js("pf_fill_ram");                       // R14 < 0: RAM-home
+        asm.Js("pgi_fill_ram");                       // R14 < 0: RAM-home
 
         // -- swap fill: DREAD the swap slot into the frame --
-        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (dst)
-        asm.DRead(R(R11), R(R14), R(ECX));           // frame <- swap slot (ECX = length, ignored)
-        FrameEntryAddress(asm, R15, R9);             // record the occupant (swap-backed)
+        FrameBaseAddress(asm, R15, R11, pageShift);   // R11 = frame base (dst)
+        asm.DRead(R(R11), R(R14), R(ECX));            // frame <- swap slot (ECX = length, ignored)
+        FrameEntryAddress(asm, R15, R9);              // record the occupant (swap-backed)
         StoreFieldImm(asm, R9, OsLayout.FrameOccupiedField, 1);
         StoreFieldReg(asm, R9, OsLayout.FrameOwnerProcField, R13);
         StoreFieldReg(asm, R9, OsLayout.FrameOwnerPageField, R12);
@@ -200,26 +240,26 @@ public static partial class OsRoutines
         asm.MovImm(R(R10), 0);
         asm.Sub(R(R10), R(EBX));                      // R10 = -SwapCowBias
         asm.Cmp(R(EAX), R(R10));
-        asm.Jns("pf_rec_notcow");                     // pte >= -bias: not COW
+        asm.Jns("pgi_rec_notcow");                    // pte >= -bias: not COW
         FrameEntryAddress(asm, R15, R9);
         StoreFieldImm(asm, R9, OsLayout.FrameCowField, 1);
-        asm.Jmp("pf_map");
-        asm.Label("pf_rec_notcow");
+        asm.Jmp("pgi_map");
+        asm.Label("pgi_rec_notcow");
         FrameEntryAddress(asm, R15, R9);
         StoreFieldImm(asm, R9, OsLayout.FrameCowField, 0);
-        asm.Jmp("pf_map");
+        asm.Jmp("pgi_map");
 
         // -- RAM fill: copy the page's block home into the frame --
-        asm.Label("pf_fill_ram");
-        EntryAddress(asm, R13, EBX);                 // EBX = entry
+        asm.Label("pgi_fill_ram");
+        EntryAddress(asm, R13, EBX);                  // EBX = entry
         LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R8); // R8 = ProgramAddress
         asm.Mov(R(R10), R(R12));
         asm.MovImm(R(EAX), pageShift);
         asm.Shl(R(R10), R(EAX));
         asm.Add(R(R8), R(R10));                       // R8 = home = ProgramAddress + page*PageSize
-        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base (dst)
-        EmitPageCopy(asm, R8, R11, "pf_flr", R10);   // home -> frame
-        FrameEntryAddress(asm, R15, R9);             // record the occupant (RAM-home)
+        FrameBaseAddress(asm, R15, R11, pageShift);   // R11 = frame base (dst)
+        EmitPageCopy(asm, R8, R11, "pgi_flr", R10);   // home -> frame
+        FrameEntryAddress(asm, R15, R9);              // record the occupant (RAM-home)
         StoreFieldImm(asm, R9, OsLayout.FrameOccupiedField, 1);
         StoreFieldReg(asm, R9, OsLayout.FrameOwnerProcField, R13);
         StoreFieldReg(asm, R9, OsLayout.FrameOwnerPageField, R12);
@@ -230,24 +270,152 @@ public static partial class OsRoutines
         StoreFieldImm(asm, R9, OsLayout.FrameCowField, 0); // RAM-home pages are never COW
 
         // --- map the faulting page resident -> the frame base ---
-        asm.Label("pf_map");
+        asm.Label("pgi_map");
         EmitPteAddress(asm, R13, R12, R10, EDX, tableStrideShift, pteShift); // R10 = &PTE[cur][page]
-        FrameBaseAddress(asm, R15, R11, pageShift);  // R11 = frame base
+        FrameBaseAddress(asm, R15, R11, pageShift);   // R11 = frame base
         asm.Store(R(R10), R(R11));                    // PTE := frame base (now resident)
+        asm.Ret();
+    }
 
-        asm.Mov(R(ECX), R(R13));                      // resume_mlfq anchor = current index
-        asm.Jmp("resume_mlfq");
+    // ===== EmitEnsureUserPage (ensure_user_page subroutine) ===================
+    // ensure_user_page: ensures virtual page R12 of the CURRENT process is safely accessible
+    // for the requested access type (R11 = isWrite, 0/1) — the general-purpose entry point for
+    // kernel-mediated user-buffer access (Phase 3 rectification: OUTS/INS via IvtEnsureUserPage,
+    // and the FSYS read/write wrapper via user_word_addr). Calls page_in if the page is
+    // legitimately non-resident, then resolves a copy-on-write share via pair_resolve if the
+    // (now-resident) page is COW and the access is a write. Fails (EAX=-1) if the page is
+    // outside the process's mapped extent (UnmappedPage) — the caller must treat that as a bad
+    // pointer, not corrupt/kill anything (softer than a direct user-mode LOAD/STORE fault; see
+    // root CLAUDE.md for why this scope was kept narrower than a full protection fault here).
+    // Assumes the caller has already set up a valid stack.
+    //   Input: R12 = page, R11 = isWrite (0/1). Output: EAX = 0 (ok) or -1 (unmapped).
+    private static void EmitEnsureUserPage(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
 
-        // --- resident copy-on-write write fault: resolve the page privately, then resume ---
-        // The MMU re-raised the fault because the running process wrote a read-only COW
-        // frame. pair_resolve gives both sharers private copies and makes this process's
-        // frame writable; the faulting instruction then re-runs and the write commits.
-        asm.Label("pf_cow_write");
-        SetupPrivilegedStack(asm);
-        asm.Call("pair_resolve");                     // resolves current process's page R12
+        asm.Label("ensure_user_page");
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
-        asm.Load(R(ECX), R(EAX));                     // resume_mlfq anchor = current index
-        asm.Jmp("resume_mlfq");
+        asm.Load(R(R13), R(EAX));
+        EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift);
+        asm.Load(R(R8), R(R9));
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));                              // EAX = UnmappedPage (-1)
+        asm.Cmp(R(R8), R(EAX));
+        asm.Jz("eup_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Jns("eup_checkwrite");                    // already resident
+        // page_in clobbers R11 (it uses it as scratch internally), so spill isWrite across the
+        // call and reload it — otherwise the write-check below would read garbage.
+        SpillStore(asm, OsLayout.EnsureUserPageIsWrite, R11);
+        asm.Call("page_in");                          // non-resident: fault it in (page R12 set)
+        SpillLoad(asm, OsLayout.EnsureUserPageIsWrite, R11);
+
+        asm.Label("eup_checkwrite");
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R11), R(EAX));
+        asm.Jz("eup_ok");                              // read access: residency alone is enough
+        // Write access: resolve COW if the (now certainly resident) page is shared.
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R13), R(EAX));
+        EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift);
+        asm.Load(R(R8), R(R9));                        // R8 = pte (resident, >= 0)
+        asm.Mov(R(R10), R(R8));
+        asm.MovImm16(R(EAX), OsLayout.FramePoolBase);
+        asm.Sub(R(R10), R(EAX));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shr(R(R10), R(EAX));                       // R10 = frame index
+        FrameEntryAddress(asm, R10, EBX);
+        LoadField(asm, EBX, OsLayout.FrameCowField, EAX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("eup_ok");                               // not COW: already writable
+        asm.Call("pair_resolve");                        // page (R12) unchanged
+        asm.Label("eup_ok");
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+        asm.Label("eup_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
+    }
+
+    // ===== EmitEnsureUserPageOp ================================================
+    // IvtEnsureUserPage: C#-dispatched wrapper (via RunOsRoutineSynchronously only — never
+    // reached from other ISA code, which calls ensure_user_page directly via CALL/RET) around
+    // ensure_user_page, used by Hardware.UserToPhysical. EAX = page (the dispatch argument);
+    // isWrite is read from OsLayout.EnsureUserPageIsWrite (the C# caller writes it first, since
+    // DispatchOsRoutine only carries one EAX argument). Result parked in EnsureUserPageResult.
+    private static void EmitEnsureUserPageOp(Assembler asm)
+    {
+        asm.Label("ensure_user_page_op");
+        asm.Mov(R(R12), R(EAX));                       // R12 = page
+        SetupPrivilegedStack(asm);
+        Imm16(asm, EBP, OsLayout.EnsureUserPageIsWrite);
+        asm.Load(R(R11), R(EBP));                       // R11 = isWrite
+        asm.Call("ensure_user_page");
+        asm.Mov(R(EBX), R(EAX));                        // stash result (Imm16 below clobbers EBP)
+        Imm16(asm, EBP, OsLayout.EnsureUserPageResult);
+        asm.Store(R(EBP), R(EBX));
+        asm.MovImm(R(EAX), User);
+        asm.OsRet(R(EAX));
+    }
+
+    // ===== EmitUserWordAddr (user_word_addr subroutine) =======================
+    // user_word_addr: translates ONE virtual word address (must be word-aligned) of the CURRENT
+    // process through its page table, faulting/COW-resolving via ensure_user_page as needed.
+    // Used by the FSYS read/write wrapper (Phase 3 rectification) to translate each page-sized
+    // chunk's starting address before delegating to the (unchanged, absolute-address)
+    // fs_read_core/fs_write_core for that chunk — removing the "FS buffers must be RAM-home"
+    // constraint for the read/write data path (paths remain RAM-home-only for now — narrower
+    // scope; see root CLAUDE.md). Assumes the caller has already set up a valid stack.
+    //   Input: EAX = va, R11 = isWrite (0/1). Output: EAX = physical address, or -1 (bad ptr).
+    private static void EmitUserWordAddr(Assembler asm)
+    {
+        int pageShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageSize);
+        int tableStrideShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableBytesPerProcess);
+        int pteShift = System.Numerics.BitOperations.Log2((uint)OsLayout.PageTableEntryBytes);
+
+        asm.Label("user_word_addr");
+        asm.Mov(R(R9), R(EAX));                       // R9 = va (about to become offset)
+        asm.Mov(R(R10), R(EAX));                      // R10 = va (about to become page)
+        asm.MovImm(R(R8), pageShift);
+        asm.Shr(R(R10), R(R8));                       // R10 = page
+        asm.MovImm(R(R8), OsLayout.PageSize - 1);
+        asm.And(R(R9), R(R8));                        // R9 = offset within page
+
+        // bounds check (defensive: page_in/ensure_user_page would misread memory on an
+        // out-of-range page rather than cleanly failing).
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Js("uwa_fail");
+        asm.MovImm(R(EAX), OsLayout.MaxPagesPerProcess);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Jns("uwa_fail");
+
+        SpillStore(asm, OsLayout.PageXlateOffset, R9);
+        SpillStore(asm, OsLayout.PageXlatePage, R10);
+        asm.Mov(R(R12), R(R10));                      // page for ensure_user_page
+        asm.Call("ensure_user_page");                 // R11 (isWrite) is an input, untouched so far
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jnz("uwa_fail");
+
+        SpillLoad(asm, OsLayout.PageXlatePage, R10);
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R13), R(EAX));
+        EmitPteAddress(asm, R13, R10, R14, EDX, tableStrideShift, pteShift);
+        asm.Load(R(R15), R(R14));                     // R15 = pte (resident, >= 0)
+        SpillLoad(asm, OsLayout.PageXlateOffset, R9);
+        asm.Add(R(R15), R(R9));                       // R15 = physical address
+        asm.Mov(R(EAX), R(R15));
+        asm.Ret();
+        asm.Label("uwa_fail");
+        asm.MovImm(R(EAX), 0);
+        asm.Dec(R(EAX));
+        asm.Ret();
     }
 
     // ===== EmitReleaseFrames =================================================

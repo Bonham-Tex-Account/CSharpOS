@@ -125,6 +125,89 @@ public class FsSyscallTests
         Assert.Equal(new List<int> { 'h', 'i' }, outputs);
     }
 
+    // Same round trip, but the write source and read destination live in the DATA region (past
+    // the program's own page), which is demand-paged/swap-backed rather than RAM-home — the case
+    // the page-chunked fsy_read/fsy_write wrapper (user_word_addr) exists to handle. The process
+    // STOREs "hi" into DataOff via a normal MMU-translated write (faulting the page in) before
+    // the FSYS write, and the FSYS read fills a second, distinct DATA-region page (ReadOff) that
+    // was never touched before, proving the kernel-side transfer — not stale RAM — produced the
+    // bytes.
+    private static byte[] WriteThenReadRoundTrip_DataRegionBuffers()
+    {
+        const int PathOff = 256;   // page 1: still RAM-home program region (path translation is out of scope)
+        const int DataOff = 512;   // page 2: DATA region, demand-paged
+        const int ReadOff = 768;   // page 3: a different DATA-region page
+
+        Assembler asm = new Assembler();
+        asm.MovImm16(RegisterName.EBX, DataOff);
+        asm.MovImm(RegisterName.EAX, 'h');
+        asm.Store(RegisterName.EBX, RegisterName.EAX);
+        asm.MovImm16(RegisterName.EBX, DataOff + 4);
+        asm.MovImm(RegisterName.EAX, 'i');
+        asm.Store(RegisterName.EBX, RegisterName.EAX);
+        // open("/g", create) → fd in EAX
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.MovImm16(RegisterName.EBX, PathOff);
+        asm.MovImm(RegisterName.ECX, Hardware.FsysCreateFlag);
+        asm.Fsys();
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);
+        // write(DataOff, 2)
+        asm.MovImm16(RegisterName.ECX, DataOff);
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysWrite);
+        asm.Fsys();
+        // close(fd)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();
+        // reopen("/g") → fd
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.MovImm16(RegisterName.EBX, PathOff);
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Fsys();
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);
+        // read(2) into ReadOff (a page never touched before — no stale data to fall back on)
+        asm.MovImm16(RegisterName.ECX, ReadOff);
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysRead);
+        asm.Fsys();
+        // OUT the two chars read back
+        asm.MovImm16(RegisterName.EDX, ReadOff);
+        asm.Load(RegisterName.EAX, RegisterName.EDX);
+        asm.Out(RegisterName.EAX);
+        asm.MovImm16(RegisterName.EDX, ReadOff + 4);
+        asm.Load(RegisterName.EAX, RegisterName.EDX);
+        asm.Out(RegisterName.EAX);
+        asm.Hlt();
+        byte[] code = asm.Build();
+
+        byte[] image = new byte[Math.Max(code.Length, PathOff + 12)];
+        Array.Copy(code, image, code.Length);
+        image[PathOff] = (byte)'/';
+        image[PathOff + 4] = (byte)'g';
+        return image;
+    }
+
+    [Fact]
+    public void Fsys_WriteThenRead_WithDataRegionBuffers_RoundTripsData()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        List<int> outputs = CaptureOutputs(hw);
+
+        hw.RunOsRoutineSynchronously(Hardware.IvtFsOp, Hardware.FsOpFormat);
+
+        int slot = hw.Disk.Store(WriteThenReadRoundTrip_DataRegionBuffers());
+        os.LoadProcess(new Process(slot, 1024, 64));
+
+        for (int i = 0; i < 40000 && os.HasProcesses; i++)
+        {
+            hw.Run();
+        }
+
+        Assert.False(os.HasProcesses);
+        Assert.Equal(new List<int> { 'h', 'i' }, outputs);
+    }
+
     [Fact]
     public void Fsys_Open_FromAUserProcess_ReturnsAnFdInEax()
     {

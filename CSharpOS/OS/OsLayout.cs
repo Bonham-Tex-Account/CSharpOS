@@ -276,13 +276,42 @@ public static class OsLayout
     public const int FsRwCounter     = FsRwBase + 40;   // generic loop counter (skip / grow)
     public const int FsRwWords        = 12;
 
+    // ---- kernel-mediated user-memory access (Phase 3 rectification) -------
+    // Scratch for `user_word_addr` (ISA): translates one virtual word address through the
+    // current process's page table, faulting/COW-resolving via ensure_user_page as needed.
+    // va's page/offset are spilled here because ensure_user_page clobbers the registers.
+    public const int PageXlateBase   = FsRwBase + FsRwWords * 4;
+    public const int PageXlateOffset = PageXlateBase + 0;
+    public const int PageXlatePage   = PageXlateBase + 4;
+    public const int PageXlateWords  = 2;
+
+    // Scratch for the C#<->ISA handoff around IvtEnsureUserPage: Hardware.UserToPhysical
+    // writes IsWrite before dispatching, then reads Result after the routine returns.
+    public const int EnsureUserPageBase       = PageXlateBase + PageXlateWords * 4;
+    public const int EnsureUserPageIsWrite    = EnsureUserPageBase + 0;
+    public const int EnsureUserPageResult     = EnsureUserPageBase + 4;
+    public const int EnsureUserPageWords      = 2;
+
+    // Scratch for the FSYS read/write wrapper's page-chunked copy loop (fsy_read/fsy_write):
+    // it walks the user buffer's virtual pointer one page-chunk at a time, translating each
+    // chunk's start address via user_word_addr and delegating the actual transfer to the
+    // (unchanged, absolute-address) fs_read_core/fs_write_core for that chunk.
+    public const int FsWrapBase      = EnsureUserPageBase + EnsureUserPageWords * 4;
+    public const int FsWrapFd        = FsWrapBase + 0;
+    public const int FsWrapPtr       = FsWrapBase + 4;    // virtual pointer, advances per chunk
+    public const int FsWrapRemaining = FsWrapBase + 8;    // words left to transfer
+    public const int FsWrapCopied    = FsWrapBase + 12;   // total words transferred so far
+    public const int FsWrapIsWrite   = FsWrapBase + 16;   // 1 = writing into the user buffer (Read), 0 = reading from it (Write)
+    public const int FsWrapChunk     = FsWrapBase + 20;   // words in the current page-chunk
+    public const int FsWrapWords     = 6;
+
     public static int OftAddress(int index)
     {
         return OftBase + index * OftEntryBytes;
     }
 
     // Total OS region size.
-    public const int TotalSize = FsRwBase + FsRwWords * 4;
+    public const int TotalSize = FsWrapBase + FsWrapWords * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)

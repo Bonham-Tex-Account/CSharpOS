@@ -1,6 +1,6 @@
 # OSTests Quick Reference
 
-xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **603 tests across 50 files.**
+xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **610 tests across 51 files.**
 Goal of this file: pick the right test file *without* grepping the whole suite. Find the subsystem
 below, open that file, then grep the `[Fact]`/`[Theory]` method name inside it (names are full
 sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
@@ -51,6 +51,7 @@ sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
 | **Struct/data-object basics** (Process/MemoryRange/Trap/RegisterName) | `DataObjectTests` |
 | **Trap providers** (IRET only) + CollectTraps reflection | `TrapProviderTests` |
 | **MMU protection faults** (out-of-bounds user access kills the process; size guard) | `MemoryProtectionTests` |
+| **Kernel-mediated user-memory access via paging** (OUTS/INS + FSYS r/w on DATA-region/COW pages; `Hardware.UserToPhysical`, `ensure_user_page`) | `KernelUserMemoryTests` |
 | **Console visualizer / dashboard** | `ConsoleVisualizerTests`, `SpectreDashboardTests` |
 | **Visualizer internals** (history, frames, buddy view, model) | `FrameHistoryTests`, `VisualizerModelTests`, `BuddyHeapViewTests` |
 | **Risky edge cases / uninitialised state** | `EdgeCaseTests`, `EdgeCaseScenarioTests` |
@@ -83,7 +84,7 @@ Test doubles (also in `TestSupport.cs`): `FakeOS` (records the calls Hardware ma
 - **FS cores are reached two ways:** the `IvtFsOp` selectors (`Hardware.FsOp*`, absolute path/buffer + explicit proc index) for isolation, or the `FSYS` instruction (`Hardware.Fsys*`, user pointer, current process) for end-to-end. Isolation files use `IvtFsOp`; `FsSyscallTests`/`FsExecTests` use a live scheduler.
 - **End-to-end tests** build a real `BasicOS`, load a program (`hw.Disk.Store(image)` → `os.LoadProcess(new Process(slot, mem, stack))`), subscribe to `ProgramOutput` (calling `RaiseOutputComplete` in the handler), then loop `hw.Run()` while `os.HasProcesses` (cap the loop, e.g. 40000). See `FsExecTests`/`FsSyscallTests`.
 - **FS boot note:** since Inc 6, `BasicOS` auto-formats on boot, so end-to-end FS tests no longer need `FsOpFormat`. Isolation tests on a bare `FakeOS` (which does not boot an OS image) still format by hand.
-- **User FS buffers must be RAM-home** (in a program-image page): the kernel writes them at absolute addresses while the user reads via the MMU, so a buffer straddling into demand-paged heap won't round-trip. Keep test buffers/paths in the first page.
+- **FSYS read/write buffers may be anywhere mapped** (Phase 3 rectification): `fsy_read`/`fsy_write` now translate the user buffer through the page table page-by-page (`user_word_addr`), so a demand-paged/swapped DATA-region buffer round-trips — see `Fsys_WriteThenRead_WithDataRegionBuffers_RoundTripsData`. Two constraints remain: (a) **FSYS path pointers** (open/exec/unlink/mkdir/readdir) are still translated with flat `ProgramAddress+ptr` math, so keep **paths** in a program-image (RAM-home) page; (b) the `IvtFsOp` cores (`fs_read_core`/`fs_write_core`) still take **absolute** buffers, so isolation tests driving them directly must pass RAM-home addresses. Kernel-mediated OUTS/INS access (`Hardware.UserToPhysical`) is likewise paging-correct now — see `KernelUserMemoryTests`.
 - **Cover every case, including edges** (project rule): the `*EdgeCase*`, `MissingCoverage`, and per-feature "…_ReturnsMinusOne / _Empty / _PastEnd" tests exist for this. Add the failing/edge case, don't skip it.
 
 ---

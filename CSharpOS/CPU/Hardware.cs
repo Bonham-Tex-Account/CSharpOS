@@ -131,7 +131,16 @@ public partial class Hardware
     // EAX. File ops don't block, so it runs atomically rather than through the preemptible
     // IvtSyscall path (whose shared privileged stack couldn't survive preemption mid-op).
     public const int IvtFsSyscall          = 18;
-    public const int IvtSlotCount          = 19;
+    // Ensures one virtual page of the CURRENT process is resident (faulting it in if needed)
+    // and, if EnsureUserPageIsWrite is set, not copy-on-write (resolving it if needed). Entered
+    // with the page number in EAX; the isWrite flag is read from OsLayout scratch (set by the
+    // C# caller before dispatch, since DispatchOsRoutine only carries one EAX argument).
+    // Result (0 = ok, -1 = unmapped/bad page) is parked in OsLayout.EnsureUserPageResult.
+    // Dispatched only via RunOsRoutineSynchronously from Hardware.UserToPhysical (Phase 3
+    // rectification) — never by ISA code, which calls the underlying ensure_user_page
+    // subroutine directly via CALL/RET instead.
+    public const int IvtEnsureUserPage     = 19;
+    public const int IvtSlotCount          = 20;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
@@ -442,6 +451,7 @@ public partial class Hardware
             case IvtCacheOp:            return "CacheOp";
             case IvtFsOp:               return "FsOp";
             case IvtFsSyscall:          return "FsSyscall";
+            case IvtEnsureUserPage:     return "EnsureUserPage";
             default:                    return $"slot {slot}";
         }
     }
@@ -932,6 +942,41 @@ public partial class Hardware
         });
         ProcessTerminated?.Invoke(this, new ProcessTerminatedArgs { Device = CurrentDeviceId() });
         DispatchOsRoutine(IvtInvalidInstruction, opcode);
+    }
+
+    // Translates a user virtual address through the CURRENTLY RUNNING process's page table on
+    // behalf of KERNEL-MODE code acting on that process's behalf (OUTS/INS string I/O) —
+    // distinct from TryTranslateData, which only translates while the CPU's OWN privilege level
+    // is User. Faults the page in (and resolves a copy-on-write share, if isWrite) via the
+    // IvtEnsureUserPage routine, run synchronously so this is safe to call mid-instruction: the
+    // routine only touches OS memory (page tables/frames) and scratch registers, never the
+    // process's own saved-context state, so RunOsRoutineSynchronously's full save/restore
+    // leaves the caller's (also mid-syscall) CPU state completely undisturbed. Returns -1 for a
+    // pointer outside the process's mapped extent — the caller must abort cleanly (no crash,
+    // no corruption of unrelated memory), not for an emulator-level bounds violation.
+    // (Phase 3 rectification — fixes the prior linear ProgramAddress+ptr math, which was wrong
+    // whenever the target page was swap-backed DATA memory or had been evicted/refilled.)
+    public int UserToPhysical(int virtualAddress, bool isWrite)
+    {
+        if (!OsManaged)
+        {
+            return GetProgramBase() + virtualAddress;
+        }
+        int page = virtualAddress / OsLayout.PageSize;
+        int offset = virtualAddress % OsLayout.PageSize;
+        int procIndex = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
+        if (procIndex < 0 || procIndex >= OsLayout.MaxProcesses || page < 0 || page >= OsLayout.MaxPagesPerProcess)
+        {
+            return -1;
+        }
+        WriteWord(osMemoryBase + OsLayout.EnsureUserPageIsWrite, isWrite ? 1 : 0);
+        RunOsRoutineSynchronously(IvtEnsureUserPage, page);
+        if (ReadWord(osMemoryBase + OsLayout.EnsureUserPageResult) != 0)
+        {
+            return -1;
+        }
+        int pte = ReadWord(osMemoryBase + OsLayout.PageTableAddress(procIndex) + page * OsLayout.PageTableEntryBytes);
+        return pte + offset; // guaranteed resident by IvtEnsureUserPage
     }
 
     // (Re)seeds the page table for the process in slot `index` when that slot is first
@@ -1673,7 +1718,10 @@ public partial class Hardware
     }
 
     // Kernel-mode string output: read `len` words from user virtual address `ptr`,
-    // take the low byte of each as a character, fire ProgramOutput with the string.
+    // take the low byte of each as a character, fire ProgramOutput with the string. Each word
+    // is translated through the process's own page table (UserToPhysical), faulting pages in
+    // as needed — not a flat ProgramAddress+ptr read, which would be wrong for a swap-backed
+    // DATA-region pointer (Phase 3 rectification).
     public void KernelOutputString(int ptr, int len)
     {
         int deviceId = FdDevice(StdOut);
@@ -1683,11 +1731,15 @@ public partial class Hardware
             BlockCurrent(WaitReason.Output);
             return;
         }
-        int physBase = currentProcessInstructionStart;
         System.Text.StringBuilder sb = new System.Text.StringBuilder(len);
         for (int i = 0; i < len; i++)
         {
-            int word = ReadWord(physBase + ptr + i * 4);
+            int physical = UserToPhysical(ptr + i * 4, isWrite: false);
+            if (physical < 0)
+            {
+                break; // pointer outside the process's mapped extent: stop cleanly
+            }
+            int word = ReadWord(physical);
             if (word == 0)
             {
                 break;
@@ -1701,7 +1753,8 @@ public partial class Hardware
 
     // Kernel-mode string input: dequeue a line from stdin's string buffer or block
     // the process until one arrives (INS re-runs on resume). The string is written
-    // word-by-word to user virtual address `ptr` (up to maxLen words), null-terminated.
+    // word-by-word to user virtual address `ptr` (up to maxLen words), null-terminated, via
+    // UserToPhysical (Phase 3 rectification — see KernelOutputString).
     public void KernelInputString(int ptr, int maxLen)
     {
         int deviceId = FdDevice(StdIn);
@@ -1713,13 +1766,22 @@ public partial class Hardware
             return;
         }
         string s = device.StringInput.Dequeue();
-        int physBase = currentProcessInstructionStart;
         int writeLen = Math.Min(s.Length, maxLen - 1);
         for (int i = 0; i < writeLen; i++)
         {
-            WriteWord(physBase + ptr + i * 4, s[i]);
+            int physical = UserToPhysical(ptr + i * 4, isWrite: true);
+            if (physical < 0)
+            {
+                return; // pointer outside the process's mapped extent: stop cleanly
+            }
+            WriteWord(physical, s[i]);
         }
-        WriteWord(physBase + ptr + writeLen * 4, 0);
+        int terminatorPhysical = UserToPhysical(ptr + writeLen * 4, isWrite: true);
+        if (terminatorPhysical < 0)
+        {
+            return;
+        }
+        WriteWord(terminatorPhysical, 0);
     }
 
     // ===== Interrupt Raising (RaiseInputInterrupt, RaiseOutputComplete) ======
