@@ -57,6 +57,29 @@ public sealed class HardwareEventBridge
     private void OnOsRoutineEntered(object? sender, OsRoutineArgs e)
     {
         renderer.OsRoutineEntered(e.Name);
+        // FS state only changes through the filesystem OS-routines, so the disk snapshot
+        // is rebuilt exactly when one runs — no per-instruction polling. Frames just hold
+        // a reference to the latest snapshot, so this also time-travels with history.
+        if (IsFilesystemSlot(e.Slot))
+        {
+            RebuildDisk();
+        }
+    }
+
+    private static bool IsFilesystemSlot(int slot)
+    {
+        return slot == Hardware.IvtFsSyscall
+            || slot == Hardware.IvtFsOp
+            || slot == Hardware.IvtCacheOp;
+    }
+
+    // Rebuilds and swaps in the disk snapshot (replace, never mutate — see FrameHistory).
+    public void RebuildDisk()
+    {
+        if (BuddyHeapView.HasOs(hw))
+        {
+            model.DiskView = FsDiskView.ReadDisk(hw);
+        }
     }
 
     private void OnContextSwitched(object? sender, ContextSwitchArgs e)
@@ -70,6 +93,12 @@ public sealed class HardwareEventBridge
             model.ProcessTable = BuddyHeapView.ReadProcessTable(hw, os.NameForBase);
             model.FreeBlocks = BuddyHeapView.ReadFreeBlocks(hw) ?? new List<BuddyHeapView.FreeBlock>();
             model.BuddyTree = BuddyHeapView.ReadTree(hw, os.NameForBase);
+            // Boot-time populate: the FS is auto-formatted at boot via a synchronous routine
+            // that fires no OsRoutineEntered event, so seed the panel on the first switch.
+            if (model.DiskView == null)
+            {
+                model.DiskView = FsDiskView.ReadDisk(hw);
+            }
         }
         renderer.ContextSwitched(model);
     }

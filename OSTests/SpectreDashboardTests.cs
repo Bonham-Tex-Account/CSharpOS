@@ -78,6 +78,25 @@ public class SpectreDashboardTests : IDisposable
     }
 
     [Fact]
+    public void WithDiskToggledOn_RendersTheFilesystemPanel_FromARealRun()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Verbose, 0);
+        dashboard.ShowDisk = true; // swap the buddy panel slot to the disk view
+        os.LoadProcess(new Process(CreateProgramFile(PrintThenHalt(7)), 128, 64));
+
+        StringWriter sink = new StringWriter();
+        // BasicOS auto-formats the FS at boot and installs the program under /bin, so the
+        // disk panel renders a real, formatted filesystem — this catches markup/layout errors.
+        dashboard.RenderSnapshot(PlainConsole(sink), 4000);
+
+        string text = sink.ToString();
+        Assert.Contains("Disk (filesystem)", text);
+        Assert.DoesNotContain("Buddy allocator", text); // the slot is swapped, not duplicated
+    }
+
+    [Fact]
     public void RendersWithTwoProcesses_ShowingSchedulerActivity()
     {
         BasicOS os = new BasicOS(new StringWriter());

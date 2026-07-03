@@ -34,13 +34,15 @@ public sealed class InteractionController
     private readonly Action<int> submitInput;
     private readonly Action<string>? submitStringInput;
     private readonly Action<int>? submitKey;
+    private readonly Action? toggleDisk;
     private bool paused;
     private bool keyPassthrough;
     private string inputLine = "";
 
     public InteractionController(FrameHistory frames, bool interactive, int delayMs,
         Action toggleIo, Action cycleFocus, Action<int> submitInput,
-        Action<string>? submitStringInput = null, Action<int>? submitKey = null)
+        Action<string>? submitStringInput = null, Action<int>? submitKey = null,
+        Action? toggleDisk = null)
     {
         this.frames = frames;
         this.interactive = interactive;
@@ -50,6 +52,7 @@ public sealed class InteractionController
         this.submitInput = submitInput;
         this.submitStringInput = submitStringInput;
         this.submitKey = submitKey;
+        this.toggleDisk = toggleDisk;
     }
 
     public bool Paused
@@ -194,6 +197,11 @@ public sealed class InteractionController
                 if (lower == 'o')
                 {
                     toggleIo();
+                    return StepAction.Redraw;
+                }
+                if (lower == 'd')
+                {
+                    toggleDisk?.Invoke();
                     return StepAction.Redraw;
                 }
                 if (lower == 'q')

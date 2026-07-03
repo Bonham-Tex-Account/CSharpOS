@@ -1,3 +1,4 @@
+using System.Text;
 using CSharpOS;
 using OperatingSystem = CSharpOS.OperatingSystem;
 using Spectre.Console;
@@ -36,6 +37,11 @@ public sealed class SpectreDashboard
     private int staggerInterval;
     private int lastLoadStep;
 
+    // When true the shared "Buddy allocator" panel slot renders the filesystem/disk view
+    // instead (toggled by the `d` key). They are alternate resource views seen one at a time.
+    // Public so the headless render seam can exercise the disk panel without a keyboard.
+    public bool ShowDisk { get; set; }
+
     public SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delayMs,
         DetailLevel detail = DetailLevel.High, bool showProgramIo = false)
     {
@@ -61,7 +67,7 @@ public sealed class SpectreDashboard
         // is inert (non-interactive, no delay).
         Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
         bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer, detail);
-        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput, SubmitKey);
+        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput, SubmitKey, ToggleDisk);
 
         // The dashboard owns the single shared screen, so it also drives output
         // completion: the console transfers instantly, so each OUT is acknowledged at
@@ -74,6 +80,12 @@ public sealed class SpectreDashboard
     private void ToggleIo()
     {
         model.ShowProgramIo = !model.ShowProgramIo;
+    }
+
+    // Swaps the shared Buddy/Disk panel slot between the buddy tree and the filesystem view.
+    private void ToggleDisk()
+    {
+        ShowDisk = !ShowDisk;
     }
 
     // ---- focus (foreground process) ---------------------------------------
@@ -377,7 +389,14 @@ public sealed class SpectreDashboard
         layout["program"].Update(Panel("Program (user)", program, ActiveColor(frame, true)));
         layout["kernel"].Update(Panel("Kernel / OS", kernel, ActiveColor(frame, false)));
         layout["procs"].Update(Panel("Processes (MLFQ)", BuildProcessAndQueues(frame), Color.Grey));
-        layout["buddy"].Update(Panel("Buddy allocator", BuildBuddyTree(frame), Color.Grey));
+        if (ShowDisk)
+        {
+            layout["buddy"].Update(Panel("Disk (filesystem)", BuildFsDisk(frame), Color.Grey));
+        }
+        else
+        {
+            layout["buddy"].Update(Panel("Buddy allocator", BuildBuddyTree(frame), Color.Grey));
+        }
         layout["screen"].Update(Panel("Screen (focused I/O)", BuildScreen(), Color.Grey));
         layout["registers"].Update(Panel("Registers", BuildRegisters(frame), Color.Grey));
         layout["heap"].Update(Panel("Heap / free memory", BuildHeap(frame), Color.Grey));
@@ -602,6 +621,85 @@ public sealed class SpectreDashboard
         }
         string owner = PlainTextRenderer.FriendlyName(segment.OwnerPath);
         return $"[red]ALLOC {segment.Base}+{segment.Size}[/] [grey]{Markup.Escape(owner)}[/]";
+    }
+
+    // ---- filesystem / disk view -------------------------------------------
+    // Alternate content for the buddy panel slot (key `d`): a superblock stats header, the
+    // directory tree as an indented list, and a per-block allocation map (S super / B bitmap
+    // / # used / · free). Reads only the immutable frame snapshot (rebuilt by the bridge).
+
+    private static IRenderable BuildFsDisk(Frame frame)
+    {
+        FsDiskView.Snapshot? disk = frame.DiskView;
+        if (disk == null)
+        {
+            return new Markup("[grey39](no filesystem)[/]");
+        }
+        if (!disk.Formatted)
+        {
+            return new Markup("[grey39](disk not formatted)[/]");
+        }
+        List<IRenderable> lines = new List<IRenderable>();
+        lines.Add(new Markup($"[grey]blocks[/] {disk.BlockCount}  [green]free[/] {disk.FreeCount}  [red]used[/] {disk.UsedCount}  [grey]root[/] {disk.RootBlock}"));
+        foreach (FsDiskView.TreeRow row in FsDiskView.FlattenTree(disk))
+        {
+            lines.Add(new Markup(DiskTreeLabel(row)));
+        }
+        lines.Add(BuildBlockMap(disk));
+        return new Rows(lines);
+    }
+
+    private static string DiskTreeLabel(FsDiskView.TreeRow row)
+    {
+        string indent = new string(' ', row.Depth * 2);
+        string name = Markup.Escape(row.Node.Name);
+        if (row.Node.IsDir)
+        {
+            if (row.Node.Name == "/")
+            {
+                return $"{indent}[aqua]/[/]";
+            }
+            return $"{indent}[aqua]{name}/[/]";
+        }
+        return $"{indent}[grey85]{name}[/] [grey]{row.Node.Size}B[/]";
+    }
+
+    private static IRenderable BuildBlockMap(FsDiskView.Snapshot disk)
+    {
+        const int perRow = 32;
+        List<IRenderable> rows = new List<IRenderable>();
+        StringBuilder line = new StringBuilder();
+        for (int b = 0; b < disk.BlockRoles.Length; b++)
+        {
+            line.Append(BlockGlyph(disk.BlockRoles[b]));
+            if ((b + 1) % perRow == 0 || b == disk.BlockRoles.Length - 1)
+            {
+                rows.Add(new Markup(line.ToString()));
+                line.Clear();
+            }
+        }
+        if (rows.Count == 0)
+        {
+            return new Markup("[grey39](no blocks)[/]");
+        }
+        return new Rows(rows);
+    }
+
+    private static string BlockGlyph(FsDiskView.BlockRole role)
+    {
+        if (role == FsDiskView.BlockRole.Super)
+        {
+            return "[yellow]S[/]";
+        }
+        if (role == FsDiskView.BlockRole.Bitmap)
+        {
+            return "[blue]B[/]";
+        }
+        if (role == FsDiskView.BlockRole.Used)
+        {
+            return "[red]#[/]";
+        }
+        return "[grey19]·[/]";
     }
 
     // ---- registers ---------------------------------------------------------
@@ -853,7 +951,7 @@ public sealed class SpectreDashboard
         }
         string keys = interaction.KeyPassthrough
             ? "[yellow]F1[/] [yellow bold]KEY PASSTHROUGH[/]  all keys → process  [grey](F1 to exit)[/]"
-            : "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]q[/] quit  [grey]F1[/] passthrough";
+            : "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]d[/] disk  [grey]q[/] quit  [grey]F1[/] passthrough";
         return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]perf[/] {detail}   {keys}"))
         {
             Border = BoxBorder.None,

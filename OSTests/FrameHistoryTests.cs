@@ -225,6 +225,24 @@ public class FrameHistoryTests
         Assert.Equal(1, toggles);
     }
 
+    [Fact]
+    public void DiskKey_InvokesToggleDiskCallback_AndDoesNotForwardToProcess()
+    {
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        int diskToggles = 0;
+        List<int> forwarded = new List<int>();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { }, submitStringInput: null,
+            submitKey: k => forwarded.Add(k), toggleDisk: () => { diskToggles++; });
+
+        StepAction action = controller.HandleKey(Char('d'));
+
+        Assert.Equal(StepAction.Redraw, action);
+        Assert.Equal(1, diskToggles);
+        Assert.Empty(forwarded); // the command key is consumed, not sent to the process
+    }
+
     // ---- focus + process input (shared screen) -----------------------------
 
     [Fact]

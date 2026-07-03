@@ -156,6 +156,10 @@ public sealed class VisualizerModel
     public List<BuddyHeapView.ProcessRow> ProcessTable { get; set; } = new List<BuddyHeapView.ProcessRow>();
     public List<BuddyHeapView.FreeBlock> FreeBlocks { get; set; } = new List<BuddyHeapView.FreeBlock>();
     public BuddyHeapView.BuddyNode? BuddyTree { get; set; }
+    // The reconstructed filesystem snapshot (superblock stats, block map, dir tree). The
+    // bridge rebuilds it only when an FS OS-routine runs (and once at boot), then swaps it
+    // in wholesale, so frames can safely hold a reference. Null until first built.
+    public FsDiskView.Snapshot? DiskView { get; set; }
 
     public const int MaxHistoryLength = 80;
     public List<InstructionStep> History { get; } = new List<InstructionStep>();
