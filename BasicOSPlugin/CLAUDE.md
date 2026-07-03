@@ -94,7 +94,7 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `resolve_cow` | EmitResolveCow :743 | IvtFork, exit_body, IvtExec | Loop all pages; call pair_resolve for each COW page; clear partnership |
 | `cow_share` | EmitCowShare :826 | IvtFork | Convert current process's DATA pages to COW (mark resident frames, re-encode PTEs) |
 | `page_in` | EmitPageIn | EmitPageFault, ensure_user_page | Fill logic extracted from EmitPageFault (CALL/RET): fault a non-resident page (R12) into a frame. **Clobbers R11** internally |
-| `ensure_user_page` | EmitEnsureUserPage | ensure_user_page_op, user_word_addr | R12=page, R11=isWrite → EAX 0/-1. page_in if non-resident, then pair_resolve if resident+write+COW; -1 if UnmappedPage. Spills isWrite across page_in (R11 clobber) |
+| `ensure_user_page` | EmitEnsureUserPage | ensure_user_page_op, user_word_addr | R12=page, R11=isWrite → EAX 0/-1. page_in if non-resident, then pair_resolve if resident+write+COW; -1 if UnmappedPage. Spills isWrite across page_in (R11 clobber). **On write (R11≠0) marks the resident frame DIRTY** (mirrors STORE's StampFrame) — else fork's flush_frames / eviction drop kernel-mediated writes (INS/OUTS/FSYS/readdir) since both only write back dirty frames |
 | `ensure_user_page_op` | EmitEnsureUserPageOp | Hardware.UserToPhysical (RunOsRoutineSynchronously only) | IvtEnsureUserPage slot-19 wrapper: EAX=page, isWrite from OsLayout.EnsureUserPageIsWrite → result in EnsureUserPageResult |
 | `user_word_addr` | EmitUserWordAddr | fsy_read/fsy_write | EAX=va, R11=isWrite → EAX=physical addr or -1. Translates one word via ensure_user_page; spills page/offset in OsLayout.PageXlate* |
 | `cache_find` | EmitCacheSubroutines | cache_get/dirty/wt/pin/unpin/discard | Scan cache slots for a resident block; EAX=block → EAX=slot base or -1 |
@@ -208,6 +208,7 @@ Every expensive debug hunt in this project's history (Session Cost Log: Inc 6 "b
 | **Crash / jump to a wild address** (e.g. "block 900") | A register holding an address was clobbered | Trace register liveness across each CALL; look for an addr kept in EAX/EBP across a `LoadField` (see table above). |
 | **Wrong value round-trips** (off by a lot, or 1 char instead of N) | A scratch slot reused by a nested call | Check the callee's clobber row; a loop var reused as a callee's counter (Inc 5b: `fs_grow_chain` reused `FsRwRemaining`). |
 | **Routine falls through to the wrong code** | Duplicate `asm.Label` name | `Assembler.Label` does `labels[name] = code.Count` — it **silently overwrites** a duplicate. Every subroutine must use a unique label prefix (`fsyr_*`, `fli_*`, `di_*`). |
+| **A kernel write to a user page is lost on fork or eviction** (child/reader sees stale/zero, but a plain STORE to the same page survives) | The write didn't mark the frame **dirty** | `flush_frames` (fork) and eviction only write back *dirty* frames. STORE sets dirty via `Hardware.StampFrame`; a kernel-mediated write (INS/OUTS/FSYS/readdir out-buffer) must go through `ensure_user_page` with isWrite, which now sets the dirty bit. If you add a new kernel→user write path, route it through `user_word_addr`/`ensure_user_page` (isWrite=1), don't hand-translate. The STORE-works-but-INS-doesn't asymmetry is the tell. |
 
 ### The memory-marker diagnostic (the technique that cracked both big hangs)
 

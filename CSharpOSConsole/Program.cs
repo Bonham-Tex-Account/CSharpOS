@@ -274,7 +274,7 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
 
     int shellSlot = hw.Disk.Store(Programs.Shell());
 
-    Console.WriteLine("  Shell: focus it (Tab), type a command + Enter (v1 runs one command per shell):");
+    Console.WriteLine("  Shell: focus it (Tab), type an absolute command + Enter (it forks/execs, then re-prompts):");
     Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter");
     Console.WriteLine();
 

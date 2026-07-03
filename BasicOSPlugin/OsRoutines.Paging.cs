@@ -331,8 +331,23 @@ public static partial class OsRoutines
         LoadField(asm, EBX, OsLayout.FrameCowField, EAX);
         asm.MovImm(R(EBX), 0);
         asm.Cmp(R(EAX), R(EBX));
-        asm.Jz("eup_ok");                               // not COW: already writable
+        asm.Jz("eup_mark_dirty");                        // not COW: already writable
         asm.Call("pair_resolve");                        // page (R12) unchanged
+        // A kernel-mediated write to this page (INS / OUTS / FSYS read / readdir out-buffer) must
+        // mark the resident frame DIRTY, exactly as a user STORE does via StampFrame — otherwise
+        // flush_frames (fork) and frame eviction, which only write back DIRTY frames, silently drop
+        // the write. Recompute the frame index (pair_resolve may have re-homed the page) and set it.
+        asm.Label("eup_mark_dirty");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(R13), R(EAX));
+        EmitPteAddress(asm, R13, R12, R9, EDX, tableStrideShift, pteShift);
+        asm.Load(R(R8), R(R9));                          // R8 = pte (resident, >= 0)
+        asm.MovImm16(R(EAX), OsLayout.FramePoolBase);
+        asm.Sub(R(R8), R(EAX));
+        asm.MovImm(R(EAX), pageShift);
+        asm.Shr(R(R8), R(EAX));                          // R8 = frame index
+        FrameEntryAddress(asm, R8, EBX);
+        StoreFieldImm(asm, EBX, OsLayout.FrameDirtyField, 1);
         asm.Label("eup_ok");
         asm.MovImm(R(EAX), 0);
         asm.Ret();
