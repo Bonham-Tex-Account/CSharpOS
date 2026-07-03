@@ -331,39 +331,55 @@ public static class Programs
         return image;
     }
 
-    // A command shell (Shell §2): prompt, read a command line (INS), and run the typed command by
-    // exec-by-path with its arguments. v1 uses absolute paths (no CWD): commands are typed like
-    // "/bin/ls /", "/bin/cat /note". If the command does not resolve, it prints "?".
+    // A real command shell (Shell §2): prompt, read a command line (INS), fork, have the child
+    // exec-by-path the typed command with its arguments (FSYS Exec) while the parent focuses the
+    // child (so its output is foreground) and WAITs for it, then loops. v1 uses absolute paths (no
+    // CWD): commands are typed like "/bin/ls /", "/bin/cat /note". A command that does not resolve
+    // prints "?".
     //
-    // v1 is single-shot: the shell process itself becomes the command (exec replaces its image), so
-    // one command runs per shell. A looping shell (fork a child per command, keep prompting) is
-    // deferred — it needs FORK to propagate the typed line to the child and typed input to reach a
-    // forked child's INS, neither of which this OS supports yet (see the Shell notes in CLAUDE.md).
+    // The parent reads the line (it is the focused foreground process, so keyboard input reaches
+    // it) into a DATA-region buffer, then forks: the child inherits the buffer and execs it. This
+    // relies on FORK propagating the parent's just-typed line to the child — which works now that
+    // kernel-mediated writes (INS) mark their frame dirty so fork's flush_frames carries them.
     public static byte[] Shell()
     {
-        const int PromptOff = 128;   // "$ " prompt
+        const int PromptOff = 128;   // "$ " prompt (image-resident, read-only)
         const int ErrOff = 160;      // "?" printed when a command fails to exec
-        const int LineBuf = 256;     // the typed command-line buffer
+        const int LineBuf = 512;     // typed command line — a DATA-region page (needs memory >= 1024)
         const int LineMax = 32;      // buffer capacity in words
 
         Assembler asm = new Assembler();
+        asm.Label("loop");
         asm.MovImm16(RegisterName.EAX, PromptOff);
         asm.MovImm(RegisterName.ECX, 2);
         asm.Outs(RegisterName.EAX, RegisterName.ECX);   // prompt
         asm.MovImm16(RegisterName.EAX, LineBuf);
         asm.MovImm(RegisterName.ECX, LineMax);
         asm.Ins(RegisterName.EAX, RegisterName.ECX);    // read a line (blocks until one arrives)
+        asm.Fork();
+        asm.MovImm(RegisterName.EBX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jnz("parent");
+        // Child (EAX == 0): become the typed command. FSYS Exec returns only on failure.
         asm.MovImm(RegisterName.EAX, Hardware.FsysExec);
         asm.MovImm16(RegisterName.EBX, LineBuf);
-        asm.Fsys();                                     // become the command; returns only on failure
+        asm.Fsys();
         asm.MovImm16(RegisterName.EAX, ErrOff);
         asm.MovImm(RegisterName.ECX, 1);
         asm.Outs(RegisterName.EAX, RegisterName.ECX);   // command not found / not a file
         asm.MovImm(RegisterName.EAX, 0);
         asm.Exit(RegisterName.EAX);
+        // Parent (EAX == child PID): focus the child + wait, then prompt again. Save the PID before
+        // WAIT (which clobbers EAX with the exit status).
+        asm.Label("parent");
+        asm.Mov(RegisterName.ESI, RegisterName.EAX);
+        asm.SetFocus(RegisterName.ESI);
+        asm.Wait(RegisterName.ESI);
+        asm.Jmp("loop");
         byte[] code = asm.Build();
 
-        byte[] image = new byte[LineBuf + LineMax * 4];
+        // The line buffer lives in the DATA region, not the image; the image is just code + prompt.
+        byte[] image = new byte[ErrOff + 4];
         Array.Copy(code, image, code.Length);
         WriteString(image, PromptOff, "$ ");
         WriteString(image, ErrOff, "?");

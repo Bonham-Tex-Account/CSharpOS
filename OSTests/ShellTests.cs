@@ -6,9 +6,9 @@ namespace OSTests;
 
 /// <summary>
 /// Covers SETFOCUS (map a PID to the foreground process) and the shell program (Shell §2): the
-/// shell prompts, reads a command line (INS), and exec-by-paths the typed command with its args
-/// (FSYS Exec). Commands are absolute paths; a command that does not resolve prints "?". v1 is
-/// single-shot (the shell becomes the command); a looping shell is deferred (see Programs.Shell).
+/// shell prompts, reads a command line (INS), FORKs, the child exec-by-paths the typed command with
+/// its args (FSYS Exec), and the parent SETFOCUSes the child + WAITs, then loops. Commands are
+/// absolute paths; a command that does not resolve prints "?".
 /// </summary>
 public class ShellTests : IDisposable
 {
@@ -108,12 +108,43 @@ public class ShellTests : IDisposable
             hw.Run();
         }
 
-        Assert.Contains(55, ints);   // the typed command ran via the shell's exec-by-path
+        Assert.Contains(55, ints);      // the typed command ran via the shell's fork + exec-by-path
+        Assert.True(os.HasProcesses);   // the shell itself looped, still alive
         _ = strings;
     }
 
     [Fact]
-    public void Shell_UnknownCommand_PrintsError()
+    public void Shell_LoopsAcrossMultipleCommands()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        (List<int> ints, _) = CaptureAll(hw);
+
+        FsImage.EnsureDir(hw, "/bin");
+        FsImage.WriteFile(hw, "/bin/p", PrintThenHalt(55));
+        FsImage.WriteFile(hw, "/bin/q", PrintThenHalt(66));
+        os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128));   // shell = slot 0
+        hw.SetActiveProcess(0);
+
+        // First command.
+        for (int i = 0; i < 3000; i++) { hw.Run(); }
+        hw.RaiseStringInputInterrupt("/bin/p");
+        for (int i = 0; i < 60000 && !ints.Contains(55); i++) { hw.Run(); }
+        Assert.Contains(55, ints);
+
+        // The shell looped back to the prompt; refocus it (as the dashboard's EnsureFocus would when
+        // the child terminates) and type a second command.
+        hw.SetActiveProcess(0);
+        for (int i = 0; i < 3000; i++) { hw.Run(); }
+        hw.RaiseStringInputInterrupt("/bin/q");
+        for (int i = 0; i < 60000 && !ints.Contains(66); i++) { hw.Run(); }
+
+        Assert.Contains(66, ints);      // the second command ran in the same shell
+        Assert.True(os.HasProcesses);   // still looping
+    }
+
+    [Fact]
+    public void Shell_UnknownCommand_PrintsErrorAndSurvives()
     {
         BasicOS os = new BasicOS(new StringWriter());
         Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
@@ -132,6 +163,7 @@ public class ShellTests : IDisposable
             hw.Run();
         }
 
-        Assert.Contains("?", strings);   // the failed exec reported the error
+        Assert.Contains("?", strings);   // the child reported the failed exec
+        Assert.True(os.HasProcesses);    // the shell survived and looped
     }
 }
