@@ -237,7 +237,9 @@ Block-device transfers between RAM and the `Bin` disk. The disk is only accessib
 
 ### Filesystem
 
-`FSYS` is the single user-mode entry point into the filesystem. It does **not** use the `OUT`/`IN`-style `EnterKernel` trap path (preemptible, shared handler in Kernel mode with interrupts enabled). Instead, like `FORK`/`EXEC`/`WAIT`/`EXIT`, it dispatches `IvtFsSyscall` (slot 19) through the ordinary atomic `DispatchOsRoutine` path (interrupts masked) — the whole syscall runs to completion without preemption, then resumes the caller (SAVEREGS the captured trap frame → compute → write the result into the saved EAX slot → LOADREGS/SETLAYOUT/OSRET), the same idiom `IvtWait`'s zombie-reap path uses.
+`FSYS` is the single user-mode entry point into the filesystem. It does **not** use the `OUT`/`IN`-style `EnterKernel` trap path (preemptible, shared handler in Kernel mode with interrupts enabled). Instead, like `FORK`/`EXEC`/`WAIT`/`EXIT`, it dispatches `IvtFsSyscall` (slot 18) through the ordinary atomic `DispatchOsRoutine` path (interrupts masked) — the whole syscall runs to completion without preemption, then resumes the caller (SAVEREGS the captured trap frame → compute → write the result into the saved EAX slot → LOADREGS/SETLAYOUT/OSRET), the same idiom `IvtWait`'s zombie-reap path uses.
+
+The `Read`/`Write` data buffers are translated one page-chunk at a time through the calling process's page table (via a new privileged routine, `user_word_addr`, and IVT slot `IvtEnsureUserPage = 19` / `Hardware.UserToPhysical`) before the transfer runs, so a buffer in demand-paged or swapped-out process memory round-trips correctly — this constraint that used to apply to FSYS read/write buffers is gone. The `Open`/`Exec`/`Unlink`/`Mkdir`/`Readdir` **path** pointers are still translated with flat `ProgramAddress + ptr` arithmetic, so a path argument must still live in a RAM-home page (the process's program image).
 
 | Mnemonic | Opcode | Bytes (b1 b2 b3) | Assembler method | Description |
 |----------|--------|-------------------|------------------|-------------|
@@ -252,10 +254,13 @@ Block-device transfers between RAM and the `Bin` disk. The disk is only accessib
 | 2 | Write | `EBX` = fd, `ECX` = buffer pointer (user-relative), `EDX` = count | characters written, or −1 |
 | 3 | Close | `EBX` = fd | 0, or −1 |
 | 4 | Exec | `EBX` = pointer to a null-terminated word-per-char path (user-relative) | does not return on success (the process image is replaced and resumes at its new entry point); −1 if the path is missing or is a directory |
+| 5 | Unlink | `EBX` = pointer to a null-terminated word-per-char path (user-relative) | 0, or −1 (missing path, a directory, or the file is currently open) |
+| 6 | Mkdir | `EBX` = pointer to a null-terminated word-per-char path (user-relative) | new directory's block number, or −1 |
+| 7 | Readdir | `EBX` = pointer to a null-terminated word-per-char directory path (user-relative; `"/"` = root), `ECX` = entry index, `EDX` = pointer to a 64-byte output buffer (user-relative) | the entry's type (1=file, 2=dir), or −1 past the last entry |
 
-File descriptors 2–7 are per-process (`ProcessEntryFdTable`, `FdCount = 8`; fd 0/1 are reserved for stdin/stdout). `FSYS` translates the user-relative pointer arguments (`ProgramAddress + ptr`) to absolute addresses and always operates on the calling process — this is the only difference from the `IvtFsOp` selectors used internally and by tests, which take an absolute path/buffer and an explicit process index.
+File descriptors 2–7 are per-process (`ProcessEntryFdTable`, `FdCount = 8`; fd 0/1 are reserved for stdin/stdout). `FSYS` always operates on the calling process — this is the only difference from the `IvtFsOp` selectors used internally and by tests, which take an absolute path/buffer and an explicit process index.
 
-**Directories cannot be opened for read/write** — `Open` on a path that resolves to a directory entry fails with −1. There is currently no `Mkdir`/`Readdir`/`Unlink` syscall exposed through `FSYS`; those operations exist as ISA subroutines (`fs_mkdir`, directory-layer routines) reachable via `IvtFsOp` but not yet wired to a user-mode instruction.
+**Directories cannot be opened for read/write** — `Open` on a path that resolves to a directory entry fails with −1. `Unlink` frees the file's entire block chain (not just its directory entry) and refuses to remove a directory or a file that is currently open. `fs_unlink`/`fs_mkdir_path`/`fs_readdir` are the ISA subroutines behind syscalls 5–7 (see `docs/OS-Architecture.md`, "The ISA filesystem").
 
 See `docs/OS-Architecture.md`, section "The ISA filesystem", for the on-disk layout, the buffer cache, the block allocator, and the full syscall implementation.
 
@@ -274,7 +279,7 @@ Because all address arithmetic adds the program base, programs that only referen
 
 **Label fixups and origin:** the `Assembler.Build(int origin)` method shifts all resolved label offsets by `origin`. User programs are typically built with `Build()` (origin 0). OS routines are built with `Build(OsLayout.CodeBase)` so their jump targets encode absolute OS-region addresses (which Kernel mode resolves correctly against base 0).
 
-**Memory-mapped address limits:** LOAD and STORE in User mode are bounds-checked by `LoadBoundsTrapProvider` and `StoreBoundsTrapProvider`. Any access to an address outside the process's allocated ranges (instruction section, data memory, user stack, kernel stack) faults the process.
+**Memory-mapped address limits:** LOAD and STORE data addresses in User mode are translated through the running process's page table (the MMU — see `docs/OS-Architecture.md`, "Virtual memory and demand paging"). The MMU is the sole memory-protection mechanism: an access to a page outside the process's mapped extent (an unmapped PTE, or a page index ≥ `MaxPagesPerProcess`) is a **protection fault** that terminates the process (exit status −1), the same teardown path as an invalid instruction. There is no linear address fallback and no separate LOAD/STORE bounds trap.
 
 ---
 
@@ -300,8 +305,7 @@ The following operations are forbidden (or redirected) when the CPU is at User l
 | Operation | How enforced | Effect |
 |-----------|-------------|--------|
 | `IRET` | `IretTrapProvider` (OS trap table) | Faults the process (invalid instruction). |
-| `LOAD` outside process ranges | `LoadBoundsTrapProvider` (OS trap table) | Faults the process. |
-| `STORE` outside process ranges | `StoreBoundsTrapProvider` (OS trap table) | Faults the process. |
+| `LOAD`/`STORE` outside the process's mapped page extent | MMU (`Hardware.TryTranslateData` → `RaiseProtectionFault`) | Terminates the process (protection fault, exit status −1). Not a trap-table entry — enforced by the MMU on every data access. |
 | `OUT reg` | Hardware in `InstructionFunctions.Out` | Redirected: calls `hw.EnterKernel(OUT, ...)` instead of executing directly. |
 | `IN reg` | Hardware in `InstructionFunctions.In` | Redirected: calls `hw.EnterKernel(IN, ...)`. |
 | `OUTS`, `INS`, `INK`, `INPOLL` | Hardware in the respective `InstructionFunctions` handlers | Redirected: each calls `hw.EnterKernel(...)` with its own opcode/operand encoding, same pattern as `OUT`/`IN`. |
@@ -454,10 +458,11 @@ The C# `Hardware` class implements a software MMU that translates user-mode data
 
 Key constants:
 - `PageSize = 256` bytes (= `BuddyDefaultMinBlock`)
-- `MaxPagesPerProcess = 64` (16 KiB of mappable virtual space per process)
+- `MaxPagesPerProcess = 128` (32 KiB of mappable virtual space per process)
 - `IvtPageFault = 15`; `IvtSlotCount = 20`; `OsLayout.CodeBase = 80` (= `IvtSlotCount * 4`)
-- PTE encodings: `>= 0` resident (physical frame base); `-1` unmapped; `-2` non-resident RAM-home; `<= -3` non-resident swap-backed (`SwapPte`); `<= -4096` copy-on-write share (`CowPte`)
-- Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 512` swap slots (total: 576 slots) — the filesystem's file-block region (below) is a separate address space and does not consume slots.
+- PTE encodings: `>= 0` resident (physical frame base); `-1` unmapped (a user access is a protection fault, not a linear fallback); `-2` non-resident RAM-home; `<= -3` non-resident swap-backed (`SwapPte`); `<= -4096` copy-on-write share (`CowPte`)
+- Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 1024` swap slots (total: 1088 slots) — the filesystem's file-block region (below) is a separate address space and does not consume slots.
+- Kernel-mediated user-memory access: `IvtEnsureUserPage = 19` / `Hardware.UserToPhysical(va, isWrite)` synchronously faults in or COW-resolves one user page on demand, outside the normal instruction-level MMU path — used by the `FSYS` read/write wrapper (see [Filesystem](#filesystem)) to translate a user buffer one page-chunk at a time.
 
 See `OS-Architecture.md`, section "Virtual memory and demand paging", for the complete design.
 
@@ -467,7 +472,7 @@ Source files: `CSharpOS/CPU/Hardware.cs` (MMU methods `TryTranslateData`, `SeedP
 
 A complete filesystem — write-back buffer cache, on-disk block allocator with free-chaining, a nested directory tree with path traversal, an open-file table, and byte-level read/write — built as ISA code, the same way the scheduler and buddy allocator are. Three new opcodes support it: `FBREAD`/`FBWRITE` (0x4B/0x4C, privileged raw block transfer to/from the disk's file-block region) and `FSYS` (0x4D, the user-mode syscall entry point: open/read/write/close/exec-by-path).
 
-Three new IVT slots dispatch the filesystem's ISA routines: `IvtCacheOp = 17` (buffer-cache control), `IvtFsOp = 18` (block/directory/path/file-core operations, used internally and by tests), `IvtFsSyscall = 19` (the `FSYS` wrapper). The filesystem is formatted automatically on first boot (guarded by the on-disk superblock magic, so a persisted, already-formatted disk is left alone).
+Three IVT slots dispatch the filesystem's ISA routines: `IvtCacheOp = 16` (buffer-cache control), `IvtFsOp = 17` (block/directory/path/file-core operations, used internally and by tests), `IvtFsSyscall = 18` (the `FSYS` wrapper). A fourth slot, `IvtEnsureUserPage = 19`, backs the FSYS read/write wrapper's page-chunked user-buffer translation (see [Key constants](#implemented-demand-paging-mmu-page-fault-trap-no-new-user-opcode) above). The filesystem is formatted automatically on first boot (guarded by the on-disk superblock magic, so a persisted, already-formatted disk is left alone), and `OperatingSystem.LoadProcess` now installs every program into the filesystem and runs it filesystem-backed (see `docs/OS-Architecture.md`, "Boot creation (Spawn)").
 
 Source files: `CSharpOS/Disk/FsLayout.cs` (on-disk structure), `CSharpOS/Disk/FsImage.cs` (host-side helper for staging a file before running it), `BasicOSPlugin/OsRoutines.Cache.cs` (buffer cache), `BasicOSPlugin/OsRoutines.Fs.cs` (block allocator, directories, path resolution, `FSYS`, open/close/read/write/exec cores), `OSTests/CacheManagerTests.cs`, `OSTests/FsBlockAllocatorTests.cs`, `OSTests/FsDirectoryTests.cs`, `OSTests/FsPathTests.cs`, `OSTests/FsOpenCloseTests.cs`, `OSTests/FsReadWriteTests.cs`, `OSTests/FsSyscallTests.cs`, `OSTests/FsExecTests.cs`.
 
