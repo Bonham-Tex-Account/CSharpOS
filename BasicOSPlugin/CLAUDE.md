@@ -8,12 +8,10 @@
 |------|------|
 | BasicOS.cs | Concrete OS; `(TextWriter)` ctor for plugin loader; CollectTraps via reflection |
 | OsRoutines.cs | **Core**: `BuildOsImage()`, register/enum consts, scheduling (ContextSwitch, Schedule, Block, Wake, ResumeMlfq), lifecycle (Halt, InvalidInstruction, ExitBody, Fork, Exec, Wait, Spawn), Syscall, buddy allocator (BuddyAlloc, AllocSub, BuddyFree, bit helpers), and all shared emit helpers (R, Imm16, LoadField, StoreField*, SetupPrivilegedStack, EmitCacheSlotBase, EmitStampSlot, SpillStore/Load) |
-| OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) |
+| OsRoutines.Paging.cs | PageFault + frame/swap/COW subs (ReleaseFrames, FlushFrames, ZeroSwapSlots, SwapCopy, PairResolve, ResolveCow, CowShare, PteAddress, PageCopy) + kernel user-mem access (PageIn, EnsureUserPage, EnsureUserPageOp, UserWordAddr — Phase 3) |
 | OsRoutines.Cache.cs | EmitCacheOp + EmitCacheSubroutines (cache_find/get/dirty/write_through/pin/unpin/discard/flush) |
-| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) + EmitFsExecSubroutine (fs_exec_core) + EmitFsMaintSubroutines (oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir/fs_resolve_dir) |
+| OsRoutines.Fs.cs | EmitFsOp + EmitFsSubroutines (fs_format/alloc_block/free_block/chain_*) + EmitFsDirSubroutines (fs_hash/root_dir/dir_lookup/dir_insert/dir_remove) + EmitFsPathSubroutines (fs_extract_component/path_resolve/mkdir) + EmitFsSyscall + EmitFsFileSubroutines (oft_alloc/resolve_parent/create_file/open_core/close_core) + EmitFsRwSubroutines (oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core) + EmitFsLoadImage (fs_load_image — Phase 4) + EmitFsExecSubroutine (fs_exec_core) + EmitFsMaintSubroutines (oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir/fs_resolve_dir) |
 | Traps/IretTrapProvider.cs | Blocks IRET in user mode |
-| Traps/LoadBoundsTrapProvider.cs | Bounds-checks LOAD in user mode |
-| Traps/StoreBoundsTrapProvider.cs | Bounds-checks STORE in user mode |
 
 Cross-file calls resolve two ways: C# calls (e.g. BuildOsImage → EmitFsOp) work because it's one partial class; ISA `asm.Call("cache_get")` are runtime label strings the assembler resolves at Build, independent of which file emitted the label.
 
@@ -31,7 +29,7 @@ EmitSchedule         → IvtSchedule (slot 7)             OsRoutines.cs:208
 EmitBlock            → IvtBlockInput + IvtBlockOutput (slots 5 & 6, same address) :216
 EmitWakeEntry(Input) → IvtWakeInput (slot 3)            OsRoutines.cs:1896
 EmitWakeEntry(Output)→ IvtWakeOutput (slot 4)           OsRoutines.cs:1896
-EmitWakeEntry(KeyInput)→ IvtWakeKey (slot 16)           OsRoutines.cs:1896
+EmitWakeEntry(KeyInput)→ IvtWakeKey (slot 15)           OsRoutines.cs:1896
 EmitWakeBody         → (shared tail, no IVT entry)      OsRoutines.cs:1903
 EmitHalt             → IvtHalt (slot 1)                 OsRoutines.cs:229
 EmitInvalidInstruction→ IvtInvalidInstruction (slot 2)  OsRoutines.cs:244

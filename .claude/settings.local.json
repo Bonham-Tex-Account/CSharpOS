@@ -30,7 +30,10 @@
       "Bash(git rm *)",
       "Bash(rm -rf claude-memory)",
       "Bash(git restore *)",
-      "Bash(git commit -q -m ' *)"
+      "Bash(git commit -q -m ' *)",
+      "Bash(python3 *)",
+      "Bash(cat)",
+      "Bash(node /tmp/calc.js)"
     ]
   }
 }

@@ -25,6 +25,7 @@
 |--------|-------|
 | `AttachHardware(Hardware hw)` | Called by Hardware ctor; `LoadTraps(traps)`, `ReserveOsMemory`, `WriteBytes(BuildOsImage)`, `SeedOsData`, then `OnBooted(hw)` hook |
 | `OnBooted(Hardware hw)` | Virtual post-boot hook; base no-op. `BasicOS` overrides it to auto-format the FS once (magic-guarded) |
+| `UsesFilesystemBoot` | Virtual bool, default false; `BasicOS` → true. When true, `LoadProcess` installs each program into the FS (`/bin/p<seq>`) and creates it FS-backed instead of slot-backed (Phase 4) |
 | `SeedOsData()` | Seeds quantum table (L0=1, L1=2, L2=4, L3=255), boost timer, buddy heap config, NextPid=1, cache/swap/COW init |
 | `LoadProcess(Process process)` | Stages entry sizing, dispatches **IvtSpawn** (one routine: allocs region + DREADs image + seeds regs/PID), seeds fds, syncs descriptor |
 | `SetLayoutFromEntry(int entryAddress)` | Rebuilds HW layout from entry; called before resume (via SETLAYOUT) |
@@ -33,12 +34,15 @@
 ### LoadProcess flow
 1. Resolve/auto-stage the program slot in `hw.Disk` (a file-path `Process` reads bytes → `Disk.Store`); disk-full → log + bail
 2. `programLength = hw.Disk.GetLength(slot)`; floor `RequiredMemory` to `GetRegisterFileSize()+4`
-3. `total = programLength + RequiredMemory + RequiredStackSize + KernelStackSize`
+3. `total = programLength + RequiredMemory + RequiredStackSize + KernelStackSize`; reject if the user extent exceeds `MaxPagesPerProcess*PageSize`
 4. `FindFreeSlot`; process-table full → log + bail
-5. Write the entry's sizing fields (ProgramSize/RequiredMemory/RequiredStackSize/TotalSize/DiskSlot) + State=Terminated placeholder
-6. `RunOsRoutineSynchronously(IvtSpawn, entry)` — allocs the region, DREADs the image, seeds saved regs (EIP/ESP), scheduling state, and a fresh PID; sets ProgramAddress=-1 on OOM
-7. ProgramAddress < 0 → log + bail; else read back the assigned PID
-8. Seed fd table (fd[0]=stdin, fd[1]=stdout → the process's own device id = slot); grow ProcessCount high-water mark; sync the C# `Process` descriptor + name map
+5. Write the entry's sizing fields (ProgramSize/RequiredMemory/RequiredStackSize/TotalSize) + State=Terminated placeholder
+6. **Program backing** (Phase 4). If `UsesFilesystemBoot` (virtual; **BasicOS = true**): read the image bytes, `FsImage.EnsureDir("/bin")`, `FsImage.InstallProgram` to `/bin/p<seq>` (chunked write through the OS-region staging buffer, using the not-yet-spawned target slot as the transient FS owner), resolve → set `FirstBlock` + `DiskSlot = -1`. Else legacy: `DiskSlot = slot`, `FirstBlock = -1`.
+7. `RunOsRoutineSynchronously(IvtSpawn, entry)` — allocs the region, loads the image (DREAD if slot-backed, else `fs_load_image` from the block chain), seeds saved regs (EIP/ESP), scheduling state, and a fresh PID; sets ProgramAddress=-1 on OOM
+8. ProgramAddress < 0 → log + bail; else read back the assigned PID
+9. Seed fd table (fd[0]=stdin, fd[1]=stdout → the process's own device id = slot); grow ProcessCount high-water mark; sync the C# `Process` descriptor + name map
+
+`UsesFilesystemBoot` (virtual, default false; BasicOS overrides → true) selects the FS-install path over the legacy disk-slot path, so an OS without an FS image (or a bare test double) keeps DREAD-from-slot.
 
 ---
 
@@ -124,8 +128,8 @@ int    FileBlockCount / FileBlockSize   // properties (0 for a slot-only Bin)
 void   Save(string path) / Load(string path) // persist ONLY the file-block region (CSFS header)
 ```
 
-Default disk: `Bin(DefaultDiskSlots + SwapSlotCount, DefaultDiskSlotSize, DefaultFileBlockCount, DefaultFileBlockSize)` = `Bin(576, 1024, 256, 256)`.
-Image slots: 0–63. Swap slots: 64–575 (`SwapSlot(proc, page) = 64 + proc*64 + page`). File blocks: 0–255 (independent address space, moved by `FBREAD`/`FBWRITE`).
+Default disk: `Bin(DefaultDiskSlots + SwapSlotCount, DefaultDiskSlotSize, DefaultFileBlockCount, DefaultFileBlockSize)` = `Bin(1088, 1024, 256, 256)` (SwapSlotCount=1024 after Phase 2 doubled MaxPagesPerProcess to 128).
+Image slots: 0–63. Swap slots: 64–1087 (`SwapSlot(proc, page) = 64 + proc*128 + page`, stride = SwapSlotsPerProcess = MaxPagesPerProcess = 128). File blocks: 0–255 (independent address space, moved by `FBREAD`/`FBWRITE`; the FS lives here).
 
 ---
 

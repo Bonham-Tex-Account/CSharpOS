@@ -27,7 +27,7 @@ dotnet build
 dotnet run --project CSharpOSConsole
 ```
 
-The menu lets you pick one of 12 demo scenarios. After selecting a scenario you are also prompted for visualizer detail level (1 minimal / 2 normal / 3 high) and rendering performance level.
+The menu lets you pick one of 13 demo scenarios. After selecting a scenario you are also prompted for visualizer detail level (1 minimal / 2 normal / 3 high) and rendering performance level.
 
 ### Demo scenarios
 
@@ -45,6 +45,7 @@ The menu lets you pick one of 12 demo scenarios. After selecting a scenario you 
 | 10 | Two guessing games — Tab switches focus between them (process switching) |
 | 11 | Spawn tree — a parent forks two children; watch the Process tree panel |
 | 12 | String I/O demo — type a name in the Screen panel, press Enter (`OUTS`/`INS` in action) |
+| 13 | Filesystem demo — a process creates a file, writes/reads it via `FSYS`, prints it back |
 
 There is one shared Screen panel showing the focused process's I/O; `Tab` switches focus between running processes. Typed input is sent as an int or a string depending on what the focused process is waiting on.
 
@@ -178,11 +179,13 @@ Allocations are power-of-two blocks from a 256-bit compact bitmap. The tree is s
 
 ### Trap system
 
-`BasicOSPlugin` registers three traps enforced before each user-mode instruction:
-- **IRET** is forbidden in user mode.
-- **LOAD/STORE** from outside the process's own memory range raises a fault.
+`BasicOSPlugin` registers one trap enforced before each user-mode instruction: **IRET** is forbidden in user mode. Memory protection is handled separately — the MMU is the sole mechanism (see below); there is no LOAD/STORE bounds trap.
 
 New trap handlers implement `ITrapProvider` (in `CSharpOS`) and are discovered automatically by `BasicOS.CollectTraps()` via reflection.
+
+### Memory protection
+
+User-mode `LOAD`/`STORE` (and the `CALL`/`RET` stack) translate through the running process's per-process page table (the MMU). An access to a page outside the process's mapped extent is a **protection fault**: the process is terminated (exit status −1) via the same teardown path as an invalid instruction. There is no linear address fallback. Kernel-mode code addresses memory absolutely and is not translated. Each process can map up to `MaxPagesPerProcess = 128` pages (32 KiB) of virtual space.
 
 ### Filesystem
 
@@ -191,9 +194,9 @@ CSharpOS has a complete filesystem, and — like the scheduler and allocator —
 - **Buffer cache** — a write-back cache in the OS memory region (`cache_*` ISA routines) with LRU eviction, dirty tracking, pinning, and periodic flush. All filesystem block I/O goes through it.
 - **Block allocator** — a superblock + free bitmap + per-block free-chaining, so a file's blocks can be scattered and linked (`fs_format`/`fs_alloc_block`/`fs_free_block`/`fs_chain_*`).
 - **Directories** — nested directories with word-per-char names and full path traversal (`/a/b/c`), so files are addressed by absolute path.
-- **File syscalls** — a single user-mode instruction, `FSYS`, gives processes open/read/write/close, plus exec-by-path (replace the running process's image with a program stored as a file in the filesystem rather than a disk image slot).
+- **File syscalls** — a single user-mode instruction, `FSYS`, gives processes open/read/write/close, unlink, mkdir, readdir, plus exec-by-path (replace the running process's image with a program stored as a file in the filesystem rather than a disk image slot).
 - **Boot auto-format** — the filesystem is formatted automatically the first time the machine boots on a fresh disk; a `.bin` disk image that was already formatted (and persisted via `Bin.Save`/`Bin.Load`) is left alone.
 
-Programs still boot from disk image slots via `OperatingSystem.LoadProcess` in the general case; `FSYS` exec-by-path is the first path that launches a program stored in the filesystem instead. A shell process that resolves programs by filesystem path (rather than by disk slot number) is future work.
+`OperatingSystem.LoadProcess` now installs every program into the filesystem (under `/bin/p<seq>`) and runs it filesystem-backed rather than from a disk image slot — `BasicOS` opts into this via the `UsesFilesystemBoot` hook. `FSYS` exec-by-path and demand-paged FSYS read/write buffers both go through the same page-table-mediated memory access as ordinary `LOAD`/`STORE`, so a file buffer that lives in swapped-out process memory round-trips correctly.
 
 See `docs/OS-Architecture.md`, section "The ISA filesystem", for the full design, and `docs/ISA.md` for the `FSYS`/`FBREAD`/`FBWRITE` instruction reference.
