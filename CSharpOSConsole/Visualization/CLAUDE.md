@@ -178,4 +178,4 @@ Reconstructs the buddy tree from:
 
 `VisualizerMode` enum values (1–9): 1–5 = per-process window modes (legacy); 6 = Memory churn; 7 = Fill & drain heap; 8 = Scheduler+memory; 9 = Shell.
 
-Modes 6–8 use `ScheduleStaggeredLoads` with `Programs.BusyThenHalt` jobs of sizes {128, 512, 1024}. Mode 9 boots `Programs.Shell()`.
+Modes 6–8 use `ScheduleStaggeredLoads` with `Programs.BusyThenHalt` jobs of sizes {128, 512, 1024}. Mode 9 (`RunShell`) installs the `/bin` command programs (ls/cat/rm/mkdir/echo/help + counter/average/guess) + a `/note` file into the FS, then boots `Programs.Shell()` — type an absolute command like `/bin/ls /` or `/bin/cat /note`. v1 shell is **single-shot** (exec-by-path replaces it); a looping shell is deferred (fork can't propagate the typed line to a child — see `Programs.Shell` + the §2 memory).

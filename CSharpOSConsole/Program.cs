@@ -250,20 +250,37 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
     OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
     Hardware hw = new Hardware(MemorySize, registers, os);
 
-    // Demo programs live on disk as shell commands (not loaded as processes). The shell
-    // reads a disk-slot number and forks/execs it.
-    int counterCmd = hw.Disk.Store(Programs.CounterToTen());
-    int averageCmd = hw.Disk.Store(Programs.AverageOfList());
-    int guessCmd = hw.Disk.Store(Programs.GuessingGame());
+    // Install the shell's /bin command programs (and a couple of demo programs) into the filesystem
+    // before any process is loaded — FsImage staging is boot-time only. The shell exec-by-paths them
+    // by absolute path. The FS is already formatted (BasicOS auto-formats at boot).
+    FsImage.EnsureDir(hw, "/bin");
+    FsImage.WriteFile(hw, "/bin/ls", Programs.Ls());
+    FsImage.WriteFile(hw, "/bin/cat", Programs.Cat());
+    FsImage.WriteFile(hw, "/bin/rm", Programs.Rm());
+    FsImage.WriteFile(hw, "/bin/mkdir", Programs.Mkdir());
+    FsImage.WriteFile(hw, "/bin/echo", Programs.Echo());
+    FsImage.WriteFile(hw, "/bin/help", Programs.Help());
+    FsImage.WriteFile(hw, "/bin/counter", Programs.CounterToTen());
+    FsImage.WriteFile(hw, "/bin/average", Programs.AverageOfList());
+    FsImage.WriteFile(hw, "/bin/guess", Programs.GuessingGame());
+    // A text file for `cat` to read (word-per-char, the way cat/OUTS read file content).
+    string noteText = "hello from the filesystem";
+    byte[] note = new byte[noteText.Length * 4];
+    for (int n = 0; n < noteText.Length; n++)
+    {
+        note[n * 4] = (byte)noteText[n];
+    }
+    FsImage.WriteFile(hw, "/note", note);
+
     int shellSlot = hw.Disk.Store(Programs.Shell());
 
-    Console.WriteLine("  Shell: focus it (Tab), type a command id then Enter to run it:");
-    Console.WriteLine($"    {counterCmd} = counter,  {averageCmd} = average,  {guessCmd} = guessing game (secret 42)");
+    Console.WriteLine("  Shell: focus it (Tab), type a command + Enter (v1 runs one command per shell):");
+    Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter");
     Console.WriteLine();
 
     SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail);
-    // The shell needs enough memory for the largest program it execs into.
-    os.LoadProcess(new Process(shellSlot, 512, RequiredStackSize));
+    // The shell needs enough memory for the largest program it execs into (image + argv reservation).
+    os.LoadProcess(new Process(shellSlot, 1024, RequiredStackSize));
     dashboard.Run();
 
     Console.WriteLine();

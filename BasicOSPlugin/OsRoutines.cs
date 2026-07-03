@@ -52,6 +52,7 @@ public static partial class OsRoutines
     // Byte offset of the EAX / EIP / ESP slots within an entry's saved register file
     // (the register file mirrors the live registers: slot = register index * 4).
     private const int EaxSlot    = (int)RegisterName.EAX * 4;
+    private const int EbxSlot    = (int)RegisterName.EBX * 4;
     private const int EipSlot    = (int)RegisterName.EIP * 4;
     private const int EspSlot    = (int)RegisterName.ESP * 4;
 
@@ -98,6 +99,8 @@ public static partial class OsRoutines
         EmitFsFileSubroutines(asm);// "oft_alloc/resolve_parent/create_file/open_core/close_core"
         EmitFsRwSubroutines(asm);  // "oft_from_fd/grow_chain/read_core/write_core"
         EmitFsLoadImage(asm);      // "fs_load_image" (chain→RAM copy; shared by spawn + exec)
+        EmitExecTokenizer(asm);    // "exec_next_token" (space tokenizer over the captured command line)
+        EmitExecBuildArgv(asm);    // "exec_build_argv" (write argv[] + strings into the child image)
         EmitFsExecSubroutine(asm); // "fs_exec_core"
         EmitFsMaintSubroutines(asm); // "oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir"
         EmitResumeMlfq(asm);    // label "resume_mlfq"

@@ -145,27 +145,229 @@ public static class Programs
         return image;
     }
 
-    // A tiny shell: read a command id (a disk slot) via IN, fork, have the child EXEC
-    // that program while the parent focuses the child and waits for it, then loop. This
-    // exercises the whole spawning family (FORK / EXEC / SETFOCUS / WAIT) end to end.
-    public static byte[] Shell()
+    // ---- /bin command programs (Shell §2) --------------------------------
+    // These are shipped as real FS programs under /bin and exec'd by the shell like any other
+    // program. Each receives argv the standard way: at entry EAX = argc, EBX = argv base (virtual);
+    // argv[k] = *(argvBase + k*4) is a virtual pointer to a null-terminated word-per-char string.
+    // argv[0] is the command as typed. Path arguments (argv[1]) live in the RAM-home argv
+    // reservation, so passing them straight to the FSYS path syscalls (open/unlink/mkdir/readdir)
+    // is correct despite those syscalls using flat ProgramAddress+ptr translation.
+
+    // Writes `s` into `image` at byte offset `off`, one character per 4-byte word (the OUTS/INS /
+    // path convention). Leaves the following word as the null terminator (arrays start zeroed).
+    private static void WriteString(byte[] image, int off, string s)
+    {
+        for (int i = 0; i < s.Length; i++)
+        {
+            image[off + i * 4] = (byte)s[i];
+        }
+    }
+
+    // echo: print each argument (argv[1..]) back, one per output. The clearest argv demo.
+    public static byte[] Echo()
     {
         Assembler asm = new Assembler();
-        asm.Label("loop");
-        asm.In(RegisterName.EAX);                       // read a command id (disk slot)
-        asm.Mov(RegisterName.ECX, RegisterName.EAX);    // save it (FORK clears the child's EAX)
-        asm.Fork();
-        asm.MovImm(RegisterName.EBX, 0);
-        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
-        asm.Jnz("parent");
-        // Child (EAX == 0): become the requested program.
-        asm.Exec(RegisterName.ECX);
-        // Parent (EAX == child PID): focus the child, wait for it, then prompt again.
-        asm.Label("parent");
-        asm.SetFocus(RegisterName.EAX);
-        asm.Wait(RegisterName.EAX);
-        asm.Jmp("loop");
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);    // ESI = argv base
+        asm.Mov(RegisterName.EDI, RegisterName.EAX);    // EDI = argc
+        asm.MovImm(RegisterName.ECX, 1);                // k = 1 (skip argv[0] = the command name)
+        asm.Label("echo_loop");
+        asm.Cmp(RegisterName.ECX, RegisterName.EDI);
+        asm.Jns("echo_done");                           // k >= argc → done
+        asm.Mov(RegisterName.EAX, RegisterName.ECX);
+        asm.MovImm(RegisterName.EDX, 4);
+        asm.Mul(RegisterName.EAX, RegisterName.EDX);    // k*4
+        asm.Add(RegisterName.EAX, RegisterName.ESI);    // &argv[k]
+        asm.Load(RegisterName.EAX, RegisterName.EAX);   // argv[k] (virtual string pointer)
+        asm.MovImm(RegisterName.EDX, 20);               // max words (OUTS stops at the null)
+        asm.Outs(RegisterName.EAX, RegisterName.EDX);
+        asm.Inc(RegisterName.ECX);
+        asm.Jmp("echo_loop");
+        asm.Label("echo_done");
+        asm.Hlt();
         return asm.Build();
+    }
+
+    // rm <file>: delete a file via FsysUnlink(argv[1]).
+    public static byte[] Rm()
+    {
+        Assembler asm = new Assembler();
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);    // argv base
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("rm_exit");                              // argc < 2 → nothing to remove
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EBX, RegisterName.EAX);   // EBX = argv[1] (path)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysUnlink);
+        asm.Fsys();
+        asm.Label("rm_exit");
+        asm.Hlt();
+        return asm.Build();
+    }
+
+    // mkdir <dir>: create a directory via FsysMkdir(argv[1]).
+    public static byte[] Mkdir()
+    {
+        Assembler asm = new Assembler();
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);    // argv base
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("mkdir_exit");                           // argc < 2 → nothing to make
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EBX, RegisterName.EAX);   // EBX = argv[1] (path)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysMkdir);
+        asm.Fsys();
+        asm.Label("mkdir_exit");
+        asm.Hlt();
+        return asm.Build();
+    }
+
+    // cat <file>: print a file's contents. Reads in fixed chunks into a RAM-home image buffer and
+    // OUTS each chunk until read returns 0 (EOF). (FSYS read buffers are page-translated, so a
+    // RAM-home image buffer is fine; the path in argv[1] is likewise RAM-home for FsysOpen.)
+    public static byte[] Cat()
+    {
+        const int ReadBuf = 256;     // RAM-home buffer, clear of the code
+        const int ReadChunk = 32;    // chars (words) per read
+
+        Assembler asm = new Assembler();
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);    // argv base
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("cat_exit");                             // argc < 2 → nothing to print
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EDI, RegisterName.EAX);   // EDI = argv[1] (path)
+        // open(path, 0)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Fsys();
+        asm.MovImm(RegisterName.EDX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("cat_exit");                             // open failed
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);    // EBX = fd (preserved across FSYS/OUTS)
+        asm.Label("cat_loop");
+        asm.MovImm(RegisterName.EAX, Hardware.FsysRead);
+        asm.MovImm16(RegisterName.ECX, ReadBuf);
+        asm.MovImm(RegisterName.EDX, ReadChunk);
+        asm.Fsys();                                     // EAX = chars read (0 = EOF, -1 = error)
+        asm.MovImm(RegisterName.EDX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Jz("cat_close");
+        asm.Js("cat_close");
+        asm.Mov(RegisterName.EDX, RegisterName.EAX);    // len = chars read
+        asm.MovImm16(RegisterName.EAX, ReadBuf);
+        asm.Outs(RegisterName.EAX, RegisterName.EDX);
+        asm.Jmp("cat_loop");
+        asm.Label("cat_close");
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();
+        asm.Label("cat_exit");
+        asm.Hlt();
+        byte[] code = asm.Build();
+        byte[] image = new byte[ReadBuf + ReadChunk * 4];
+        Array.Copy(code, image, code.Length);
+        return image;
+    }
+
+    // ls [dir]: list a directory's entries (defaults to "/"). Walks FsysReaddir by index until it
+    // returns -1, printing each entry's name. The out buffer + the default "/" path are RAM-home
+    // image buffers (FsysReaddir uses flat path/out translation).
+    public static byte[] Ls()
+    {
+        const int RootOff = 128;   // the default "/" path (word-per-char)
+        const int OutBuf = 192;    // 64-byte readdir entry lands here (RAM-home)
+
+        Assembler asm = new Assembler();
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);    // argv base
+        asm.MovImm16(RegisterName.EDI, RootOff);        // EDI = dir path ptr (default "/")
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("ls_have_dir");                          // argc < 2 → keep the default
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EDI, RegisterName.EAX);   // EDI = argv[1] (dir path)
+        asm.Label("ls_have_dir");
+        asm.MovImm(RegisterName.ECX, 0);                // i = entry index (preserved across FSYS)
+        asm.Label("ls_loop");
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);    // dir path ptr
+        asm.MovImm16(RegisterName.EDX, OutBuf);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysReaddir);
+        asm.Fsys();                                     // EAX = entry type or -1 (past end)
+        asm.MovImm(RegisterName.EDX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("ls_done");                              // -1 → done
+        asm.MovImm16(RegisterName.EAX, OutBuf + FsLayout.DirEntryName);
+        asm.MovImm(RegisterName.EDX, FsLayout.NameMaxChars);
+        asm.Outs(RegisterName.EAX, RegisterName.EDX);   // print the entry name
+        asm.Inc(RegisterName.ECX);
+        asm.Jmp("ls_loop");
+        asm.Label("ls_done");
+        asm.Hlt();
+        byte[] code = asm.Build();
+        byte[] image = new byte[OutBuf + FsLayout.DirEntryBytes];
+        Array.Copy(code, image, code.Length);
+        WriteString(image, RootOff, "/");
+        return image;
+    }
+
+    // help: print the list of available commands.
+    public static byte[] Help()
+    {
+        const int MsgOff = 64;
+        const string Msg = "cmds: ls cat rm mkdir echo help";
+
+        Assembler asm = new Assembler();
+        asm.MovImm16(RegisterName.EAX, MsgOff);
+        asm.MovImm(RegisterName.ECX, Msg.Length);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Hlt();
+        byte[] code = asm.Build();
+        byte[] image = new byte[MsgOff + (Msg.Length + 1) * 4];
+        Array.Copy(code, image, code.Length);
+        WriteString(image, MsgOff, Msg);
+        return image;
+    }
+
+    // A command shell (Shell §2): prompt, read a command line (INS), and run the typed command by
+    // exec-by-path with its arguments. v1 uses absolute paths (no CWD): commands are typed like
+    // "/bin/ls /", "/bin/cat /note". If the command does not resolve, it prints "?".
+    //
+    // v1 is single-shot: the shell process itself becomes the command (exec replaces its image), so
+    // one command runs per shell. A looping shell (fork a child per command, keep prompting) is
+    // deferred — it needs FORK to propagate the typed line to the child and typed input to reach a
+    // forked child's INS, neither of which this OS supports yet (see the Shell notes in CLAUDE.md).
+    public static byte[] Shell()
+    {
+        const int PromptOff = 128;   // "$ " prompt
+        const int ErrOff = 160;      // "?" printed when a command fails to exec
+        const int LineBuf = 256;     // the typed command-line buffer
+        const int LineMax = 32;      // buffer capacity in words
+
+        Assembler asm = new Assembler();
+        asm.MovImm16(RegisterName.EAX, PromptOff);
+        asm.MovImm(RegisterName.ECX, 2);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);   // prompt
+        asm.MovImm16(RegisterName.EAX, LineBuf);
+        asm.MovImm(RegisterName.ECX, LineMax);
+        asm.Ins(RegisterName.EAX, RegisterName.ECX);    // read a line (blocks until one arrives)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysExec);
+        asm.MovImm16(RegisterName.EBX, LineBuf);
+        asm.Fsys();                                     // become the command; returns only on failure
+        asm.MovImm16(RegisterName.EAX, ErrOff);
+        asm.MovImm(RegisterName.ECX, 1);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);   // command not found / not a file
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Exit(RegisterName.EAX);
+        byte[] code = asm.Build();
+
+        byte[] image = new byte[LineBuf + LineMax * 4];
+        Array.Copy(code, image, code.Length);
+        WriteString(image, PromptOff, "$ ");
+        WriteString(image, ErrOff, "?");
+        return image;
     }
 
     // Parent forks three children with different lifetimes, then waits for all three.

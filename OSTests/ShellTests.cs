@@ -5,9 +5,10 @@ using Xunit;
 namespace OSTests;
 
 /// <summary>
-/// Covers SETFOCUS (map a PID to the foreground process) and the shell program, which
-/// ties the whole spawning family together: read a command, FORK, child EXECs it, parent
-/// SETFOCUSes the child and WAITs for it, then loops.
+/// Covers SETFOCUS (map a PID to the foreground process) and the shell program (Shell §2): the
+/// shell prompts, reads a command line (INS), and exec-by-paths the typed command with its args
+/// (FSYS Exec). Commands are absolute paths; a command that does not resolve prints "?". v1 is
+/// single-shot (the shell becomes the command); a looping shell is deferred (see Programs.Shell).
 /// </summary>
 public class ShellTests : IDisposable
 {
@@ -31,17 +32,6 @@ public class ShellTests : IDisposable
                 File.Delete(path);
             }
         }
-    }
-
-    private static List<int> CaptureOutputs(Hardware hw)
-    {
-        List<int> outputs = new List<int>();
-        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) =>
-        {
-            outputs.Add(e.Value);
-            hw.RaiseOutputComplete(e.Device);
-        };
-        return outputs;
     }
 
     private static byte[] PrintThenHalt(int value)
@@ -74,28 +64,74 @@ public class ShellTests : IDisposable
         Assert.Equal(0, hw.GetActiveProcess());
     }
 
+    private static (List<int> ints, List<string?> strings) CaptureAll(Hardware hw)
+    {
+        List<int> ints = new List<int>();
+        List<string?> strings = new List<string?>();
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) =>
+        {
+            if (e.StringValue != null)
+            {
+                strings.Add(e.StringValue);
+            }
+            else
+            {
+                ints.Add(e.Value);
+            }
+            hw.RaiseOutputComplete(e.Device);
+        };
+        return (ints, strings);
+    }
+
     [Fact]
-    public void Shell_ForksAndExecsACommand_FromTypedInput()
+    public void Shell_RunsATypedCommand_ByPath()
     {
         BasicOS os = new BasicOS(new StringWriter());
-        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os); // ctor stages kernel image
-        List<int> outputs = CaptureOutputs(hw);
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        (List<int> ints, List<string?> strings) = CaptureAll(hw);
 
-        int commandSlot = hw.Disk.Store(PrintThenHalt(55)); // the program the shell will run
-        int shellSlot = hw.Disk.Store(Programs.Shell());
-        os.LoadProcess(new Process(shellSlot, 256, 64));     // the shell, slot 0
-
-        // Focus the shell and type the command id (the command program's disk slot).
+        // Install a command program in /bin, then load the shell.
+        FsImage.EnsureDir(hw, "/bin");
+        FsImage.WriteFile(hw, "/bin/p", PrintThenHalt(55));
+        os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128));   // shell = slot 0
         hw.SetActiveProcess(0);
-        hw.RaiseInputInterrupt(commandSlot);
 
-        // Run until the shell has forked + execed the command, which prints 55.
-        for (int i = 0; i < 60000 && !outputs.Contains(55); i++)
+        // Let the (focused) shell reach its INS prompt, then type the command line; the shell
+        // exec-by-paths it, becoming /bin/p, which prints 55.
+        for (int i = 0; i < 3000; i++)
+        {
+            hw.Run();
+        }
+        hw.RaiseStringInputInterrupt("/bin/p");
+        for (int i = 0; i < 60000 && !ints.Contains(55); i++)
         {
             hw.Run();
         }
 
-        Assert.Contains(55, outputs); // the command ran via the shell's fork/exec
-        Assert.True(os.HasProcesses); // the shell itself loops, still alive
+        Assert.Contains(55, ints);   // the typed command ran via the shell's exec-by-path
+        _ = strings;
+    }
+
+    [Fact]
+    public void Shell_UnknownCommand_PrintsError()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        (_, List<string?> strings) = CaptureAll(hw);
+
+        os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128));
+        hw.SetActiveProcess(0);
+
+        for (int i = 0; i < 3000; i++)
+        {
+            hw.Run();
+        }
+        hw.RaiseStringInputInterrupt("/bin/nope");
+        for (int i = 0; i < 60000 && !strings.Contains("?"); i++)
+        {
+            hw.Run();
+        }
+
+        Assert.Contains("?", strings);   // the failed exec reported the error
     }
 }
