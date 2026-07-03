@@ -14,6 +14,7 @@
 | FrameHistory.cs | Capped ring of immutable per-instruction snapshots for time-travel scrub |
 | InteractionController.cs | Key handling: `HandleKey(ConsoleKey) → bool`; pure, no side effects |
 | BuddyHeapView.cs | Reconstructs buddy tree from kernel bitmap + process table |
+| FsDiskView.cs | Reconstructs FS state (superblock stats, block map, dir tree) from cache + Bin; static `ReadDisk(hw)` → immutable `Snapshot`; cache-first block reads |
 | Pacer.cs | Delay/step pacing for the streaming renderer |
 
 ---
@@ -29,6 +30,7 @@ Key data the bridge maintains and renderers read:
 | MlfqRows | list of MlfqProcessRow | One per live process: priority, ticks, state, pid |
 | FreeBlocks | list of MemoryRange | For the memory-map bar |
 | BuddyTree | BuddyHeapView | Reconstructed tree |
+| DiskView | FsDiskView.Snapshot? | Reconstructed FS; rebuilt by the bridge only on an FS OS-routine (IvtFsSyscall/IvtFsOp/IvtCacheOp) + once at boot |
 | FocusedProcess | int | Active process index (-1 = none) |
 | OutputBuffers | dict int→list<int> | Per-process output history |
 | FocusedOutput | list<int> | OutputBuffers[FocusedProcess] |
@@ -96,6 +98,7 @@ SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delay
 | `Enter` | Submit typed number to focused process stdin |
 | `Backspace` | Clear input buffer |
 | `o` | Toggle ShowProgramIo |
+| `d` | Toggle the Buddy panel slot between the buddy tree and the Disk (filesystem) view (`SpectreDashboard.ShowDisk`) |
 | `q` | Quit |
 
 ### Headless Testing Seam
@@ -143,9 +146,11 @@ Snapshots are safe to store because the bridge REPLACES (never mutates) the obje
 ## InteractionController
 
 ```csharp
-// Constructor
+// Constructor (trailing Actions are optional; extend here to add new command keys)
 InteractionController(FrameHistory frames, bool autoRun, int delayMs,
-    Action toggleIo, Action cycleFocus, Action<int> submitInput)
+    Action toggleIo, Action cycleFocus, Action<int> submitInput,
+    Action<string>? submitStringInput = null, Action<int>? submitKey = null,
+    Action? toggleDisk = null)   // `d` key
 
 // Usage
 bool handled = interaction.HandleKey(ConsoleKey key);

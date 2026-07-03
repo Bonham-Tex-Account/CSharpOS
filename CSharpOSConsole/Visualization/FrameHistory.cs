@@ -21,6 +21,7 @@ public sealed class Frame
     public IReadOnlyList<BuddyHeapView.ProcessRow> ProcessTable { get; init; } = new List<BuddyHeapView.ProcessRow>();
     public IReadOnlyList<BuddyHeapView.FreeBlock> FreeBlocks { get; init; } = new List<BuddyHeapView.FreeBlock>();
     public BuddyHeapView.BuddyNode? BuddyTree { get; init; }
+    public FsDiskView.Snapshot? DiskView { get; init; }
 
     public int InstructionCount { get; init; }
     public int ContextSwitchCount { get; init; }
@@ -105,6 +106,7 @@ public sealed class FrameHistory
             ProcessTable = model.ProcessTable,
             FreeBlocks = model.FreeBlocks,
             BuddyTree = model.BuddyTree,
+            DiskView = model.DiskView,
             InstructionCount = model.InstructionCount,
             ContextSwitchCount = model.ContextSwitchCount,
             FaultCount = model.FaultCount,
