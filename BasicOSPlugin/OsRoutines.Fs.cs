@@ -832,25 +832,156 @@ public static partial class OsRoutines
         asm.Mov(R(R15), R(EAX));
         asm.Jmp("fsy_deliver");
 
+        // fsy_read/fsy_write (Phase 3 rectification): the user buffer pointer (ECX) is now left
+        // VIRTUAL rather than translated once via ProgramAddress+ptr — a single absolute base
+        // is only valid when the whole buffer sits in one contiguous, RAM-home region, which
+        // is false for a swap-backed DATA-region buffer or one spanning more than one physical
+        // frame. Instead, this loop walks the buffer one page-chunk at a time, translating each
+        // chunk's starting address via user_word_addr (which faults it in / resolves COW as
+        // needed) and delegating the actual transfer to the unchanged, absolute-address
+        // fs_read_core/fs_write_core for that chunk — so those cores, and every isolation test
+        // that calls them directly via IvtFsOp with a raw absolute buffer, are untouched.
         asm.Label("fsy_read");
-        // translate user buffer ptr (ECX) to absolute; fd in EBX, count in EDX, proc in ESI.
-        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
-        asm.Load(R(ESI), R(EBP));                // ESI = proc index
-        EntryAddress(asm, ESI, R9);
-        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
-        asm.Add(R(ECX), R(R10));                 // ECX = absolute buffer addr
-        asm.Call("fs_read_core");                // (EBX=fd, ECX=abs buf, EDX=count, ESI=proc)
-        asm.Mov(R(R15), R(EAX));
+        SpillStore(asm, OsLayout.FsWrapFd, EBX);
+        SpillStore(asm, OsLayout.FsWrapPtr, ECX);
+        SpillStore(asm, OsLayout.FsWrapRemaining, EDX);
+        asm.MovImm(R(EAX), 0);
+        SpillStore(asm, OsLayout.FsWrapCopied, EAX);
+        asm.Label("fsyr_loop");
+        SpillLoad(asm, OsLayout.FsWrapRemaining, EAX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("fsyr_done");
+        // chunk = min(remaining, wordsLeftInPage(ptr))
+        SpillLoad(asm, OsLayout.FsWrapPtr, EBX);
+        asm.Mov(R(ECX), R(EBX));
+        asm.MovImm(R(EDX), OsLayout.PageSize - 1);
+        asm.And(R(ECX), R(EDX));                 // ECX = byteOffsetInPage
+        Imm16(asm, EDX, OsLayout.PageSize);      // PageSize (256) overflows an 8-bit MovImm
+        asm.Sub(R(EDX), R(ECX));                 // EDX = bytesLeftInPage
+        asm.MovImm(R(ECX), 4);
+        asm.Div(R(EDX), R(ECX));                 // EDX = wordsLeftInPage
+        SpillLoad(asm, OsLayout.FsWrapRemaining, ECX);
+        asm.Cmp(R(ECX), R(EDX));
+        asm.Js("fsyr_chunk_ok");                 // remaining < wordsLeftInPage: chunk = remaining
+        asm.Mov(R(ECX), R(EDX));                 // else chunk = wordsLeftInPage
+        asm.Label("fsyr_chunk_ok");
+        SpillStore(asm, OsLayout.FsWrapChunk, ECX);
+        // translate the chunk's starting virtual address (isWrite=1: filling the user buffer)
+        SpillLoad(asm, OsLayout.FsWrapPtr, EAX);
+        asm.MovImm(R(R11), 1);
+        asm.Call("user_word_addr");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsyr_fail");
+        asm.Mov(R(ECX), R(EAX));                 // ECX = physical chunk buffer
+        SpillLoad(asm, OsLayout.FsWrapFd, EBX);
+        SpillLoad(asm, OsLayout.FsWrapChunk, EDX);
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EAX));
+        asm.Call("fs_read_core");                // EAX = words read this chunk, or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsyr_partial");
+        SpillLoad(asm, OsLayout.FsWrapCopied, EBX);
+        asm.Add(R(EBX), R(EAX));
+        SpillStore(asm, OsLayout.FsWrapCopied, EBX);
+        SpillLoad(asm, OsLayout.FsWrapPtr, EBX);
+        asm.Mov(R(ECX), R(EAX));
+        asm.MovImm(R(EDX), 4);
+        asm.Mul(R(ECX), R(EDX));
+        asm.Add(R(EBX), R(ECX));
+        SpillStore(asm, OsLayout.FsWrapPtr, EBX);
+        SpillLoad(asm, OsLayout.FsWrapRemaining, EBX);
+        asm.Sub(R(EBX), R(EAX));
+        SpillStore(asm, OsLayout.FsWrapRemaining, EBX);
+        SpillLoad(asm, OsLayout.FsWrapChunk, EBX);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsyr_done");                     // short read: EOF reached, stop
+        asm.Jmp("fsyr_loop");
+        asm.Label("fsyr_partial");
+        SpillLoad(asm, OsLayout.FsWrapCopied, EBX);
+        asm.MovImm(R(ECX), 0);
+        asm.Cmp(R(EBX), R(ECX));
+        asm.Jnz("fsyr_done");                    // already copied something: return the partial count
+        asm.Jmp("fsyr_fail");
+        asm.Label("fsyr_done");
+        SpillLoad(asm, OsLayout.FsWrapCopied, R15);
+        asm.Jmp("fsy_deliver");
+        asm.Label("fsyr_fail");
+        asm.MovImm(R(R15), 0);
+        asm.Dec(R(R15));
         asm.Jmp("fsy_deliver");
 
         asm.Label("fsy_write");
-        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
-        asm.Load(R(ESI), R(EBP));
-        EntryAddress(asm, ESI, R9);
-        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
-        asm.Add(R(ECX), R(R10));
+        SpillStore(asm, OsLayout.FsWrapFd, EBX);
+        SpillStore(asm, OsLayout.FsWrapPtr, ECX);
+        SpillStore(asm, OsLayout.FsWrapRemaining, EDX);
+        asm.MovImm(R(EAX), 0);
+        SpillStore(asm, OsLayout.FsWrapCopied, EAX);
+        asm.Label("fsyw_loop");
+        SpillLoad(asm, OsLayout.FsWrapRemaining, EAX);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("fsyw_done");
+        SpillLoad(asm, OsLayout.FsWrapPtr, EBX);
+        asm.Mov(R(ECX), R(EBX));
+        asm.MovImm(R(EDX), OsLayout.PageSize - 1);
+        asm.And(R(ECX), R(EDX));
+        Imm16(asm, EDX, OsLayout.PageSize);      // PageSize (256) overflows an 8-bit MovImm
+        asm.Sub(R(EDX), R(ECX));
+        asm.MovImm(R(ECX), 4);
+        asm.Div(R(EDX), R(ECX));
+        SpillLoad(asm, OsLayout.FsWrapRemaining, ECX);
+        asm.Cmp(R(ECX), R(EDX));
+        asm.Js("fsyw_chunk_ok");
+        asm.Mov(R(ECX), R(EDX));
+        asm.Label("fsyw_chunk_ok");
+        SpillStore(asm, OsLayout.FsWrapChunk, ECX);
+        // translate the chunk's starting virtual address (isWrite=0: only reading the buffer)
+        SpillLoad(asm, OsLayout.FsWrapPtr, EAX);
+        asm.MovImm(R(R11), 0);
+        asm.Call("user_word_addr");
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsyw_fail");
+        asm.Mov(R(ECX), R(EAX));
+        SpillLoad(asm, OsLayout.FsWrapFd, EBX);
+        SpillLoad(asm, OsLayout.FsWrapChunk, EDX);
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ESI), R(EAX));
         asm.Call("fs_write_core");
-        asm.Mov(R(R15), R(EAX));
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsyw_partial");
+        SpillLoad(asm, OsLayout.FsWrapCopied, EBX);
+        asm.Add(R(EBX), R(EAX));
+        SpillStore(asm, OsLayout.FsWrapCopied, EBX);
+        SpillLoad(asm, OsLayout.FsWrapPtr, EBX);
+        asm.Mov(R(ECX), R(EAX));
+        asm.MovImm(R(EDX), 4);
+        asm.Mul(R(ECX), R(EDX));
+        asm.Add(R(EBX), R(ECX));
+        SpillStore(asm, OsLayout.FsWrapPtr, EBX);
+        SpillLoad(asm, OsLayout.FsWrapRemaining, EBX);
+        asm.Sub(R(EBX), R(EAX));
+        SpillStore(asm, OsLayout.FsWrapRemaining, EBX);
+        SpillLoad(asm, OsLayout.FsWrapChunk, EBX);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsyw_done");                     // wrote less than requested: stop (e.g. disk full)
+        asm.Jmp("fsyw_loop");
+        asm.Label("fsyw_partial");
+        SpillLoad(asm, OsLayout.FsWrapCopied, EBX);
+        asm.MovImm(R(ECX), 0);
+        asm.Cmp(R(EBX), R(ECX));
+        asm.Jnz("fsyw_done");
+        asm.Jmp("fsyw_fail");
+        asm.Label("fsyw_done");
+        SpillLoad(asm, OsLayout.FsWrapCopied, R15);
+        asm.Jmp("fsy_deliver");
+        asm.Label("fsyw_fail");
+        asm.MovImm(R(R15), 0);
+        asm.Dec(R(R15));
         asm.Jmp("fsy_deliver");
 
         asm.Label("fsy_exec");

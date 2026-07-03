@@ -75,6 +75,10 @@ public static partial class OsRoutines
         int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
         int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
         int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
+        EmitPageIn(asm);          // shared subroutine "page_in"; ends with Ret
+        EmitEnsureUserPage(asm);  // shared subroutine "ensure_user_page"; ends with Ret
+        int ensureUserPageOp = OsLayout.CodeBase + asm.CodeLength; EmitEnsureUserPageOp(asm);
+        EmitUserWordAddr(asm);    // shared subroutine "user_word_addr"; ends with Ret
         int cacheOp       = OsLayout.CodeBase + asm.CodeLength; EmitCacheOp(asm);
         int fsOp          = OsLayout.CodeBase + asm.CodeLength; EmitFsOp(asm);
         int fsSyscall     = OsLayout.CodeBase + asm.CodeLength; EmitFsSyscall(asm);
@@ -126,6 +130,7 @@ public static partial class OsRoutines
         WriteWord(image, Hardware.IvtCacheOp * 4,            cacheOp);
         WriteWord(image, Hardware.IvtFsOp * 4,               fsOp);
         WriteWord(image, Hardware.IvtFsSyscall * 4,          fsSyscall);
+        WriteWord(image, Hardware.IvtEnsureUserPage * 4,     ensureUserPageOp);
 
         // Default every process's copy-on-write partner to -1 (none) in the image itself, so
         // even minimal hand-seeded test images (which skip SeedOsData) never see a process

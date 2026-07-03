@@ -24,8 +24,8 @@ Cross-file calls resolve two ways: C# calls (e.g. BuildOsImage → EmitFsOp) wor
 `OsRoutines.BuildOsImage()` emits routines in this order, recording each start address:
 
 ```
-[IVT: 19 slots × 4 bytes = 76 bytes]
-[CodeBase = 76]
+[IVT: 20 slots × 4 bytes = 80 bytes]
+[CodeBase = 80]
 EmitContextSwitch    → IvtContextSwitch (slot 0)        OsRoutines.cs:124
 EmitSchedule         → IvtSchedule (slot 7)             OsRoutines.cs:208
 EmitBlock            → IvtBlockInput + IvtBlockOutput (slots 5 & 6, same address) :216
@@ -42,6 +42,10 @@ EmitExec             → IvtExec (slot 10)                OsRoutines.cs:1608
 EmitWait             → IvtWait (slot 11)                OsRoutines.cs:1091
 EmitSyscall          → IvtSyscall (slot 13)             OsRoutines.cs:1143
 EmitPageFault        → IvtPageFault (slot 14)           OsRoutines.cs:254
+EmitPageIn           → label "page_in" (CALL/RET; extracted from EmitPageFault)   (Phase 3)
+EmitEnsureUserPage   → label "ensure_user_page" (CALL/RET)                        (Phase 3)
+EmitEnsureUserPageOp → IvtEnsureUserPage (slot 19)      (C#-only dispatch via Hardware.UserToPhysical) (Phase 3)
+EmitUserWordAddr     → label "user_word_addr" (CALL/RET)                          (Phase 3)
 EmitCacheOp          → IvtCacheOp (slot 16)             (dispatch → cache_* subs)
 EmitFsOp             → IvtFsOp (slot 17)                (dispatch → fs_* subs)
 EmitExitBody         → label "exit_body"                OsRoutines.cs:960
@@ -88,6 +92,10 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `pair_resolve` | EmitPairResolve :627 | EmitPageFault (COW write), resolve_cow | Resolve one COW page (page in R12): give both sharers private copies |
 | `resolve_cow` | EmitResolveCow :743 | IvtFork, exit_body, IvtExec | Loop all pages; call pair_resolve for each COW page; clear partnership |
 | `cow_share` | EmitCowShare :826 | IvtFork | Convert current process's DATA pages to COW (mark resident frames, re-encode PTEs) |
+| `page_in` | EmitPageIn | EmitPageFault, ensure_user_page | Fill logic extracted from EmitPageFault (CALL/RET): fault a non-resident page (R12) into a frame. **Clobbers R11** internally |
+| `ensure_user_page` | EmitEnsureUserPage | ensure_user_page_op, user_word_addr | R12=page, R11=isWrite → EAX 0/-1. page_in if non-resident, then pair_resolve if resident+write+COW; -1 if UnmappedPage. Spills isWrite across page_in (R11 clobber) |
+| `ensure_user_page_op` | EmitEnsureUserPageOp | Hardware.UserToPhysical (RunOsRoutineSynchronously only) | IvtEnsureUserPage slot-19 wrapper: EAX=page, isWrite from OsLayout.EnsureUserPageIsWrite → result in EnsureUserPageResult |
+| `user_word_addr` | EmitUserWordAddr | fsy_read/fsy_write | EAX=va, R11=isWrite → EAX=physical addr or -1. Translates one word via ensure_user_page; spills page/offset in OsLayout.PageXlate* |
 | `cache_find` | EmitCacheSubroutines | cache_get/dirty/wt/pin/unpin/discard | Scan cache slots for a resident block; EAX=block → EAX=slot base or -1 |
 | `cache_get` | EmitCacheSubroutines | IvtCacheOp, future FS routines | Ensure block resident (hit→stamp; miss→evict LRU, write back if dirty, FBREAD); EAX=block → EAX=data addr or -1 |
 | `cache_dirty`/`cache_write_through` | EmitCacheSubroutines | IvtCacheOp | Mark resident block dirty (lazy) / FBWRITE now + clean |
@@ -203,7 +211,7 @@ All defined in OsRoutines.cs; the helpers group starts at :2007.
 ```csharp
 public class BasicOS : OperatingSystem
 {
-    public override int OsMemorySize => OsLayout.TotalSize;          // 29880 (DataBase 20480 + 9400)
+    public override int OsMemorySize => OsLayout.TotalSize;          // 31968 (DataBase 20480 + 11488)
     public override byte[] BuildOsImage(int osMemoryBase) => OsRoutines.BuildOsImage();
     public BasicOS(TextWriter log) : base(CollectTraps(), log) { }
     protected override void OnBooted(Hardware hw) { /* magic-guarded FS auto-format */ }
