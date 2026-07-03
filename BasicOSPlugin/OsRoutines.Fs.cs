@@ -985,14 +985,63 @@ public static partial class OsRoutines
         asm.Jmp("fsy_deliver");
 
         asm.Label("fsy_exec");
-        // translate the user path ptr (EBX) to absolute, then hand off to fs_exec_core, which
-        // replaces the running image and resumes it (never returns) on success, or returns -1
-        // if the path does not resolve to a file — in which case we deliver -1 to the caller.
-        Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
-        asm.Load(R(ESI), R(EBP));
-        EntryAddress(asm, ESI, R9);
-        LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
-        asm.Add(R(EBX), R(R10));                 // EBX = absolute path addr
+        // Shell §2 ABI: EBX = command-line pointer (user virtual, word-per-char, null-terminated).
+        // Capture the whole line into FsArgvCmd via user_word_addr — paging-correct, because the
+        // shell reads its line with INS into an ordinary (swap-backed) DATA buffer, and flat
+        // ProgramAddress+ptr math would read stale bytes. The scan stops at the null terminator
+        // (bounded by the buffer cap), so no explicit length is needed. fs_exec_core then tokenizes
+        // FsArgvCmd: token0 is the program path, the rest become argv. It resumes on success (never
+        // returns) or returns -1 (missing path / not a file), delivered to the still-alive caller.
+        SpillStore(asm, OsLayout.FsArgvSrcPtr, EBX);
+        asm.MovImm(R(EAX), 0);
+        SpillStore(asm, OsLayout.FsArgvI, EAX);
+        asm.Label("fxa_cap");
+        SpillLoad(asm, OsLayout.FsArgvI, R8);
+        asm.MovImm(R(EAX), OsLayout.FsArgvCmdWords - 1);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Jns("fxa_cap_done");                 // i >= buffer cap-1 → leave room for terminator
+        SpillLoad(asm, OsLayout.FsArgvSrcPtr, R10);
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(R11), 4);
+        asm.Mul(R(EAX), R(R11));
+        asm.Add(R(EAX), R(R10));                 // EAX = va = srcPtr + i*4
+        asm.MovImm(R(R11), 0);                    // isWrite = 0 (read)
+        asm.Call("user_word_addr");              // EAX = physical addr or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fxa_cap_done");                  // translation failed → stop
+        asm.Load(R(R12), R(EAX));                 // R12 = char word (kernel mode → absolute read)
+        SpillLoad(asm, OsLayout.FsArgvI, R8);
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(R11), 4);
+        asm.Mul(R(EAX), R(R11));
+        Imm16(asm, R13, OsLayout.FsArgvCmd);
+        asm.Add(R(EAX), R(R13));
+        asm.Store(R(EAX), R(R12));                // FsArgvCmd[i] = char
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R12), R(EBX));
+        asm.Jz("fxa_cap_done");                  // reached the user's null terminator
+        asm.Inc(R(R8));
+        SpillStore(asm, OsLayout.FsArgvI, R8);
+        asm.Jmp("fxa_cap");
+        asm.Label("fxa_cap_done");
+        // Guarantee a null terminator at FsArgvCmd[min(i, cap-1)].
+        SpillLoad(asm, OsLayout.FsArgvI, R8);
+        asm.MovImm(R(EAX), OsLayout.FsArgvCmdWords - 1);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Js("fxa_term");
+        asm.Mov(R(R8), R(EAX));                   // clamp to cap-1
+        asm.Label("fxa_term");
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(R11), 4);
+        asm.Mul(R(EAX), R(R11));
+        Imm16(asm, R13, OsLayout.FsArgvCmd);
+        asm.Add(R(EAX), R(R13));
+        asm.MovImm(R(R12), 0);
+        asm.Store(R(EAX), R(R12));                // FsArgvCmd[term] = 0
+        // Point the tokenizer cursor at the start of the command buffer.
+        Imm16(asm, R8, OsLayout.FsArgvCmd);
+        SpillStore(asm, OsLayout.FsArgvCursor, R8);
         asm.Call("fs_exec_core");                // resumes the process on success; returns -1 on failure
         asm.Mov(R(R15), R(EAX));
         asm.Jmp("fsy_deliver");
@@ -1020,17 +1069,20 @@ public static partial class OsRoutines
         asm.Jmp("fsy_deliver");
 
         asm.Label("fsy_readdir");
-        // translate the dir path ptr (EBX) and out ptr (EDX); index in ECX. Resolving the path
-        // clobbers registers, so stash the index + translated out ptr in FsScratchArg* (which
-        // fs_path_resolve/fs_readdir do not touch) and reload them after resolving the dir.
+        // Translate the dir path ptr (EBX) flat (RAM-home), but keep the out ptr (EDX) VIRTUAL:
+        // fs_readdir writes the 64-byte entry to an OS staging buffer, then we copy it into the
+        // user buffer one word at a time THROUGH the page table (user_word_addr, isWrite). A flat
+        // write to the buffer's home would be stale once the page is resident in a frame — which
+        // it becomes as soon as the program reads the buffer (e.g. ls's OUTS) — so per-word paging-
+        // correct writes are required for correctness across successive readdir calls. Index +
+        // user out ptr are stashed in FsScratchArg* (fs_path_resolve/fs_readdir do not touch them).
         Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
         asm.Load(R(ESI), R(EBP));
         EntryAddress(asm, ESI, R9);
         LoadField(asm, R9, Hardware.ProcessEntryProgramAddress, R10);
         asm.Add(R(EBX), R(R10));                 // abs dir path
-        asm.Add(R(EDX), R(R10));                 // abs out buffer
         SpillStore(asm, OsLayout.FsScratchArgA, ECX);   // index
-        SpillStore(asm, OsLayout.FsScratchArgB, EDX);   // out buffer
+        SpillStore(asm, OsLayout.FsScratchArgB, EDX);   // user out ptr (VIRTUAL — translated below)
         asm.Mov(R(EAX), R(EBX));
         asm.Call("fs_resolve_dir");              // EAX = dir block, or -1
         asm.MovImm(R(EBX), 0);
@@ -1038,13 +1090,54 @@ public static partial class OsRoutines
         asm.Js("fsy_readdir_fail");
         asm.Mov(R(EBX), R(EAX));                 // dir block
         SpillLoad(asm, OsLayout.FsScratchArgA, ECX);
-        SpillLoad(asm, OsLayout.FsScratchArgB, EDX);
-        asm.Call("fs_readdir");                  // EBX=dir, ECX=index, EDX=out → type or -1
-        asm.Mov(R(R15), R(EAX));
+        Imm16(asm, EDX, OsLayout.FsArgvTokenBuf); // staging: fs_readdir writes the entry here (abs OS mem)
+        asm.Call("fs_readdir");                  // EBX=dir, ECX=index, EDX=staging → type or -1
+        asm.Mov(R(R15), R(EAX));                 // result (delivered in EAX)
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("fsy_readdir_done");              // -1 (past end) → nothing to copy
+        SpillStore(asm, OsLayout.FsScratchHash, R15);   // save result — user_word_addr clobbers R15
+        // Copy the 64-byte entry from staging to the user buffer, page-correctly, one word at a time.
+        asm.MovImm(R(EAX), 0);
+        SpillStore(asm, OsLayout.FsScratchType, EAX);   // j = 0
+        asm.Label("frd_copy");
+        SpillLoad(asm, OsLayout.FsScratchType, R8);
+        asm.MovImm(R(EAX), FsLayout.DirEntryBytes / 4);
+        asm.Cmp(R(R8), R(EAX));
+        asm.Jns("frd_copy_done");                // copied all words
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));                  // j*4
+        Imm16(asm, R9, OsLayout.FsArgvTokenBuf);
+        asm.Add(R(R9), R(EAX));
+        asm.Load(R(R12), R(R9));                  // R12 = staging[j]
+        SpillStore(asm, OsLayout.FsScratchDir, R12);    // save the word across user_word_addr
+        SpillLoad(asm, OsLayout.FsScratchArgB, R10);    // user out ptr (virtual base)
+        SpillLoad(asm, OsLayout.FsScratchType, R8);
+        asm.Mov(R(EAX), R(R8));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));
+        asm.Add(R(EAX), R(R10));                  // EAX = va = userOut + j*4
+        asm.MovImm(R(R11), 1);                    // isWrite = 1
+        asm.Call("user_word_addr");              // EAX = physical addr, or -1
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Js("frd_next");                       // translation failed → skip this word
+        SpillLoad(asm, OsLayout.FsScratchDir, R12);
+        asm.Store(R(EAX), R(R12));                 // *phys = staging[j]
+        asm.Label("frd_next");
+        SpillLoad(asm, OsLayout.FsScratchType, R8);
+        asm.Inc(R(R8));
+        SpillStore(asm, OsLayout.FsScratchType, R8);
+        asm.Jmp("frd_copy");
+        asm.Label("frd_copy_done");
+        SpillLoad(asm, OsLayout.FsScratchHash, R15);    // restore result
+        asm.Label("fsy_readdir_done");
         asm.Jmp("fsy_deliver");
         asm.Label("fsy_readdir_fail");
         asm.MovImm(R(R15), 0);
         asm.Dec(R(R15));
+        asm.Jmp("fsy_deliver");
 
         asm.Label("fsy_deliver");
         Imm16(asm, EBP, OsLayout.CurrentIndexOffset);
@@ -1761,6 +1854,176 @@ public static partial class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitExecTokenizer =================================================
+    // exec_next_token: pull the next space-delimited token from the captured command line
+    // (FsArgvCmd, word-per-char, null-terminated) into FsArgvTokenBuf, null-terminated.
+    // FsArgvCursor holds the read position across calls; it MUST be initialised to FsArgvCmd
+    // before the first call of a tokenizing pass (fsy_exec does this after capturing the line).
+    // Modelled on fs_extract_component (delimiter '/'→' '); pure memory, so all of R8-R15 are
+    // free scratch and it needs no privileged stack of its own.
+    //   Input:  FsArgvCursor   Output: EAX = token length (0 = no more tokens); token in FsArgvTokenBuf
+    //   Clobbers: EAX, EBP (SpillLoad/Store), R8-R15.  Leaf (no CALL).
+    private static void EmitExecTokenizer(Assembler asm)
+    {
+        asm.Label("exec_next_token");
+        SpillLoad(asm, OsLayout.FsArgvCursor, R8);        // R8 = cursor
+        asm.Label("ent_skip");                            // --- skip leading spaces
+        asm.Load(R(R9), R(R8));                            // R9 = *cursor
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("ent_empty");                              // null → no more tokens
+        asm.MovImm(R(R10), ' ');
+        asm.Cmp(R(R9), R(R10));
+        asm.Jnz("ent_copy_start");                        // non-space → start of a token
+        asm.MovImm(R(R11), 4);
+        asm.Add(R(R8), R(R11));                            // advance one word (+4)
+        asm.Jmp("ent_skip");
+        asm.Label("ent_copy_start");
+        asm.MovImm(R(R12), 0);                            // R12 = token length i
+        Imm16(asm, R13, OsLayout.FsArgvTokenBuf);          // R13 = dest base
+        asm.Label("ent_copy");
+        asm.Load(R(R9), R(R8));                            // char = *cursor
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("ent_term");                               // null → token done
+        asm.MovImm(R(R10), ' ');
+        asm.Cmp(R(R9), R(R10));
+        asm.Jz("ent_term");                               // space → token done
+        asm.MovImm(R(R10), OsLayout.FsArgvCmdWords - 1);   // leave room for the terminator word
+        asm.Cmp(R(R12), R(R10));
+        asm.Jns("ent_advance");                            // buffer full → keep scanning, don't store
+        asm.Mov(R(R11), R(R12));                           // dest = base + i*4
+        asm.MovImm(R(R10), 4);
+        asm.Mul(R(R11), R(R10));
+        asm.Add(R(R11), R(R13));
+        asm.Store(R(R11), R(R9));                          // dest[i] = char
+        asm.Label("ent_advance");
+        asm.Inc(R(R12));                                  // i++
+        asm.MovImm(R(R10), 4);
+        asm.Add(R(R8), R(R10));                            // cursor += 4
+        asm.Jmp("ent_copy");
+        asm.Label("ent_term");                            // --- null-terminate at min(i, cap-1)
+        asm.Mov(R(R14), R(R12));
+        asm.MovImm(R(R10), OsLayout.FsArgvCmdWords - 1);
+        asm.Cmp(R(R14), R(R10));
+        asm.Js("ent_wr_term");
+        asm.Mov(R(R14), R(R10));                           // clamp overflow to cap-1
+        asm.Label("ent_wr_term");
+        asm.Mov(R(R11), R(R14));
+        asm.MovImm(R(R10), 4);
+        asm.Mul(R(R11), R(R10));
+        asm.Add(R(R11), R(R13));
+        asm.MovImm(R(R10), 0);
+        asm.Store(R(R11), R(R10));                         // dest[term] = 0
+        SpillStore(asm, OsLayout.FsArgvCursor, R8);        // persist cursor at the delimiter
+        asm.Mov(R(EAX), R(R12));                           // return token length
+        asm.Ret();
+        asm.Label("ent_empty");
+        SpillStore(asm, OsLayout.FsArgvCursor, R8);        // cursor parked at the null
+        asm.MovImm(R(EAX), 0);
+        asm.Ret();
+    }
+
+    // ===== EmitExecBuildArgv =================================================
+    // exec_build_argv: after fs_load_image has copied the new program image, write the argv[]
+    // pointer array + the arg strings into the RAM-home reservation just past the image, at
+    // [ProgramAddress+newLen .. ProgramAddress+newLen+ArgvReserveBytes). Re-tokenizes FsArgvCmd
+    // from the start (token0 = argv[0] = the program path as typed). Child virtual layout: the
+    // argv[] array sits at virtual `newLen` (FsArgvMaxArgs words), the strings packed after it;
+    // argv[k] holds the virtual address of its (null-terminated) string.
+    //   Input:  FsScratchArgB = newLen (= virtual argv base); FsArgvCmd populated by fsy_exec
+    //   Output: FsArgvArgc = argc; the child's reservation populated
+    //   Clobbers: EAX/EBX/ECX/EDX + R8-R15 + EBP. CALLs exec_next_token (needs the privileged stack).
+    private static void EmitExecBuildArgv(Assembler asm)
+    {
+        asm.Label("exec_build_argv");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        EntryAddress(asm, ECX, EBX);                       // EBX = current entry
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramAddress, R8);   // R8 = ProgramAddress
+        SpillLoad(asm, OsLayout.FsScratchArgB, R9);        // R9 = newLen (virtual argv base)
+        asm.Mov(R(R10), R(R8));
+        asm.Add(R(R10), R(R9));                            // R10 = abs argv-array base
+        SpillStore(asm, OsLayout.FsArgvSrcPtr, R10);       // (reuse SrcPtr) abs argv-array base
+        asm.MovImm(R(EAX), OsLayout.FsArgvMaxArgs * 4);
+        asm.Add(R(R10), R(EAX));                           // R10 = abs strings base
+        SpillStore(asm, OsLayout.FsArgvI, R10);            // (reuse I) abs strings base
+        asm.MovImm(R(EAX), 0);
+        SpillStore(asm, OsLayout.FsArgvArgc, EAX);
+        SpillStore(asm, OsLayout.FsArgvStrOff, EAX);
+        Imm16(asm, R8, OsLayout.FsArgvCmd);
+        SpillStore(asm, OsLayout.FsArgvCursor, R8);        // re-tokenize from the start
+
+        asm.Label("eba_loop");
+        asm.Call("exec_next_token");                       // EAX = token length; token in FsArgvTokenBuf
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("eba_done");                                // no more tokens
+        SpillLoad(asm, OsLayout.FsArgvArgc, R8);
+        asm.MovImm(R(EBX), OsLayout.FsArgvMaxArgs);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jns("eba_done");                               // argc == MaxArgs → stop (drop the rest)
+        asm.Mov(R(R9), R(EAX));                            // R9 = token length (no CALLs follow until eba_loop)
+
+        // Copy the token (R9 words) + a null terminator into the strings area at stringsBase+strOff.
+        SpillLoad(asm, OsLayout.FsArgvI, R10);             // abs strings base
+        SpillLoad(asm, OsLayout.FsArgvStrOff, R11);
+        asm.Add(R(R10), R(R11));                           // R10 = dest abs
+        Imm16(asm, R12, OsLayout.FsArgvTokenBuf);          // src
+        asm.MovImm(R(R13), 0);                             // j = 0
+        asm.Label("eba_copy");
+        asm.Cmp(R(R13), R(R9));
+        asm.Jns("eba_copy_term");                          // j >= len → terminator
+        asm.Mov(R(R14), R(R13));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R14), R(EAX));                           // off = j*4
+        asm.Mov(R(R15), R(R12));
+        asm.Add(R(R15), R(R14));
+        asm.Load(R(R15), R(R15));                          // src[j]
+        asm.Mov(R(EBX), R(R10));
+        asm.Add(R(EBX), R(R14));
+        asm.Store(R(EBX), R(R15));                         // dest[j] = src[j]
+        asm.Inc(R(R13));
+        asm.Jmp("eba_copy");
+        asm.Label("eba_copy_term");
+        asm.Mov(R(R14), R(R9));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R14), R(EAX));
+        asm.Mov(R(EBX), R(R10));
+        asm.Add(R(EBX), R(R14));
+        asm.MovImm(R(R15), 0);
+        asm.Store(R(EBX), R(R15));                         // dest[len] = 0 (null-terminate)
+
+        // argv[argc] (virtual) = newLen + MaxArgs*4 + strOff, stored into the abs argv-array slot.
+        SpillLoad(asm, OsLayout.FsScratchArgB, R10);       // newLen
+        asm.MovImm(R(EAX), OsLayout.FsArgvMaxArgs * 4);
+        asm.Add(R(R10), R(EAX));
+        SpillLoad(asm, OsLayout.FsArgvStrOff, R11);
+        asm.Add(R(R10), R(R11));                           // R10 = virtual string addr
+        SpillLoad(asm, OsLayout.FsArgvSrcPtr, R12);        // abs argv-array base
+        SpillLoad(asm, OsLayout.FsArgvArgc, R13);
+        asm.Mov(R(R14), R(R13));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(R14), R(EAX));
+        asm.Add(R(R12), R(R14));                           // abs &argv[argc]
+        asm.Store(R(R12), R(R10));                         // argv[argc] = virtual string addr
+
+        // strOff += (len+1)*4 ; argc++
+        SpillLoad(asm, OsLayout.FsArgvStrOff, R11);
+        asm.Mov(R(EAX), R(R9));
+        asm.Inc(R(EAX));
+        asm.MovImm(R(EBX), 4);
+        asm.Mul(R(EAX), R(EBX));
+        asm.Add(R(R11), R(EAX));
+        SpillStore(asm, OsLayout.FsArgvStrOff, R11);
+        SpillLoad(asm, OsLayout.FsArgvArgc, R13);
+        asm.Inc(R(R13));
+        SpillStore(asm, OsLayout.FsArgvArgc, R13);
+        asm.Jmp("eba_loop");
+        asm.Label("eba_done");
+        asm.Ret();
+    }
+
     // ===== EmitFsExecSubroutine ==============================================
     // fs_exec_core (Increment 6): replace the running process's image with a program stored as
     // an FS file. Mirrors EmitExec's teardown/realloc/resume, but sources the new image from a
@@ -1777,7 +2040,13 @@ public static partial class OsRoutines
     private static void EmitFsExecSubroutine(Assembler asm)
     {
         asm.Label("fs_exec_core");
-        asm.Mov(R(EAX), R(EBX));
+        // The command line was captured into FsArgvCmd (and the cursor initialised) by fsy_exec.
+        // token0 is the program path; extract it, then resolve while the old image is still mapped.
+        asm.Call("exec_next_token");                 // token0 (path) → FsArgvTokenBuf; EAX = length
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(EAX), R(EBX));
+        asm.Jz("fxc_fail");                          // empty / whitespace-only command line
+        Imm16(asm, EAX, OsLayout.FsArgvTokenBuf);
         asm.Call("fs_path_resolve");                 // EAX = entry addr or -1
         asm.MovImm(R(EBX), 0);
         asm.Cmp(R(EAX), R(EBX));
@@ -1821,14 +2090,19 @@ public static partial class OsRoutines
         asm.Load(R(EBX), R(EAX));
         EntryAddress(asm, EBX, EBX);
 
-        // Sizing: newTotal = oldTotal - oldProgramSize + newLen.
-        SpillLoad(asm, OsLayout.FsScratchArgB, R9);          // newLen bytes (stashed pre-teardown)
+        // Sizing: the program region is grown by ArgvReserveBytes so argv[] + the arg strings live
+        // in RAM-home memory just past the loaded image (virtual base = newLen). programSize' =
+        // newLen + reserve; newTotal = oldTotal - oldProgramSize + programSize'.
+        SpillLoad(asm, OsLayout.FsScratchArgB, R9);          // newLen bytes = virtual argv base (kept)
+        Imm16(asm, EAX, OsLayout.ArgvReserveBytes);
+        asm.Mov(R(R8), R(R9));
+        asm.Add(R(R8), R(EAX));                              // R8 = programSize' = newLen + reserve
         LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);
         LoadField(asm, EBX, Hardware.ProcessEntryProgramSize, R11);
         asm.Mov(R(R12), R(R10));
         asm.Sub(R(R12), R(R11));
-        asm.Add(R(R12), R(R9));
-        StoreFieldReg(asm, EBX, Hardware.ProcessEntryProgramSize, R9);
+        asm.Add(R(R12), R(R8));                              // newTotal
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryProgramSize, R8);
         StoreFieldReg(asm, EBX, Hardware.ProcessEntryTotalSize, R12);
 
         SetupPrivilegedStack(asm);
@@ -1851,7 +2125,10 @@ public static partial class OsRoutines
         SpillLoad(asm, OsLayout.FsScratchFirst, ECX);       // words to load
         asm.Call("fs_load_image");
 
-        // The chain walk clobbered EBX; reload the current entry.
+        // Write argv[] + the arg strings into the RAM-home reservation just past the image.
+        asm.Call("exec_build_argv");                       // sets FsArgvArgc = argc
+
+        // The chain walk + argv build clobbered EBX; reload the current entry.
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(EBX), R(EAX));
         EntryAddress(asm, EBX, EBX);
@@ -1870,6 +2147,12 @@ public static partial class OsRoutines
         asm.Add(R(R13), R(EAX));
         asm.Jmp("fxc_clear");
         asm.Label("fxc_clear_done");
+
+        // Seed argv into the fresh register file: EAX = argc, EBX = argv base (virtual = newLen).
+        SpillLoad(asm, OsLayout.FsArgvArgc, R8);
+        StoreFieldReg(asm, EBX, EaxSlot, R8);
+        SpillLoad(asm, OsLayout.FsScratchArgB, R9);          // newLen = virtual argv base
+        StoreFieldReg(asm, EBX, EbxSlot, R9);
 
         // ESP = top of the user stack = TotalSize - KernelStackSize (EIP stays 0).
         LoadField(asm, EBX, Hardware.ProcessEntryTotalSize, R10);

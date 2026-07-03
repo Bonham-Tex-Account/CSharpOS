@@ -305,6 +305,32 @@ public static class OsLayout
     public const int FsWrapChunk     = FsWrapBase + 20;   // words in the current page-chunk
     public const int FsWrapWords     = 6;
 
+    // ---- exec argv staging (Shell §2) --------------------------------------
+    // fs_exec_core builds argv here. fsy_exec first captures the whole command line word-per-
+    // char into FsArgvCmd via user_word_addr (paging-correct) BEFORE any teardown; the capture
+    // loop's i/ptr/len are spilled here because user_word_addr clobbers registers. The tokenizer
+    // (exec_next_token) then walks FsArgvCmd, writing one token at a time into FsArgvTokenBuf;
+    // FsArgvCursor is its read position and FsArgvArgc/FsArgvStrOff accumulate the child argv[]
+    // build. All of this is OS memory, so it survives the buddy/paging teardown (which only
+    // clobbers FsRw*) — unlike FsScratchArgA/ArgB/First, which the exec path already occupies.
+    public const int FsArgvMaxArgs  = 8;                      // argv[] cap
+    public const int FsArgvCmdWords = FsLayout.CharsPerBlock; // 63 command-line chars (one block)
+    // RAM-home space appended to the child image on exec to hold the argv[] pointer array
+    // (FsArgvMaxArgs words) followed by the arg strings. Sized for the whole command buffer's
+    // worth of chars plus a null per arg: 8*4 + (63 + 8)*4 = 316, rounded up. Living inside the
+    // [program] extent (ProgramSize' = newLen + ArgvReserveBytes) keeps argv in RAM-home memory,
+    // so the exec core's absolute writes and the child's MMU reads stay consistent.
+    public const int ArgvReserveBytes = 512;
+    public const int FsArgvBase     = FsWrapBase + FsWrapWords * 4;
+    public const int FsArgvCursor   = FsArgvBase + 0;         // tokenizer read cursor (abs addr in FsArgvCmd)
+    public const int FsArgvArgc     = FsArgvBase + 4;         // argc accumulated so far
+    public const int FsArgvStrOff   = FsArgvBase + 8;         // running strings offset in the child reservation
+    public const int FsArgvSrcPtr   = FsArgvBase + 12;        // capture: user virtual line pointer
+    public const int FsArgvI        = FsArgvBase + 16;        // capture: index i
+    public const int FsArgvCmd      = FsArgvBase + 20;        // command line, word-per-char, null-terminated
+    public const int FsArgvTokenBuf = FsArgvCmd + FsArgvCmdWords * 4;   // one extracted token / the path
+    public const int FsArgvWords    = 5 + FsArgvCmdWords + FsArgvCmdWords;
+
     // ---- program-install staging (Phase 4: boot loads programs from the FS) -----
     // LoadProcess installs a program into the FS by driving the ISA FsOp cores, which read an
     // ABSOLUTE buffer. This staging area lives INSIDE the OS region (below TotalSize) so it
@@ -312,7 +338,7 @@ public static class OsLayout
     // processes are allocated, unlike FsImage.WriteFile's boot-only TotalSize staging. The
     // program is written to the FS in block-sized chunks through InstallBuf so the buffer
     // stays one block wide rather than sizing to the largest possible program image.
-    public const int InstallPathBase  = FsWrapBase + FsWrapWords * 4;
+    public const int InstallPathBase  = FsArgvBase + FsArgvWords * 4;
     public const int InstallPathWords = 20;               // "/bin/p<seq>" word-per-char + null
     public const int InstallBufBase   = InstallPathBase + InstallPathWords * 4;
     public const int InstallBufWords  = FsLayout.CharsPerBlock;   // one block worth (63 words)

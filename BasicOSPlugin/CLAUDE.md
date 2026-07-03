@@ -63,6 +63,8 @@ EmitFsSyscall        → IvtFsSyscall (slot 18)           (FSYS wrapper; deliver
 EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
 EmitFsRwSubroutines  → labels "oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core" (CALL/RET)
 EmitFsLoadImage      → label "fs_load_image" (CALL/RET; chain→RAM copy, shared by spawn+exec) (Phase 4)
+EmitExecTokenizer    → label "exec_next_token" (space tokenizer over FsArgvCmd)  (Shell §2)
+EmitExecBuildArgv    → label "exec_build_argv" (write argv[]+strings into the child)  (Shell §2)
 EmitFsExecSubroutine → label "fs_exec_core" (CALL; resumes on success)  (Inc 6)
 EmitFsMaintSubroutines→ labels "oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir/fs_resolve_dir" (Phase 1)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
@@ -123,7 +125,9 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_grow_chain` | EmitFsRwSubroutines | fs_write_core | EBX=firstBlock,ECX=neededBlocks → 0/-1; walk+extend chain (alloc+link). **Reuses FsRwRemaining/CurBlock/Counter/BufPtr as scratch** — callers restore them after |
 | `fs_read_core` | EmitFsRwSubroutines | IvtFsOp Read, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars read or -1; clamp at size-offset, advance offset |
 | `fs_write_core` | EmitFsRwSubroutines | IvtFsOp Write, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars written or -1; grow chain, cache_dirty, advance offset, grow size + dir entry |
-| `fs_exec_core` | EmitFsExecSubroutine | fs_syscall (FsysExec) | EBX=absPath → replace running image with the FS file; resolves file entry, tears down (free/resolve_cow/release_frames/zero_swap), reallocs, copies chain→ProgramAddress, OSRETs. Returns -1 (missing/dir); **never returns on success**. Holds entry addr in R12 (LoadField clobbers EAX) |
+| `exec_next_token` | EmitExecTokenizer | fs_exec_core, exec_build_argv | Pull the next space-delimited token from FsArgvCmd into FsArgvTokenBuf; EAX=len (0=done); cursor in FsArgvCursor. Leaf (models fs_extract_component, delimiter '/'→' '); clobbers EAX/EBP/R8–R15 (Shell §2) |
+| `exec_build_argv` | EmitExecBuildArgv | fs_exec_core | After fs_load_image: write argv[] pointer array + arg strings into the RAM-home reservation at [ProgramAddress+newLen], set FsArgvArgc=argc. CALLs exec_next_token (Shell §2) |
+| `fs_exec_core` | EmitFsExecSubroutine | fs_syscall (FsysExec) | EBX=absPath (whole command line, Shell §2) → replace running image with the FS file. exec_next_token extracts token0 (path) to resolve; tears down (free/resolve_cow/release_frames/zero_swap); reallocs with ProgramSize'=newLen+ArgvReserveBytes; copies chain→ProgramAddress; exec_build_argv fills argv; seeds EAX=argc/EBX=argv; OSRETs. Returns -1 (missing/dir); **never returns on success**. Holds entry addr in R12 (LoadField clobbers EAX) |
 | `oft_find_first` | EmitFsMaintSubroutines | fs_unlink, fs_open_core | EAX=firstBlock → EAX=1 if any in-use OFT handle references that file, else 0 (pure memory) |
 | `fs_unlink` | EmitFsMaintSubroutines | IvtFsOp Unlink, fs_syscall | EAX=absPath → 0/-1; refuse a dir or an open file, free the whole block chain (reads next before freeing each block), then fs_dir_remove |
 | `fs_mkdir_path` | EmitFsMaintSubroutines | IvtFsOp MkdirPath, fs_syscall | EAX=absPath → new dir block/-1; fs_resolve_parent + fs_mkdir |
