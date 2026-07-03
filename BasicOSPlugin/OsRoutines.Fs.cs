@@ -1695,6 +1695,72 @@ public static partial class OsRoutines
         asm.Ret();
     }
 
+    // ===== EmitFsLoadImage ===================================================
+    // fs_load_image (Phase 4): copy a file's block chain into RAM, word by word, through the
+    // cache. Extracted from fs_exec_core's inline load loop so IvtSpawn can reuse it to boot an
+    // FS-backed process (both callers otherwise duplicate the same chain-walk copy). CALL/RET;
+    // requires the privileged stack. All loop state is spilled to FsRw* because cache_get /
+    // fs_chain_next clobber registers.
+    //   Input: EBX = firstBlock, ECX = size in words, EDX = destination RAM address.
+    //   Clobbers EAX/EBP/EBX/ECX/EDX and R8-R15; preserves nothing.
+    private static void EmitFsLoadImage(Assembler asm)
+    {
+        asm.Label("fs_load_image");
+        SpillStore(asm, OsLayout.FsRwBufPtr, EDX);          // dest
+        SpillStore(asm, OsLayout.FsRwCurBlock, EBX);        // chain walk start
+        SpillStore(asm, OsLayout.FsRwRemaining, ECX);       // words left to load
+        asm.Label("fli_loop");
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("fli_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("cache_get");                              // EAX = block data addr
+        asm.Mov(R(R9), R(EAX));                             // src block
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Mov(R(R12), R(R8));
+        asm.MovImm(R(R11), FsLayout.CharsPerBlock);
+        asm.Cmp(R(R12), R(R11));
+        asm.Js("fli_n_ok");
+        asm.Mov(R(R12), R(R11));                            // n = min(remaining, CharsPerBlock)
+        asm.Label("fli_n_ok");
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);           // dst
+        asm.MovImm(R(R15), 0);
+        asm.Label("fli_word");
+        asm.Cmp(R(R15), R(R12));
+        asm.Jns("fli_word_done");
+        asm.Mov(R(EBX), R(R15));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));                            // EBX = R15*4
+        asm.Mov(R(ECX), R(R9));
+        asm.Add(R(ECX), R(EBX));
+        asm.Load(R(ECX), R(ECX));                           // word from file block
+        asm.Mov(R(EBP), R(R14));
+        asm.Add(R(EBP), R(EBX));
+        asm.Store(R(EBP), R(ECX));                          // → RAM image
+        asm.Inc(R(R15));
+        asm.Jmp("fli_word");
+        asm.Label("fli_word_done");
+        asm.Mov(R(EBX), R(R12));
+        asm.MovImm(R(EAX), 4);
+        asm.Mul(R(EBX), R(EAX));
+        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);
+        asm.Add(R(R14), R(EBX));
+        SpillStore(asm, OsLayout.FsRwBufPtr, R14);          // dst += n*4
+        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
+        asm.Sub(R(R8), R(R12));
+        SpillStore(asm, OsLayout.FsRwRemaining, R8);        // remaining -= n
+        asm.MovImm(R(EBX), 0);
+        asm.Cmp(R(R8), R(EBX));
+        asm.Jz("fli_done");
+        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Call("fs_chain_next");
+        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
+        asm.Jmp("fli_loop");
+        asm.Label("fli_done");
+        asm.Ret();
+    }
+
     // ===== EmitFsExecSubroutine ==============================================
     // fs_exec_core (Increment 6): replace the running process's image with a program stored as
     // an FS file. Mirrors EmitExec's teardown/realloc/resume, but sources the new image from a
@@ -1742,6 +1808,8 @@ public static partial class OsRoutines
         asm.Load(R(ECX), R(EAX));
         EntryAddress(asm, ECX, EBX);                         // EBX = current entry
         StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryDiskSlot); // FS-backed: no disk slot
+        SpillLoad(asm, OsLayout.FsScratchArgA, R8);          // firstBlock (stashed above)
+        StoreFieldReg(asm, EBX, Hardware.ProcessEntryFirstBlock, R8); // record the new FS image
 
         SetupPrivilegedStack(asm);
         asm.Call("free_sub");
@@ -1776,62 +1844,12 @@ public static partial class OsRoutines
         asm.Jmp("resume_mlfq");
 
         asm.Label("fxc_alloc_ok");
-        // Copy the file's block chain into ProgramAddress (R9), word by word, through the cache.
-        // Re-seed the FsRw* walk state from the FsScratch* values stashed before teardown.
-        SpillStore(asm, OsLayout.FsRwBufPtr, R9);           // dest = ProgramAddress
-        SpillLoad(asm, OsLayout.FsScratchArgA, R8);
-        SpillStore(asm, OsLayout.FsRwCurBlock, R8);         // chain walk start
-        SpillLoad(asm, OsLayout.FsScratchFirst, R8);
-        SpillStore(asm, OsLayout.FsRwRemaining, R8);        // words left to load
-        asm.Label("fxc_load_loop");
-        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
-        asm.MovImm(R(EBX), 0);
-        asm.Cmp(R(R8), R(EBX));
-        asm.Jz("fxc_load_done");
-        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
-        asm.Call("cache_get");                              // EAX = block data addr
-        asm.Mov(R(R9), R(EAX));                             // src block
-        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
-        asm.Mov(R(R12), R(R8));
-        asm.MovImm(R(R11), FsLayout.CharsPerBlock);
-        asm.Cmp(R(R12), R(R11));
-        asm.Js("fxc_n_ok");
-        asm.Mov(R(R12), R(R11));                            // n = min(remaining, CharsPerBlock)
-        asm.Label("fxc_n_ok");
-        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);           // dst
-        asm.MovImm(R(R15), 0);
-        asm.Label("fxc_word");
-        asm.Cmp(R(R15), R(R12));
-        asm.Jns("fxc_word_done");
-        asm.Mov(R(EBX), R(R15));
-        asm.MovImm(R(EAX), 4);
-        asm.Mul(R(EBX), R(EAX));                            // EBX = R15*4
-        asm.Mov(R(ECX), R(R9));
-        asm.Add(R(ECX), R(EBX));
-        asm.Load(R(ECX), R(ECX));                           // word from file block
-        asm.Mov(R(EBP), R(R14));
-        asm.Add(R(EBP), R(EBX));
-        asm.Store(R(EBP), R(ECX));                          // → RAM image
-        asm.Inc(R(R15));
-        asm.Jmp("fxc_word");
-        asm.Label("fxc_word_done");
-        asm.Mov(R(EBX), R(R12));
-        asm.MovImm(R(EAX), 4);
-        asm.Mul(R(EBX), R(EAX));
-        SpillLoad(asm, OsLayout.FsRwBufPtr, R14);
-        asm.Add(R(R14), R(EBX));
-        SpillStore(asm, OsLayout.FsRwBufPtr, R14);          // dst += n*4
-        SpillLoad(asm, OsLayout.FsRwRemaining, R8);
-        asm.Sub(R(R8), R(R12));
-        SpillStore(asm, OsLayout.FsRwRemaining, R8);        // remaining -= n
-        asm.MovImm(R(EBX), 0);
-        asm.Cmp(R(R8), R(EBX));
-        asm.Jz("fxc_load_done");
-        SpillLoad(asm, OsLayout.FsRwCurBlock, EAX);
-        asm.Call("fs_chain_next");
-        SpillStore(asm, OsLayout.FsRwCurBlock, EAX);
-        asm.Jmp("fxc_load_loop");
-        asm.Label("fxc_load_done");
+        // Copy the file's block chain into ProgramAddress (R9), through fs_load_image. Its args
+        // come from the FsScratch* values stashed before teardown (firstBlock + word count).
+        asm.Mov(R(EDX), R(R9));                             // dest = ProgramAddress
+        SpillLoad(asm, OsLayout.FsScratchArgA, EBX);        // firstBlock
+        SpillLoad(asm, OsLayout.FsScratchFirst, ECX);       // words to load
+        asm.Call("fs_load_image");
 
         // The chain walk clobbered EBX; reload the current entry.
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);

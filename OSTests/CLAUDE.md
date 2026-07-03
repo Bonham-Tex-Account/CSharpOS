@@ -1,6 +1,6 @@
 # OSTests Quick Reference
 
-xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **610 tests across 51 files.**
+xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **616 tests across 52 files.**
 Goal of this file: pick the right test file *without* grepping the whole suite. Find the subsystem
 below, open that file, then grep the `[Fact]`/`[Theory]` method name inside it (names are full
 sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
@@ -19,6 +19,7 @@ sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
 | **FS exec-by-path + boot auto-format + FsImage** (Inc 6) | `FsExecTests` |
 | **FS maintenance** (unlink/mkdir/readdir, FreeCount, single-open, pin) | `FsMaintTests` |
 | **FSYS syscall end-to-end** (through a live scheduler) | `FsSyscallTests` |
+| **Boot-from-FS** (LoadProcess installs to /bin, FS-backed spawn, fork/EXEC-slot, Bin persistence) | `FsBootTests` |
 | **FS write-back cache** (cache_* via `IvtCacheOp`) | `CacheManagerTests` |
 | **FBREAD/FBWRITE instructions** | `FileBlockInstructionTests` |
 | **Bin disk** (host block store: store/load/free/file-blocks) | `BinTests` |

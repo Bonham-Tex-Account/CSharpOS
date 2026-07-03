@@ -51,8 +51,13 @@ public partial class Hardware
     public const int ProcessEntryExitStatus         = 148;
     // Disk slot holding this process's program image; the load routine DREADs it into
     // RAM at the allocated ProgramAddress. Sits at 152 so 136-148 stay free for the
-    // spawning effort's PID group, and 156 stays spare.
+    // spawning effort's PID group.
     public const int ProcessEntryDiskSlot           = 152;
+    // Filesystem first block of this process's program image (Phase 4: boot-from-FS). When
+    // >= 0 the process is FS-backed and IvtSpawn chain-loads the image via fs_load_image
+    // instead of DREADing a disk slot; -1 marks a slot-backed process (DiskSlot >= 0). Fork
+    // copies it; EXEC(slot) resets it to -1, exec-by-path sets it to the new file's block.
+    public const int ProcessEntryFirstBlock         = 156;
     // Per-process file-descriptor table: FdCount handles (0 = stdin, 1 = stdout, ...),
     // each a 4-byte device id. IN/OUT resolve the fd's device rather than assuming
     // device == process index. Bytes 136-159 stay free for later efforts (disk slot,

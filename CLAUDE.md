@@ -134,7 +134,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 9 | IvtFork | — | EmitFork | Duplicate running process (COW data pages) |
 | 10 | IvtExec | — | EmitExec | Replace image; EAX=slot; resolve_cow+free+realloc |
 | 11 | IvtWait | — | EmitWait | Block until child PID terminates; EAX=pid |
-| 12 | IvtSpawn | — | EmitSpawn | Alloc+DREAD+seed regs (boot path) |
+| 12 | IvtSpawn | — | EmitSpawn | Alloc + load image (DREAD if DiskSlot≥0, else `fs_load_image` if FS-backed) + seed regs (boot path) |
 | 13 | IvtSyscall | — | EmitSyscall | Shared IN/OUT/INK/INPOLL handler (preemptible, Kernel mode) |
 | 14 | IvtPageFault | — | EmitPageFault | Demand fault-in + COW-write resolve; EAX=page |
 | 15 | IvtWakeKey | — | EmitWakeEntry(KeyInput) | Wake first process waiting for a raw keypress |
@@ -191,7 +191,9 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | PageXlateBase | +11448 | 8 (PageXlateWords=2: user_word_addr spill: Offset/Page across ensure_user_page) — Phase 3 |
 | EnsureUserPageBase | +11456 | 8 (EnsureUserPageWords=2: C#↔ISA handoff for IvtEnsureUserPage: IsWrite/Result) — Phase 3 |
 | FsWrapBase | +11464 | 24 (FsWrapWords=6: fsy_read/fsy_write page-chunk loop: Fd/Ptr/Remaining/Copied/IsWrite/Chunk) — Phase 3 |
-| **TotalSize** | **+11488** (= 31968 abs, with DataBase 20480) | — |
+| InstallPathBase | +11488 | 80 (InstallPathWords=20: LoadProcess FS-install path staging "/bin/p<seq>") — Phase 4 |
+| InstallBufBase | +11568 | 252 (InstallBufWords=CharsPerBlock=63: one-block chunk buffer for the FS install write) — Phase 4 |
+| **TotalSize** | **+11820** (= 32300 abs, with DataBase 20480) | — |
 
 `OftAddress(i) = OftBase + i * 24`. A process fd slot (2..7) holds `OFT index + 1` (0 = free), so a zeroed fd table = no open files (no seeding).
 
@@ -230,8 +232,8 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | 140 | ProcessEntryParentPid | 4 | -1 if no parent |
 | 144 | ProcessEntryWaitTarget | 4 | PID being waited on; -1 otherwise |
 | 148 | ProcessEntryExitStatus | 4 | |
-| 152 | ProcessEntryDiskSlot | 4 | Bin disk slot for program image |
-| 156 | (spare) | 4 | |
+| 152 | ProcessEntryDiskSlot | 4 | Bin disk slot for program image; -1 when FS-backed (Phase 4) |
+| 156 | ProcessEntryFirstBlock | 4 | FS first block of program image (Phase 4); -1 when slot-backed. IvtSpawn branches on DiskSlot: ≥0 → DREAD, <0 → `fs_load_image` |
 | 160 | ProcessEntryFdTable | 32 | FdCount=8 × 4-byte device ids; [0]=stdin, [1]=stdout, [2..7]=open files |
 | **192** | **(end)** | | |
 
@@ -467,6 +469,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-03 | Rectification Phase 2 (MMU = sole protection): MaxPagesPerProcess 64→128 (page-table region 2048→4096, SwapSlotCount→1024, default Bin→1088, TotalSize→+11448); removed both linear fallbacks in TryTranslateData → `RaiseProtectionFault` (reuses IvtInvalidInstruction kill path); LoadProcess size guard; **deleted** Load/StoreBoundsTrapProvider + IsAddressInProcessRanges/GetCurrentProcessRanges/MemoryRange; migrated ~23 bounds/range tests | ~50K (inline) | Plan phase 2/6. `userExtent` includes the user stack, so legit code/data/stack pages never hit the fallback — only genuine OOB does. 603 tests (5 new MemoryProtectionTests). **Deferred:** ISA exec size guard (oversized exec already fails safe via the protection fault; C# LoadProcess guard covers the boot path). |
 | 2026-07-03 | Rectification Phase 1 (FS correctness): `fs_unlink` (fixes chain leak) + `fs_mkdir_path` + `fs_readdir` + `fs_resolve_dir` + `oft_find_first` (EmitFsMaintSubroutines); FsOp 16–18, FSYS 5–7; maintain superblock FreeCount; single-open reject; pin superblock+bitmap; fixed `cache_flush` to write back pinned dirty slots | ~40K (inline) | Plan phase 1/6. 16 isolation (FsMaintTests) + 3 end-to-end (FsSyscallTests) = 621 tests. Pin exposed the flush-skips-pinned bug (pinned superblock never persisted). |
 | 2026-07-02 | Rectification Phase 3 finish (kernel user-mem via paging): resumed mid-debug; root-caused the `fsy_write` hang = 8-bit `MovImm(PageSize=256)` truncation → negative chunk → infinite loop; fixed both fsy_read/write to `Imm16`; removed all DEBUG markers + ProbeWriteThenRead; added `Fsys_WriteThenRead_WithDataRegionBuffers` regression; IvtSlotCount 19→20 (IvtEnsureUserPage), CodeBase 76→80, TotalSize→+11488; docs sweep (4 CLAUDE.md) | ~30K (inline) | Resumed from context summary + memory. Memory-marker diagnostics (not Out()) pinpointed first-negative-chunk on iteration 1. 610 tests (was 603; +6 KernelUserMemoryTests already present, +1 new DATA-region round-trip). |
+| 2026-07-02 | Rectification Phase 4 (boot loads programs from FS): extracted `fs_load_image` (chain→RAM copy, shared by spawn+exec); new `ProcessEntryFirstBlock` @156; `LoadProcess` installs each image to `/bin/p<seq>` (monotonic naming) + marks FS-backed (DiskSlot=-1); `EmitSpawn` branches DREAD-vs-fs_load_image; fork copies FirstBlock; EXEC(slot) resets it to -1; `FsImage.InstallProgram`/`EnsureDir`/`ResolveFirstBlock` (OS-region chunked staging, safe post-alloc); `UsesFilesystemBoot` hook (BasicOS=true); console FS demo (option 13); TotalSize→+11820 | ~45K (inline) | Full suite stayed green through the LoadProcess switch (every end-to-end test now routes through FS install). 6 new FsBootTests (FS-backed run, distinct /bin files, fork, EXEC-slot fallback, Bin.Save/Load persistence, demo). 616 tests. Naming decision (p<seq> vs basename) discussed w/ user; shell deferred to its own plan. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

@@ -97,6 +97,7 @@ public static partial class OsRoutines
         EmitFsPathSubroutines(asm);// "fs_extract_component/path_resolve/mkdir"
         EmitFsFileSubroutines(asm);// "oft_alloc/resolve_parent/create_file/open_core/close_core"
         EmitFsRwSubroutines(asm);  // "oft_from_fd/grow_chain/read_core/write_core"
+        EmitFsLoadImage(asm);      // "fs_load_image" (chain→RAM copy; shared by spawn + exec)
         EmitFsExecSubroutine(asm); // "fs_exec_core"
         EmitFsMaintSubroutines(asm); // "oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir"
         EmitResumeMlfq(asm);    // label "resume_mlfq"
@@ -750,9 +751,33 @@ public static partial class OsRoutines
         asm.Cmp(R(R9), R(EAX));
         asm.Js("sp_done");
 
-        // Copy the program image from disk into the allocated RAM.
+        // Load the program image into the allocated RAM. A slot-backed process (DiskSlot >= 0)
+        // DREADs its disk image; an FS-backed process (DiskSlot < 0, Phase 4) chain-loads its
+        // program from the FS via fs_load_image using the entry's FirstBlock + ProgramSize.
         LoadField(asm, EBX, Hardware.ProcessEntryDiskSlot, R10);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R10), R(EAX));
+        asm.Js("sp_fs");                           // DiskSlot < 0 → FS-backed
         asm.DRead(R(R9), R(R10), R(R11));          // DREAD programAddress, slot, lenOut
+        asm.Jmp("sp_loaded");
+
+        asm.Label("sp_fs");
+        // fs_load_image(EBX=firstBlock, ECX=words, EDX=dest). It clobbers EBX (the entry),
+        // so stash the entry addr in FsScratchArgA (fs_load_image only touches FsRw*) and
+        // restore it after. words = ceil(ProgramSize / 4).
+        SpillStore(asm, OsLayout.FsScratchArgA, EBX);
+        asm.Mov(R(EDX), R(R9));                     // dest = programAddress
+        LoadField(asm, EBX, Hardware.ProcessEntryFirstBlock, R8);   // firstBlock
+        LoadField(asm, EBX, Hardware.ProcessEntryProgramSize, R9);  // ProgramSize (bytes)
+        asm.MovImm(R(EAX), 3);
+        asm.Add(R(R9), R(EAX));
+        asm.MovImm(R(EAX), 4);
+        asm.Div(R(R9), R(EAX));                     // words = ceil(ProgramSize/4)
+        asm.Mov(R(EBX), R(R8));                     // EBX = firstBlock
+        asm.Mov(R(ECX), R(R9));                     // ECX = words
+        asm.Call("fs_load_image");
+        SpillLoad(asm, OsLayout.FsScratchArgA, EBX); // restore entry addr
+        asm.Label("sp_loaded");
 
         // Saved registers: EIP offset = 0 (program start); ESP offset = top of the user
         // stack = TotalSize - KernelStackSize (the kernel stack sits above it).
@@ -848,6 +873,7 @@ public static partial class OsRoutines
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryRequiredStackSize);
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryTotalSize);
         ForkCopyField(asm, R8, R9, Hardware.ProcessEntryDiskSlot);
+        ForkCopyField(asm, R8, R9, Hardware.ProcessEntryFirstBlock); // keep FS-backing identity
 
         // Record the copy-on-write partnership: parent and child each point at the other.
         // The child's page table then seeds its data pages COW (sharing the parent's slots,
@@ -983,6 +1009,7 @@ public static partial class OsRoutines
         asm.Load(R(ECX), R(EAX));
         EntryAddress(asm, ECX, EBX);               // EBX = current entry
         StoreFieldReg(asm, EBX, Hardware.ProcessEntryDiskSlot, R8); // entry.DiskSlot = new slot
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryFirstBlock); // slot-backed now, not FS
 
         // Free the OLD region first — the entry still holds the old ProgramAddress and
         // TotalSize that free_sub reads (DiskSlot, which we changed, is not read by it).
