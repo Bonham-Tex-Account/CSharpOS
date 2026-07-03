@@ -178,6 +178,51 @@ All defined in OsRoutines.cs; the helpers group starts at :2007.
 
 ---
 
+## ISA Authoring & Debugging (READ THIS before writing or debugging ISA)
+
+Every expensive debug hunt in this project's history (Session Cost Log: Inc 6 "block 900", the Phase 3 multi-session hang, Inc 5b's 6 red tests) had the **same root**: a register or scratch slot clobbered across a call, or a silently-wrong immediate — bugs that throw **no exception**, so they cost 20–30K tokens to find by probing. This section exists to make that a ~2-minute lookup instead. **Cost driver #1 is not reading code — it's re-debugging this class of bug.**
+
+### Clobber contract (what survives a call, what doesn't)
+
+| Helper / call | Clobbers | Survives / note |
+|---------------|----------|-----------------|
+| `LoadField` / `StoreFieldReg` / `StoreFieldImm` / `StoreFieldMinusOne` | **EAX + EBP** (offset built in EAX, addr in EBP) | An entry/struct addr reused across several `LoadField`s must live elsewhere (e.g. R12). This is the "block 900" bug: `memory[8]` = IVT[2] ≈ 900, i.e. EAX held an addr that got overwritten. |
+| `SpillStore` / `SpillLoad` | **EBP** only | Use freely to park loop state across calls that clobber registers. |
+| `cache_get` / `cache_dirty` / `cache_*` | nearly all registers | **EDX and EDI survive** (convention: carry a value across `cache_*` in EDX/EDI). |
+| `fs_alloc_block` / `fs_chain_set_next` | EDX/EDI too | State that must outlive these → spill to `OsLayout.FsScratch*` / `FsRw*`. |
+| `fs_chain_next` | most registers | Spill loop state (`FsRw*`) before calling in a walk loop. |
+| `page_in` | **R11** (internal scratch) | `ensure_user_page` spills isWrite across the `page_in` call for exactly this reason. |
+| Any `Call(...)` | return addr pushed to privileged stack | `SetupPrivilegedStack` must run before the **first** CALL in a routine. |
+
+**Convention for new subroutines:** give every `Emit*` subroutine a header comment stating `Input:` (regs), `Output:` (reg), and `Clobbers:` — the newer ones (`fs_load_image`, `ensure_user_page`, `user_word_addr`) already do. When calling one, do not hold a needed value in a clobbered register across the CALL.
+
+### Silent-failure taxonomy → first move
+
+| Symptom | Most likely cause | First check |
+|---------|-------------------|-------------|
+| **Hang**, process `state=Ready, waitReason=None` (not a legit block) | Infinite loop: a loop counter went negative/huge | **8-bit immediate truncation** — `asm.MovImm(reg, N)` emits `(byte)N`, so any `N >= 256` silently becomes `N & 0xFF` (PageSize=256 → 0). Use `Imm16`/`MovImm16` for every OsLayout constant ≥ 256. This was the Phase 3 hang. |
+| **Crash / jump to a wild address** (e.g. "block 900") | A register holding an address was clobbered | Trace register liveness across each CALL; look for an addr kept in EAX/EBP across a `LoadField` (see table above). |
+| **Wrong value round-trips** (off by a lot, or 1 char instead of N) | A scratch slot reused by a nested call | Check the callee's clobber row; a loop var reused as a callee's counter (Inc 5b: `fs_grow_chain` reused `FsRwRemaining`). |
+| **Routine falls through to the wrong code** | Duplicate `asm.Label` name | `Assembler.Label` does `labels[name] = code.Count` — it **silently overwrites** a duplicate. Every subroutine must use a unique label prefix (`fsyr_*`, `fli_*`, `di_*`). |
+
+### The memory-marker diagnostic (the technique that cracked both big hangs)
+
+When an ISA routine misbehaves silently, **write trace values into free heap and read them back with `Test.ReadWord`** after the run — even a hung run, since the markers were written before it stalled.
+
+- Write markers with a spare register: `Imm16(asm, EBP, OsLayout.TotalSize + BIG); asm.MovImm(R(EAX), sentinel); asm.Store(R(EBP), R(EAX));`
+- Useful markers: an **iteration counter** (load/inc/store a heap cell at the top of a suspect loop — if it climbs unbounded, it's an infinite loop) and a **first-divergence latch** (on the first iteration a value goes out of range, snapshot the relevant registers/scratch and set a "latched" flag so later iterations don't overwrite it).
+- **Placement:** markers go in heap **above the process's allocations**, clear of both the install-staging region (just below `TotalSize`) and the buddy heap (which starts *at* `TotalSize` and grows up). In practice `TotalSize + 12000`-ish worked; **verify the marker reads back your sentinel** — if it reads garbage, a process allocation reached it, so move higher (or size the test machine with more headroom).
+- **Do NOT use `Out()` for diagnostics inside an atomic, interrupt-masked OS routine** — it interacts with `KernelOutput`'s device-busy blocking and can itself hang. Memory markers are inert.
+- **Remove all markers + any probe test before committing** (they leave `// DEBUG` breadcrumbs — grep for them).
+
+### Other authoring facts
+
+- **Program base:** User = `currentProcessInstructionStart`, Kernel = 0. JMP/CALL/RET targets and saved EIP are **base-relative** (position-independent) — never hardcode absolute code addresses.
+- **Deliver-a-result-to-the-caller idiom** (FSYS / fork-style, atomic dispatch): `SaveRegs(entry)` → write the result into the entry's EAX slot → `LoadRegs(entry)` → `SetLayout(entry)` → `OsRet(level)`. This is EmitWait's reap path; it persists the captured clean trap frame and overrides only EAX.
+- **Exact numbers** (offsets, IVT slots, sizes) come from the **os-facts skill**, not from reading source or trusting a table — `dotnet run --project .claude/skills/os-facts/dump -- <section>`.
+
+---
+
 ## Fork COW Sequence (EmitFork)
 
 1. `resolve_cow` — materialise any existing COW share (invariant: process resolves before forking again)

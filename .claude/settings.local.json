@@ -33,7 +33,13 @@
       "Bash(git commit -q -m ' *)",
       "Bash(python3 *)",
       "Bash(cat)",
-      "Bash(node /tmp/calc.js)"
+      "Bash(node /tmp/calc.js)",
+      "Bash(ls -la .claude/)",
+      "Bash(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString\\(\\); [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription')",
+      "Bash(dotnet --version)",
+      "Bash(mkdir -p .claude/skills/os-facts/dump .claude/skills/run-tests)",
+      "PowerShell(.claude/skills/run-tests/run-tests.ps1 -Filter FsBootTests)",
+      "Bash(git check-ignore *)"
     ]
   }
 }
