@@ -85,6 +85,66 @@ public static class Programs
         return asm.Build();
     }
 
+    // A filesystem demo (Phase 4): the process itself uses the FSYS syscall to create a file
+    // "/note", write the string "HI!" into it, close and reopen it, read the bytes back into a
+    // separate buffer, and OUTS the result to the screen — proving the FSYS open/write/close/
+    // read path end to end from a live user process. (Boot itself already loads every program
+    // from the filesystem now; this makes the FS visible in the Screen panel.) All buffers live
+    // in the program image's first page, which is RAM-home, and the read destination is a fresh
+    // buffer so the printed "HI!" can only have come from the file, not stale memory.
+    public static byte[] FilesystemDemo()
+    {
+        const int PathOff = 128;   // "/note"
+        const int DataOff = 160;   // "HI!" source (3 chars, word-per-char)
+        const int ReadOff = 192;   // read destination (distinct, never pre-filled)
+
+        Assembler asm = new Assembler();
+        // open("/note", create) → fd in EAX, kept in EBX across the later syscalls.
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.MovImm16(RegisterName.EBX, PathOff);
+        asm.MovImm(RegisterName.ECX, Hardware.FsysCreateFlag);
+        asm.Fsys();
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);
+        // write("HI!", 3)
+        asm.MovImm16(RegisterName.ECX, DataOff);
+        asm.MovImm(RegisterName.EDX, 3);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysWrite);
+        asm.Fsys();
+        // close(fd)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();
+        // reopen("/note") → fd (offset back to 0)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.MovImm16(RegisterName.EBX, PathOff);
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Fsys();
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);
+        // read(3) into ReadOff
+        asm.MovImm16(RegisterName.ECX, ReadOff);
+        asm.MovImm(RegisterName.EDX, 3);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysRead);
+        asm.Fsys();
+        // print what came back
+        asm.MovImm16(RegisterName.EAX, ReadOff);
+        asm.MovImm(RegisterName.ECX, 3);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Hlt();
+        byte[] code = asm.Build();
+
+        byte[] image = new byte[ReadOff + 3 * 4];
+        Array.Copy(code, image, code.Length);
+        image[PathOff]      = (byte)'/';
+        image[PathOff + 4]  = (byte)'n';
+        image[PathOff + 8]  = (byte)'o';
+        image[PathOff + 12] = (byte)'t';
+        image[PathOff + 16] = (byte)'e';
+        // PathOff + 20 stays 0 → null terminator
+        image[DataOff]      = (byte)'H';
+        image[DataOff + 4]  = (byte)'I';
+        image[DataOff + 8]  = (byte)'!';
+        return image;
+    }
+
     // A tiny shell: read a command id (a disk slot) via IN, fork, have the child EXEC
     // that program while the parent focuses the child and waits for it, then loop. This
     // exercises the whole spawning family (FORK / EXEC / SETFOCUS / WAIT) end to end.

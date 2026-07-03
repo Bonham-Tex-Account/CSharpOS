@@ -64,6 +64,7 @@ EmitFsPathSubroutines→ labels "fs_extract_component/path_resolve/mkdir" (CALL/
 EmitFsSyscall        → IvtFsSyscall (slot 18)           (FSYS wrapper; deliver via SAVEREGS/OSRET)
 EmitFsFileSubroutines→ labels "oft_alloc/resolve_parent/create_file/open_core/close_core" (CALL/RET)
 EmitFsRwSubroutines  → labels "oft_from_fd/fs_grow_chain/fs_read_core/fs_write_core" (CALL/RET)
+EmitFsLoadImage      → label "fs_load_image" (CALL/RET; chain→RAM copy, shared by spawn+exec) (Phase 4)
 EmitFsExecSubroutine → label "fs_exec_core" (CALL; resumes on success)  (Inc 6)
 EmitFsMaintSubroutines→ labels "oft_find_first/fs_unlink/fs_mkdir_path/fs_readdir/fs_resolve_dir" (Phase 1)
 EmitResumeMlfq       → label "resume_mlfq" (tail)       OsRoutines.cs:1941
@@ -119,6 +120,7 @@ All subroutines require the **privileged scratch stack** (`SetupPrivilegedStack`
 | `fs_create_file` | EmitFsFileSubroutines | fs_open_core | path in FsOpenAbsPath → new file entry addr or -1; alloc block + insert type=file |
 | `fs_open_core` | EmitFsFileSubroutines | IvtFsOp Open, fs_syscall | EBX=absPath,ECX=flags,EDX=proc → fd or -1; resolve/create, fill OFT, alloc fd |
 | `fs_close_core` | EmitFsFileSubroutines | IvtFsOp Close, fs_syscall | EBX=fd,ECX=proc → 0/-1; clear OFT + fd slot (pure memory) |
+| `fs_load_image` | EmitFsLoadImage | IvtSpawn (FS-backed), fs_exec_core | EBX=firstBlock,ECX=words,EDX=dest → copy the file's block chain into RAM through the cache (Phase 4; extracted from fs_exec_core so spawn reuses it) |
 | `oft_from_fd` | EmitFsRwSubroutines | fs_read_core/fs_write_core | EBX=fd(2..7),ECX=proc → EAX=OFT entry addr or -1 (pure memory) |
 | `fs_grow_chain` | EmitFsRwSubroutines | fs_write_core | EBX=firstBlock,ECX=neededBlocks → 0/-1; walk+extend chain (alloc+link). **Reuses FsRwRemaining/CurBlock/Counter/BufPtr as scratch** — callers restore them after |
 | `fs_read_core` | EmitFsRwSubroutines | IvtFsOp Read, fs_syscall | EBX=fd,ECX=absBuf,EDX=count,ESI=proc → chars read or -1; clamp at size-offset, advance offset |
@@ -211,7 +213,8 @@ All defined in OsRoutines.cs; the helpers group starts at :2007.
 ```csharp
 public class BasicOS : OperatingSystem
 {
-    public override int OsMemorySize => OsLayout.TotalSize;          // 31968 (DataBase 20480 + 11488)
+    public override int OsMemorySize => OsLayout.TotalSize;          // 32300 (DataBase 20480 + 11820)
+    protected override bool UsesFilesystemBoot => true;             // programs install to /bin, run FS-backed (Phase 4)
     public override byte[] BuildOsImage(int osMemoryBase) => OsRoutines.BuildOsImage();
     public BasicOS(TextWriter log) : base(CollectTraps(), log) { }
     protected override void OnBooted(Hardware hw) { /* magic-guarded FS auto-format */ }

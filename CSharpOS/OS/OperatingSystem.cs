@@ -18,10 +18,22 @@ public abstract class OperatingSystem : IOperatingSystem
     public bool HasProcesses => CountLiveProcesses() > 0;
     public bool HasRunningProcess => hardware != null && hardware.IsProcessRunning();
 
+    // When true, LoadProcess installs each program image into the filesystem and creates the
+    // process FS-backed (DiskSlot = -1, FirstBlock = the file's first block) instead of leaving
+    // it slot-backed for IvtSpawn to DREAD (Phase 4: boot loads programs from the FS). Defaults
+    // to false so an OS without an FS image (or a bare test double) keeps the disk-slot path;
+    // BasicOS, which formats an FS on boot, overrides it to true.
+    protected virtual bool UsesFilesystemBoot => false;
+
     // ---- private fields --------------------------------------------------
     private readonly List<Trap> traps;
     private readonly TextWriter log;
     private Hardware? hardware;
+
+    // Monotonic counter for auto-naming installed program files ("/bin/p0", "/bin/p1", ...).
+    // Unique per OS instance (one machine), which is all uniqueness the auto-install needs;
+    // the name is display/readdir-only (nothing keys off it). See Phase 4 naming decision.
+    private int installSequence;
 
     // Maps a loaded process's program base address to its file path, so consumers
     // (e.g. the visualizer) can name the process behind a Hardware context switch.
@@ -209,7 +221,34 @@ public abstract class OperatingSystem : IOperatingSystem
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredMemory, process.RequiredMemory);
         WriteWord(hw, entry + Hardware.ProcessEntryRequiredStackSize, process.RequiredStackSize);
         WriteWord(hw, entry + Hardware.ProcessEntryTotalSize, total);
-        WriteWord(hw, entry + Hardware.ProcessEntryDiskSlot, diskSlot);
+
+        // Program backing. An FS-boot OS installs the image into the filesystem and marks the
+        // process FS-backed (DiskSlot = -1, FirstBlock = the file's first block), so IvtSpawn
+        // chain-loads it via fs_load_image. Otherwise the process stays slot-backed (FirstBlock
+        // = -1) and IvtSpawn DREADs the disk image. The install uses the target slot as the
+        // transient FS owner: it is not yet spawned, so its fd table is free and is re-seeded
+        // below.
+        if (UsesFilesystemBoot)
+        {
+            byte[] image = hw.Disk.Load(diskSlot);
+            FsImage.EnsureDir(hw, "/bin");
+            string fsPath = $"/bin/p{installSequence}";
+            installSequence++;
+            FsImage.InstallProgram(hw, fsPath, image, slot);
+            int firstBlock = FsImage.ResolveFirstBlock(hw, fsPath);
+            if (firstBlock < 0)
+            {
+                log.WriteLine($"[LOAD FAILED] Could not install into the filesystem: {ProcessName(process, diskSlot)}");
+                return;
+            }
+            WriteWord(hw, entry + Hardware.ProcessEntryDiskSlot, -1);
+            WriteWord(hw, entry + Hardware.ProcessEntryFirstBlock, firstBlock);
+        }
+        else
+        {
+            WriteWord(hw, entry + Hardware.ProcessEntryDiskSlot, diskSlot);
+            WriteWord(hw, entry + Hardware.ProcessEntryFirstBlock, -1);
+        }
         WriteWord(hw, entry + Hardware.ProcessEntryState, (int)ProcessState.Terminated); // placeholder until allocated
 
         // Create the process in ISA: IvtSpawn allocates the region, DREADs the image

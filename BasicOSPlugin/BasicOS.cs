@@ -16,6 +16,10 @@ public class BasicOS : OperatingSystem
     /// <summary>Builds the OS image (IVT + assembled routines + zeroed data section).</summary>
     public override byte[] BuildOsImage(int osMemoryBase) => OsRoutines.BuildOsImage();
 
+    /// <summary>Programs are installed into the FS at load and run FS-backed (Phase 4);
+    /// BasicOS formats an FS on boot, so the filesystem is always available for the install.</summary>
+    protected override bool UsesFilesystemBoot => true;
+
     // ---- constructor -----------------------------------------------------
     /// <summary>
     /// Creates the OS, collecting its traps by reflection. The <paramref name="log"/>

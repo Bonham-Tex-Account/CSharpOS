@@ -305,13 +305,25 @@ public static class OsLayout
     public const int FsWrapChunk     = FsWrapBase + 20;   // words in the current page-chunk
     public const int FsWrapWords     = 6;
 
+    // ---- program-install staging (Phase 4: boot loads programs from the FS) -----
+    // LoadProcess installs a program into the FS by driving the ISA FsOp cores, which read an
+    // ABSOLUTE buffer. This staging area lives INSIDE the OS region (below TotalSize) so it
+    // never overlaps the buddy heap (which starts at TotalSize) — safe to use even after
+    // processes are allocated, unlike FsImage.WriteFile's boot-only TotalSize staging. The
+    // program is written to the FS in block-sized chunks through InstallBuf so the buffer
+    // stays one block wide rather than sizing to the largest possible program image.
+    public const int InstallPathBase  = FsWrapBase + FsWrapWords * 4;
+    public const int InstallPathWords = 20;               // "/bin/p<seq>" word-per-char + null
+    public const int InstallBufBase   = InstallPathBase + InstallPathWords * 4;
+    public const int InstallBufWords  = FsLayout.CharsPerBlock;   // one block worth (63 words)
+
     public static int OftAddress(int index)
     {
         return OftBase + index * OftEntryBytes;
     }
 
     // Total OS region size.
-    public const int TotalSize = FsWrapBase + FsWrapWords * 4;
+    public const int TotalSize = InstallBufBase + InstallBufWords * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)
