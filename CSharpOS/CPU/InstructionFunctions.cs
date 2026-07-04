@@ -512,4 +512,12 @@ internal static class InstructionFunctions
     {
         hw.Reap(hw.ReadRegisterAt(b1));
     }
+
+    // KILL r, s — send signal reg[s] (TERM/KILL/STOP/CONT) to the process with PID reg[r]
+    // (Shell §2.5 job control); traps into the privileged OS kill routine, which delivers 0
+    // (signal delivered) or -1 (no such pid) back to the caller in EAX.
+    internal static void Kill(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.Kill(hw.ReadRegisterAt(b1), hw.ReadRegisterAt(b2));
+    }
 }

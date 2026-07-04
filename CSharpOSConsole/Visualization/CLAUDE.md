@@ -99,6 +99,8 @@ SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delay
 | `Backspace` | Clear input buffer |
 | `o` | Toggle ShowProgramIo |
 | `d` | Toggle the Buddy panel slot between the buddy tree and the Disk (filesystem) view (`SpectreDashboard.ShowDisk`) |
+| `Ctrl-C` | tty-style: send SigTerm to the foreground process (Shell §2.5 JC-D; always intercepted, `Console.TreatControlCAsInput`) |
+| `Ctrl-Z` | tty-style: send SigStop to the foreground process (Shell §2.5 JC-D) |
 | `q` | Quit |
 
 ### Headless Testing Seam

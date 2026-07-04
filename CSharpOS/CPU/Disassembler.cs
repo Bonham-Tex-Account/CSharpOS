@@ -68,6 +68,7 @@ public static class Disassembler
             case Instruction.EXIT:          return $"EXIT {Reg(b1)}";
             case Instruction.SETFOCUS:      return $"SETFOCUS {Reg(b1)}";
             case Instruction.REAP:          return $"REAP {Reg(b1)}";
+            case Instruction.KILL:          return $"KILL {Reg(b1)}, {Reg(b2)}";
             default:                        return $"??? {opcode:X2}";
         }
     }

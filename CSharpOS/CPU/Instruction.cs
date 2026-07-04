@@ -149,6 +149,7 @@ public static class Instruction
         opcodeTable[EXIT]        = InstructionFunctions.Exit;
         opcodeTable[SETFOCUS]    = InstructionFunctions.SetFocus;
         opcodeTable[REAP]        = InstructionFunctions.Reap;
+        opcodeTable[KILL]        = InstructionFunctions.Kill;
         opcodeTable[OUTS]        = InstructionFunctions.Outs;
         opcodeTable[INS]         = InstructionFunctions.Ins;
         opcodeTable[INK]         = InstructionFunctions.Ink;

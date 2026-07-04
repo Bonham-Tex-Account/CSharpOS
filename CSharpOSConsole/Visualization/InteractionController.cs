@@ -35,6 +35,7 @@ public sealed class InteractionController
     private readonly Action<string>? submitStringInput;
     private readonly Action<int>? submitKey;
     private readonly Action? toggleDisk;
+    private readonly Action<int>? foregroundSignal;
     private bool paused;
     private bool keyPassthrough;
     private string inputLine = "";
@@ -42,7 +43,7 @@ public sealed class InteractionController
     public InteractionController(FrameHistory frames, bool interactive, int delayMs,
         Action toggleIo, Action cycleFocus, Action<int> submitInput,
         Action<string>? submitStringInput = null, Action<int>? submitKey = null,
-        Action? toggleDisk = null)
+        Action? toggleDisk = null, Action<int>? foregroundSignal = null)
     {
         this.frames = frames;
         this.interactive = interactive;
@@ -53,6 +54,7 @@ public sealed class InteractionController
         this.submitStringInput = submitStringInput;
         this.submitKey = submitKey;
         this.toggleDisk = toggleDisk;
+        this.foregroundSignal = foregroundSignal;
     }
 
     public bool Paused
@@ -84,6 +86,14 @@ public sealed class InteractionController
         {
             keyPassthrough = !keyPassthrough;
             return StepAction.Redraw;
+        }
+        // Ctrl-C / Ctrl-Z: tty-style job-control signals to the foreground process. Always
+        // intercepted (never forwarded to the process), like F1 — a real terminal does not deliver
+        // these to the app, it signals it. Ctrl-C terminates the foreground job, Ctrl-Z stops it.
+        if ((key.Modifiers & ConsoleModifiers.Control) != 0)
+        {
+            if (key.Key == ConsoleKey.C) { foregroundSignal?.Invoke(Hardware.SigTerm); return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.Z) { foregroundSignal?.Invoke(Hardware.SigStop); return StepAction.Redraw; }
         }
         if (keyPassthrough)
         {

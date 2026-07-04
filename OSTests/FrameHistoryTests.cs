@@ -123,6 +123,29 @@ public class FrameHistoryTests
         return (controller, frames);
     }
 
+    private static ConsoleKeyInfo CtrlKey(ConsoleKey key)
+    {
+        return new ConsoleKeyInfo('\0', key, shift: false, alt: false, control: true);
+    }
+
+    [Fact]
+    public void CtrlC_And_CtrlZ_SendForegroundJobControlSignals()
+    {
+        // Ctrl-C → SigTerm, Ctrl-Z → SigStop, delivered to the foreground process (Shell §2.5 JC-D).
+        // Always intercepted, so they work regardless of passthrough mode.
+        List<int> signals = new List<int>();
+        FrameHistory frames = new FrameHistory();
+        frames.Capture(ModelAtStep(1));
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 0,
+            () => { }, () => { }, value => { }, submitStringInput: null, submitKey: null,
+            toggleDisk: null, foregroundSignal: s => signals.Add(s));
+
+        controller.HandleKey(CtrlKey(ConsoleKey.C));
+        controller.HandleKey(CtrlKey(ConsoleKey.Z));
+
+        Assert.Equal(new List<int> { Hardware.SigTerm, Hardware.SigStop }, signals);
+    }
+
     [Fact]
     public void LeftArrow_WhenPaused_StepsBack_RequestingRedraw()
     {

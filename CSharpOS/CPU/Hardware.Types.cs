@@ -2,7 +2,7 @@ namespace CSharpOS;
 
 public partial class Hardware
 {
-    private enum InterruptKind { InputReady, OutputComplete, StringInputReady, KeyInputReady }
+    private enum InterruptKind { InputReady, OutputComplete, StringInputReady, KeyInputReady, ForegroundSignal }
 
     // An interrupt from a device. Device identifies which terminal/process it is
     // for (the device id == the owning process's table index), mirroring how real
