@@ -86,7 +86,11 @@ public partial class Hardware
     // 1 KiB each — generous enough that the many load sites and multi-load tests
     // never exhaust slots.
     public const int DefaultDiskSlots    = 64;
-    public const int DefaultDiskSlotSize = 1024;
+    // 2 KiB each: raised from 1024 in Shell §2.5 (JC-D) once the shell — with its job-control
+    // builtins — grew past 1 KiB. Program images are staged through a disk slot before FS install,
+    // so a slot must hold the whole image. Swap slots (256-byte pages) sit in the same Bin and are
+    // unaffected by the larger size.
+    public const int DefaultDiskSlotSize = 2048;
     // The filesystem's raw block store, carried in the same Bin as the image/swap slots
     // but block-addressed (see Bin.ReadFileBlock). Block size matches the paging PageSize
     // (256) by convention so the future RAM cache can hold one block per page frame; kept
@@ -156,8 +160,23 @@ public partial class Hardware
     // resumes the caller with the reaped pid in EAX (0 if none dead) and its exit status in EDX. It
     // never blocks, so it runs atomically rather than through the preemptible IvtSyscall path.
     public const int IvtReap               = 20;
-    public const int IvtSlotCount          = 21;
+    // Signal delivery to an arbitrary process (Shell §2.5 job control, JC-B). KILL dispatches this
+    // atomic routine (like FORK); the target pid is in EAX and the signal number in OsLayout.KillSig
+    // (DispatchOsRoutine carries only one EAX arg). SigTerm/SigKill tear the target down via the same
+    // teardown as exit_body (freeing memory, waking a wait()ing parent, zombie/orphan handling);
+    // SigStop/SigCont set/clear the target's job-control stop flag (wired in JC-C). Resumes the caller
+    // with 0 (delivered) or -1 (no such pid) in EAX; if the caller killed itself, reschedules instead.
+    public const int IvtKill               = 21;
+    public const int IvtSlotCount          = 22;
     public const int IvtSize               = IvtSlotCount * 4;
+
+    // KILL signal numbers (Shell §2.5). SigTerm/SigKill both run the kernel teardown (no catchable
+    // handlers this pass — that is the reserved SIGACTION/JC-E work). SigStop/SigCont are the
+    // job-control stop/continue signals, applied in JC-C.
+    public const int SigTerm = 1;
+    public const int SigKill = 2;
+    public const int SigStop = 3;
+    public const int SigCont = 4;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
     // each op's result (cache_get returns the block's cached data address; the rest return 0)
@@ -469,6 +488,7 @@ public partial class Hardware
             case IvtFsSyscall:          return "FsSyscall";
             case IvtEnsureUserPage:     return "EnsureUserPage";
             case IvtReap:               return "Reap";
+            case IvtKill:               return "Kill";
             default:                    return $"slot {slot}";
         }
     }
@@ -1148,6 +1168,15 @@ public partial class Hardware
         {
             return false;
         }
+        if (interrupt.Kind == InterruptKind.ForegroundSignal)
+        {
+            // Terminal job-control signal (Ctrl-C/Ctrl-Z): run IvtKill on the focused pid (carried in
+            // Device) with the signal (Value) and KillNoDeliver set — there is no killer process.
+            WriteWord(osMemoryBase + OsLayout.KillSig, interrupt.Value);
+            WriteWord(osMemoryBase + OsLayout.KillNoDeliver, 1);
+            DispatchOsRoutine(IvtKill, interrupt.Device);
+            return true;
+        }
         Device device = DeviceFor(interrupt.Device);
         if (interrupt.Kind == InterruptKind.InputReady)
         {
@@ -1618,6 +1647,43 @@ public partial class Hardware
             return;
         }
         trapTaken = true;
+    }
+
+    // KILL: send signal `sig` to the process with PID `targetPid` (Shell §2.5 job control). The
+    // signal number is stashed in OsLayout.KillSig (DispatchOsRoutine carries only the pid, in EAX);
+    // IvtKill reads both, applies the signal (TERM/KILL tear the target down; STOP/CONT set/clear its
+    // stop flag), and resumes the caller with 0 (delivered) or -1 (no such pid) in EAX.
+    public void Kill(int targetPid, int sig)
+    {
+        if (OsManaged)
+        {
+            WriteWord(osMemoryBase + OsLayout.KillSig, sig);
+            WriteWord(osMemoryBase + OsLayout.KillNoDeliver, 0); // process-initiated: deliver the result
+            DispatchOsRoutine(IvtKill, targetPid);
+            return;
+        }
+        trapTaken = true;
+    }
+
+    // Terminal job-control signal (Shell §2.5 JC-D): a keypress (Ctrl-C → SigTerm, Ctrl-Z → SigStop)
+    // sends `sig` to the FOCUSED (foreground) process, like a real tty. Enqueued as a pending
+    // interrupt so it is dispatched at a safe point (not mid-OS-routine); the dispatcher reads the
+    // focused pid and runs IvtKill with KillNoDeliver set (no killer process called KILL). A no-op if
+    // there is no focused process. Uses the InterruptKind carrying (sig, focusedPid).
+    public void RaiseForegroundSignal(int sig)
+    {
+        if (!OsManaged || activeProcess < 0)
+        {
+            return;
+        }
+        int entry = osMemoryBase + OsLayout.ProcessEntryAddress(activeProcess);
+        int state = ReadWord(entry + ProcessEntryState);
+        if (state == (int)ProcessState.Terminated)
+        {
+            return;
+        }
+        int pid = ReadWord(entry + ProcessEntryPid);
+        pendingInterrupts.Enqueue(new Interrupt(InterruptKind.ForegroundSignal, sig, pid));
     }
 
     // SETFOCUS: make the process with the given PID the foreground process. Maps PID to

@@ -44,6 +44,17 @@ public class ShellTests : IDisposable
         return asm.Build();
     }
 
+    // Blocks forever on input (no input is ever delivered to it) — a long-running background job
+    // that must be killed to terminate. Blocking (rather than busy-spinning) keeps it from starving
+    // the shell's CPU time, so the shell stays responsive to `jobs`/`kill`.
+    private static byte[] BlockForever()
+    {
+        Assembler asm = new Assembler();
+        asm.In(RegisterName.EAX);   // blocks: nothing is ever sent to this job's stdin
+        asm.Hlt();
+        return asm.Build();
+    }
+
     [Fact]
     public void SetFocus_MapsPidToTheForegroundProcess()
     {
@@ -263,6 +274,118 @@ public class ShellTests : IDisposable
 
         Assert.Contains("done ", strings); // the finished background job was reaped and announced
         Assert.True(os.HasProcesses);      // the shell is still alive and looping
+    }
+
+    [Fact]
+    public void Shell_JobsBuiltin_ListsBackgroundJob_AndKillByNumber_TerminatesIt()
+    {
+        // Job control (JC-B): background a long-running job, list it with the `jobs` builtin (which
+        // prints the job's pid), then terminate it with `kill 1` — the killed job is reaped and
+        // announced with "done ". A bad job number (`kill 10`) is ignored without harming the shell.
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        (List<int> ints, List<string?> strings) = CaptureAll(hw);
+
+        FsImage.EnsureDir(hw, "/bin");
+        FsImage.WriteFile(hw, "/bin/wait", BlockForever());
+        os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128));   // shell = slot 0
+        hw.SetActiveProcess(0);
+
+        // Background the job (pid 2). Background jobs never steal focus, so the shell stays active.
+        for (int i = 0; i < 3000; i++) { hw.Run(); }
+        hw.RaiseStringInputInterrupt("/bin/wait &");
+        for (int i = 0; i < 8000; i++) { hw.Run(); }
+
+        // `jobs` prints the background job's pid (2).
+        hw.SetActiveProcess(0);
+        hw.RaiseStringInputInterrupt("jobs");
+        for (int i = 0; i < 20000 && !ints.Contains(2); i++) { hw.Run(); }
+        Assert.Contains(2, ints);       // the jobs builtin listed the background pid
+
+        // A nonexistent job number is parsed (two digits) and safely ignored.
+        for (int i = 0; i < 8000; i++) { hw.Run(); }
+        hw.SetActiveProcess(0);
+        hw.RaiseStringInputInterrupt("kill 10");
+        for (int i = 0; i < 8000; i++) { hw.Run(); }
+        Assert.True(os.HasProcesses);   // shell (and the still-running job) survived the bad kill
+
+        // `kill 1` terminates the background job; the shell reaps it and announces "done ".
+        for (int i = 0; i < 8000; i++) { hw.Run(); }
+        hw.SetActiveProcess(0);
+        hw.RaiseStringInputInterrupt("kill 1");
+        for (int i = 0; i < 40000 && !strings.Contains("done "); i++) { hw.Run(); }
+
+        Assert.Contains("done ", strings);  // the killed background job was reaped and announced
+        Assert.True(os.HasProcesses);       // the shell itself is still alive
+    }
+
+    // Reads one int from stdin, echoes it, and exits. Used to test `fg`: it blocks in the
+    // background, and once foregrounded and fed an int, it completes so fg's WAIT returns.
+    private static byte[] EchoInput()
+    {
+        Assembler asm = new Assembler();
+        asm.In(RegisterName.EAX);
+        asm.Out(RegisterName.EAX);
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Exit(RegisterName.EAX);
+        return asm.Build();
+    }
+
+    // Runs the machine until the process in `slot` is Blocked on the given reason, or the cap is hit.
+    // A shell command costs thousands of instructions (fork + FS exec), so tests must sync on state,
+    // not fixed step counts.
+    private static void RunUntilBlocked(Hardware hw, int slot, WaitReason reason, int cap)
+    {
+        for (int i = 0; i < cap; i++)
+        {
+            int e = OsLayout.ProcessEntryAddress(slot);
+            if (Test.ReadWord(hw, e + Hardware.ProcessEntryState) == (int)ProcessState.Blocked
+                && Test.ReadWord(hw, e + Hardware.ProcessEntryWaitReason) == (int)reason)
+            {
+                return;
+            }
+            hw.Run();
+        }
+    }
+
+    [Fact]
+    public void Shell_StopBgFg_ManageAJobThroughItsLifecycle()
+    {
+        // Background a job (pid 2, slot 1, blocked on input), drive it through stop → bg (which must
+        // leave it runnable again), then fg it: fg CONTinues + focuses + WAITs. Once foregrounded and
+        // blocked on input, feeding it an int makes it echo (99) and exit, returning fg's WAIT.
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+        (List<int> ints, _) = CaptureAll(hw);
+
+        FsImage.EnsureDir(hw, "/bin");
+        FsImage.WriteFile(hw, "/bin/echoin", EchoInput());
+        os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128));   // shell = slot 0
+        hw.SetActiveProcess(0);
+
+        for (int i = 0; i < 3000; i++) { hw.Run(); }
+        hw.RaiseStringInputInterrupt("/bin/echoin &");     // background job → pid 2 (slot 1)
+        RunUntilBlocked(hw, 1, WaitReason.Input, 60000);   // wait until it blocks on IN
+
+        hw.SetActiveProcess(0);
+        hw.RaiseStringInputInterrupt("stop 1");            // stop the blocked job
+        for (int i = 0; i < 8000; i++) { hw.Run(); }
+        hw.SetActiveProcess(0);
+        hw.RaiseStringInputInterrupt("bg 1");              // continue it (still blocked on IN)
+        for (int i = 0; i < 8000; i++) { hw.Run(); }
+        Assert.True(os.HasProcesses);                      // shell + job survived stop/bg
+
+        hw.SetActiveProcess(0);
+        hw.RaiseStringInputInterrupt("fg 1");              // foreground: CONT + focus + WAIT
+        // Sync on the SHELL entering WAIT (which runs *after* fg's SetFocus), so the job is focused
+        // and blocked on IN by the time we feed it — the job was already blocked, so polling on the
+        // job alone would return before fg focused it.
+        RunUntilBlocked(hw, 0, WaitReason.ChildProcess, 60000);
+        hw.RaiseInputInterrupt(99);                        // feed the now-focused job; it echoes + exits
+        for (int i = 0; i < 60000 && !ints.Contains(99); i++) { hw.Run(); }
+
+        Assert.Contains(99, ints);                         // the foregrounded job ran to completion
+        Assert.True(os.HasProcesses);                      // the shell is still alive
     }
 
     [Fact]

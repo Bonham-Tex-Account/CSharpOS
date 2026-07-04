@@ -295,6 +295,13 @@ public sealed partial class Assembler
         Emit(Instruction.REAP, (byte)targetPid, 0, 0);
     }
 
+    // Send signal reg[sig] to the process with PID reg[targetPid] (Shell §2.5 job control).
+    // Delivers 0 (signal delivered) or -1 (no such pid) back to the caller in EAX.
+    public void Kill(RegisterName targetPid, RegisterName sig)
+    {
+        Emit(Instruction.KILL, (byte)targetPid, (byte)sig, 0);
+    }
+
     /// <summary>Reserves a 4-byte zero-initialized slot in the data section, addressable by <paramref name="name"/>.</summary>
     public void DataInt(string name)
     {

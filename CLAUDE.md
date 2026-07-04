@@ -99,7 +99,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x36 | WAIT | Wait | b1=pid-reg; dispatches IvtWait |
 | 0x37 | EXIT | Exit | b1=status-reg; dispatches IvtHalt(status) |
 | 0x38 | SETFOCUS | SetFocus | b1=pid-reg; C# Hardware.SetFocus (no ISA routine) |
-| 0x39 | KILL | (reserved) | JC-B: b1=pid-reg, b2=sig-reg → IvtKill. **Not yet wired** (Shell §2.5) |
+| 0x39 | KILL | Kill | b1=pid-reg, b2=sig-reg → IvtKill; EAX=0 delivered / -1 no-such-pid. Sig{Term=1,Kill=2}→teardown, {Stop=3→set Stopped flag+wake waiter(-2), Cont=4→clear flag} (Shell §2.5 JC-B/C) |
 | 0x3A | REAP | Reap | b1=pid-reg (0=any child); non-blocking → IvtReap; EAX=reaped pid (0 if none), EDX=status (Shell §2.5 JC-A) |
 | 0x3B | SIGACTION | (reserved) | JC-E catchable-signal handler install; documented, unimplemented |
 | 0x40 | SAVEREGS | SaveRegs | b1=ptr-reg; save trap frame to absolute address; privileged |
@@ -121,7 +121,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 
 ## IVT Slot Table
 
-`IvtSlotCount=21`, `IvtSize=84`, `CodeBase=84` (Shell §2.5 JC-A added slot 20, `IvtReap`; was 20/80/80 after Phase 3 added slot 19 `IvtEnsureUserPage`)
+`IvtSlotCount=22`, `IvtSize=88`, `CodeBase=88` (Shell §2.5 JC-A added slot 20 `IvtReap`, JC-B added slot 21 `IvtKill`; was 20/80/80 after Phase 3 added slot 19 `IvtEnsureUserPage`)
 
 | Slot | Constant | C# addr field | Emit Method | Purpose |
 |------|----------|--------------|-------------|---------|
@@ -146,6 +146,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 18 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
 | 19 | IvtEnsureUserPage | — | EmitEnsureUserPageOp | Fault-in/COW-resolve one user page; EAX=page (isWrite via `OsLayout.EnsureUserPageIsWrite`); dispatched only via `RunOsRoutineSynchronously` (Hardware.UserToPhysical), never by ISA code |
 | 20 | IvtReap | — | EmitReap | Non-blocking reap (REAP 0x3A); EAX=target pid (0=any child) → EAX=reaped pid (0 if none), EDX=status. Atomic dispatch like FORK; duplicates EmitWait's reap scan minus the block (Shell §2.5 JC-A) |
+| 21 | IvtKill | — | EmitKill | Signal a process (KILL 0x39); EAX=target pid, sig in `OsLayout.KillSig` → EAX=0/-1. TERM/KILL run `teardown_reap` on the target via a temporary CurrentIndex swap (suicide→exit_body, else deliver to killer); STOP sets Stopped flag + wakes a WAIT-ing parent (-2), self-stop SaveRegs+reschedule; CONT clears the flag. `OsLayout.KillNoDeliver`=1 (terminal Ctrl-C/Z) skips the EAX-writes (Shell §2.5 JC-B/C/D) |
 
 **Note:** SETFOCUS (0x38) has no IVT slot / ISA routine — it's intentionally C#-only (`Hardware.SetFocus`), because "focused process" is a hardware-side field (`activeProcess`) with no OS-memory representation; it's a device/foreground concern, not an OS service.
 
@@ -157,7 +158,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 `DataBase = 24576` (raised from 20480 in Shell §2.5 JC-A once IvtReap pushed the OS code past 20.7 KB). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
 
-> ⚠️ **Post-process-table `+N` offsets below are stale by +64** since Shell §2.5 grew `ProcessEntrySize` 192→200 (process table 1536→1600). The **Header** rows (through ProcessTableOffset +48) are correct; every row in **After Process Table** and below is now +64 larger. **Use the `os-facts` skill for exact values** (`dotnet run --project .claude/skills/os-facts/dump -- layout`) rather than trusting these until they're re-synced. Confirmed anchors: `ProcessEntrySize=200`, `DataBase=24576`, `TotalSize=36984` (abs).
+> ⚠️ **Post-process-table `+N` offsets below are stale by +64** since Shell §2.5 grew `ProcessEntrySize` 192→200 (process table 1536→1600). The **Header** rows (through ProcessTableOffset +48) are correct; every row in **After Process Table** and below is now +64 larger. **Use the `os-facts` skill for exact values** (`dotnet run --project .claude/skills/os-facts/dump -- layout`) rather than trusting these until they're re-synced. Confirmed anchors: `ProcessEntrySize=200`, `DataBase=24576`, `TotalSize=36996` (abs). JC-B/D region `JobCtlBase` (KillSig @0, KillSaveIndex @4, KillNoDeliver @8) sits just below TotalSize.
 
 ### Header
 
@@ -335,7 +336,7 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | Constant | Value |
 |----------|-------|
 | DefaultDiskSlots | 64 (image slots) |
-| DefaultDiskSlotSize | 1024 bytes |
+| DefaultDiskSlotSize | 2048 bytes (raised from 1024 in Shell §2.5 JC-D — the shell image outgrew a slot; program images stage through a slot before FS install) |
 | SwapBase | 64 (swap slots start after image slots) |
 | SwapSlotsPerProcess | 128 |
 | SwapSlotCount | 1024 (8 procs × 128 pages) |
@@ -344,7 +345,7 @@ Register file size = 96 bytes. `hw.GetRegisterOffset(RegisterName.X)` returns by
 | DefaultFileBlockSize | 256 bytes (== PageSize by convention) |
 | DefaultFileBlockCount | 256 (file-block region; 64 KiB file space) |
 
-**File-block region** (Inc 1): a second backing store inside the same `Bin`, block-addressed (not slot-addressed). `Bin.ReadFileBlock(block)` reads a fresh copy (zeros if never written — raw block-device semantics, never throws for empty); `Bin.WriteFileBlock(block, data)` requires exactly `FileBlockSize` bytes. `Bin.Save(path)`/`Load(path)` persist **only** the file-block region (magic `0x43534653` "CSFS" + geometry header) — images rebuild from programs at boot, swap is transient. Moved via privileged `FBREAD`/`FBWRITE` (0x4B/0x4C). Default disk is now `Bin(1088, 1024, 256, 256)` (64 image + 1024 swap slots).
+**File-block region** (Inc 1): a second backing store inside the same `Bin`, block-addressed (not slot-addressed). `Bin.ReadFileBlock(block)` reads a fresh copy (zeros if never written — raw block-device semantics, never throws for empty); `Bin.WriteFileBlock(block, data)` requires exactly `FileBlockSize` bytes. `Bin.Save(path)`/`Load(path)` persist **only** the file-block region (magic `0x43534653` "CSFS" + geometry header) — images rebuild from programs at boot, swap is transient. Moved via privileged `FBREAD`/`FBWRITE` (0x4B/0x4C). Default disk is now `Bin(1088, 2048, 256, 256)` (64 image + 1024 swap slots; slot size 2048 since Shell §2.5 JC-D).
 
 ### Filesystem Cache (Inc 2)
 | Constant | Value |
@@ -494,6 +495,14 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-03 | Fix shell mode-9 out-of-range in visualizer + job-control design plan. **Bug:** `CSharpOSConsole/Program.cs` hardcoded `MemorySize=32768` but Shell §2 grew `TotalSize` to 32824 → buddy heap started past end of memory → `/bin` install ran off `memory[]`. **Fix:** `MemorySize = OsLayout.TotalSize + 32768` (tracks TotalSize; can't drift again; +32768 = clean 32KB heap). Regression `ShellTests.Shell_InVisualizerSetup_...` (reproduces the crash at old size, verified). Then designed job-control plan (`~/.claude/plans/brisk-huddling-walrus.md`) — full job control, plan-only | ~28K (inline) | 645 tests (was 644). ShellTests never caught it — they use MachineWithHeap(16384); the stale const only lived in the host. Lesson: host memory must derive from TotalSize, not a magic number. |
 
 | 2026-07-03 | Shell §2.5 job control **JC-A** (background jobs + non-blocking reap): new `REAP` opcode 0x3A → `IvtReap` (slot 20; targeted-or-any, delivers EAX=pid/EDX=status, reuses EmitWait's reap-scan minus the block); reserved `KILL` 0x39 / `SIGACTION` 0x3B consts + `ProcessEntryStopped`@192 / `ProcessEntrySigHandler`@196 (size 192→200); shell `&` backgrounding + REAP-drain "done" notice; DataBase 20480→24576, TotalSize→36984 | ~40K (inline) | 650 tests (+3 ReapTests, +1 Shell bg, +1 Disasm; fixed a two-command ShellTests timing race my drain/scan exposed — refocus must follow the shell's own SetFocus). Plan `brisk-huddling-walrus.md`. |
+
+| 2026-07-03 | Shell §2.5 job control **JC-B1** (kernel `KILL`): `KILL` opcode 0x39 → `IvtKill` (slot 21). **Extracted `teardown_reap` (CALL/RET) from `exit_body`** (the free/resolve_cow/release_frames/zero_swap/parent-wake/zombie/orphan logic; exit_body = SetupPrivilegedStack+CALL+resume_mlfq) so `kill_core` runs the identical teardown on an arbitrary target via a temporary `CurrentIndexOffset` swap; suicide→exit_body, else deliver 0/-1 to killer. New `OsLayout.KillSig`/`KillSaveIndex` + `Hardware.Sig{Term,Kill,Stop,Cont}` + `Hardware.Kill`. TotalSize→36992 | ~35K (inline) | 655 tests (+4 KillTests, +1 Disasm). Hit the 8-bit-`MovImm(-1)`→255 trap **twice** (R9 sentinel + R8 result) — build −1 via MovImm(0)+Dec. exit_body refactor kept all fork/wait/exit/exec/fault tests green. |
+
+| 2026-07-03 | Shell §2.5 job control **JC-B2** (shell builtins): `Programs.Shell()` rewritten with a jobs table (DATA @1280), `cmd_is`/`parse_uint` CALL/RET helpers, and `jobs`/`kill <n>` builtins (dispatched before exec). | ~30K (inline) | 656 tests (+1 ShellTest). Two lessons: (1) 32-byte string slots — a 16-byte gap made "done " overrun "jobs"→"donej"; (2) **a busy-spinning bg job starves the shell** (both demote to pri 3 → ~65k steps to re-prompt), so tests use a *blocking* bg job (`/bin/wait`=IN). OUT-marker debugging is unreliable across FORK (parent+child both OUT). |
+
+| 2026-07-04 | Shell §2.5 job control **JC-C kernel** (stop/continue): `SigStop`/`SigCont` in `kill_core` set/clear `ProcessEntryStopped`; `resume_mlfq` skips Stopped=1 (single scheduling point); SIGSTOP wakes a WAIT-ing parent with status −2 (WUNTRACED) w/o reaping; self-stop SaveRegs+reschedules. | ~20K (inline) | 658 tests (+2 KillTests). Stopped-as-orthogonal-flag makes blocked+stop (R3) free — wake fires on `state` under the flag. Test race: a stopped child isn't a zombie, so a late WAIT blocks forever — the killer must delay so the parent waits first. |
+
+| 2026-07-04 | Shell §2.5 job control **JC-D COMPLETE** (fg/bg/stop builtins + Ctrl-C/Ctrl-Z): shell `stop`/`bg`/`fg` builtins (share `job_lookup`/`job_clear` CALL/RET helpers); **`DefaultDiskSlotSize` 1024→2048** (shell image outgrew a slot); `Hardware.RaiseForegroundSignal(sig)` enqueues a pending `ForegroundSignal` interrupt → `IvtKill` on the focused pid with new `OsLayout.KillNoDeliver` flag (keypress has no killer, so kill_core skips its EAX-writes); `InteractionController` maps Ctrl-C→TERM/Ctrl-Z→STOP (`TreatControlCAsInput`), dashboard wires `ForegroundSignal`. TotalSize→36996 | ~55K (inline, this session incl JC-B/C) | 662 tests (+2 ForegroundSignal KillTests, +1 InteractionController). **Job control JC-A–D DONE**; JC-E (catchable signals) still deferred. Debug lessons: OUT-markers unreliable across FORK; sync tests on process state not fixed steps; busy-spin bg job starves the shell (use a blocking job). |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

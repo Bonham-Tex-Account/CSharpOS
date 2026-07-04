@@ -344,13 +344,25 @@ public static class OsLayout
     public const int InstallBufBase   = InstallPathBase + InstallPathWords * 4;
     public const int InstallBufWords  = FsLayout.CharsPerBlock;   // one block worth (63 words)
 
+    // Job-control scratch (Shell §2.5). KillSig carries the KILL signal number from the C#
+    // Hardware.Kill handler into IvtKill (DispatchOsRoutine only carries one EAX arg, which holds
+    // the target pid). KillSaveIndex holds the killer's process index across teardown_reap, which
+    // runs with CurrentIndexOffset temporarily repointed at the target being killed.
+    public const int JobCtlBase       = InstallBufBase + InstallBufWords * 4;
+    public const int KillSig          = JobCtlBase + 0;
+    public const int KillSaveIndex    = JobCtlBase + 4;
+    // 1 = terminal-initiated signal (Ctrl-C/Ctrl-Z): kill_core must NOT write a KILL return value into
+    // the resumed process's EAX (a keypress has no killer process that called KILL). 0 = normal KILL.
+    public const int KillNoDeliver    = JobCtlBase + 8;
+    public const int JobCtlWords      = 3;
+
     public static int OftAddress(int index)
     {
         return OftBase + index * OftEntryBytes;
     }
 
     // Total OS region size.
-    public const int TotalSize = InstallBufBase + InstallBufWords * 4;
+    public const int TotalSize = JobCtlBase + JobCtlWords * 4;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)

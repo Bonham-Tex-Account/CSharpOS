@@ -67,7 +67,7 @@ public sealed class SpectreDashboard
         // is inert (non-interactive, no delay).
         Pacer inertPacer = new Pacer(Console.Out, false, false, 0, () => { });
         bridge = new HardwareEventBridge(hw, os, model, new NoOpRenderer(), inertPacer, detail);
-        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput, SubmitKey, ToggleDisk);
+        interaction = new InteractionController(frames, true, delayMs, ToggleIo, CycleFocus, SubmitInput, SubmitStringInput, SubmitKey, ToggleDisk, ForegroundSignal);
 
         // The dashboard owns the single shared screen, so it also drives output
         // completion: the console transfers instantly, so each OUT is acknowledged at
@@ -86,6 +86,13 @@ public sealed class SpectreDashboard
     private void ToggleDisk()
     {
         ShowDisk = !ShowDisk;
+    }
+
+    // Sends a tty-style job-control signal (Ctrl-C = SigTerm, Ctrl-Z = SigStop) to the foreground
+    // process, so a shell running a foreground job can be interrupted/stopped from the keyboard.
+    private void ForegroundSignal(int sig)
+    {
+        hw.RaiseForegroundSignal(sig);
     }
 
     // ---- focus (foreground process) ---------------------------------------
@@ -176,6 +183,17 @@ public sealed class SpectreDashboard
 
     public void Run()
     {
+        // Deliver Ctrl-C to the emulated foreground process (tty-style job control) instead of
+        // terminating the visualizer. The visualizer's own quit key is 'q'. Restored on exit.
+        bool priorTreatCtrlC = Console.TreatControlCAsInput;
+        try
+        {
+            Console.TreatControlCAsInput = true;
+        }
+        catch (IOException)
+        {
+            // No real console (e.g. redirected output): nothing to configure.
+        }
         Layout layout = BuildLayout();
         AnsiConsole.Live(layout)
             .AutoClear(false)
@@ -260,6 +278,13 @@ public sealed class SpectreDashboard
                 ctx.Refresh();
             });
 
+        try
+        {
+            Console.TreatControlCAsInput = priorTreatCtrlC;
+        }
+        catch (IOException)
+        {
+        }
         RenderSummary(AnsiConsole.Console);
     }
 

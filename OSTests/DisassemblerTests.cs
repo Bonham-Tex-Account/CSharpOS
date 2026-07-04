@@ -113,6 +113,13 @@ public class DisassemblerTests
     }
 
     [Fact]
+    public void Decodes_Kill_WithPidAndSignalRegisters()
+    {
+        // KILL r, s — send signal reg[s] to the process with PID reg[r] (Shell §2.5 job control).
+        Assert.Equal("KILL ESI, EDX", Disassembler.Decode(Instruction.KILL, Idx(RegisterName.ESI), Idx(RegisterName.EDX), 0));
+    }
+
+    [Fact]
     public void Decodes_UnknownOpcode_AsHexFallback()
     {
         Assert.Equal("??? FF", Disassembler.Decode(0xFF, 0, 0, 0));

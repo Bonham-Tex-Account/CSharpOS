@@ -345,22 +345,40 @@ public static class Programs
     // kernel-mediated writes (INS) mark their frame dirty so fork's flush_frames carries them.
     public static byte[] Shell()
     {
-        const int PromptOff = 320;   // "$ " prompt (image-resident, read-only; clear of the code below)
-        const int ErrOff = 352;      // "?" printed when a command fails to exec
-        const int DoneOff = 368;     // "done " printed when a background job is reaped
-        const int LineBuf = 768;     // typed command line — a DATA-region page (needs memory >= 1024)
-        const int LineMax = 32;      // buffer capacity in words
-        const int AmpChar = 0x26;    // '&' — a trailing one backgrounds the command
+        // Image-resident strings live above the code (which is < StringBase bytes); the line buffer
+        // and the jobs table live in the DATA region (needs memory >= 1024).
+        // Each string gets a 32-byte slot so none overlaps the next (word-per-char: a 5-char string
+        // spans 20 bytes). "done " ran into "jobs" at 16-byte spacing, printing "donej".
+        const int PromptOff   = 1024; // "$ " prompt (just above the code; guarded below)
+        const int ErrOff      = 1056; // "?" printed when a command fails to exec
+        const int DoneOff     = 1088; // "done " printed when a background job is reaped
+        const int JobsCmdOff  = 1120; // "jobs" builtin name
+        const int KillCmdOff  = 1152; // "kill" builtin name
+        const int StopCmdOff  = 1184; // "stop" builtin name
+        const int BgCmdOff    = 1216; // "bg" builtin name
+        const int FgCmdOff    = 1248; // "fg" builtin name
+        const int StringBase  = PromptOff;
+        const int LineBuf     = 1408; // typed command line (DATA; past the ~1280-byte image)
+        const int LineMax     = 32;   // buffer capacity in words
+        const int JobsBase    = 1664; // background jobs table (DATA): MaxJobs words of pid (0 = empty)
+        const int MaxJobs     = 8;
+        const int AmpChar     = 0x26; // '&'
+        const int SpaceChar   = 0x20;
+        const int DigitZero   = 0x30; // '0'
+        const int DigitNine   = 0x39; // '9'
 
         Assembler asm = new Assembler();
         asm.Label("loop");
-        // Drain any finished background jobs (non-blocking); announce each reaped child with "done ".
+        // Drain finished background jobs (non-blocking): reap each, clear its jobs-table slot, and
+        // announce it with "done ".
         asm.Label("drain");
         asm.MovImm(RegisterName.EAX, 0);                // target = any child
         asm.Reap(RegisterName.EAX);                     // EAX = reaped pid (0 when none dead)
         asm.MovImm(RegisterName.EBX, 0);
         asm.Cmp(RegisterName.EAX, RegisterName.EBX);
         asm.Jz("drained");
+        asm.Mov(RegisterName.R8, RegisterName.EAX);     // R8 = reaped pid
+        asm.Call("job_clear");                          // clear its jobs-table slot
         asm.MovImm16(RegisterName.EAX, DoneOff);
         asm.MovImm(RegisterName.ECX, 5);
         asm.Outs(RegisterName.EAX, RegisterName.ECX);
@@ -369,33 +387,59 @@ public static class Programs
         // Prompt + read a command line.
         asm.MovImm16(RegisterName.EAX, PromptOff);
         asm.MovImm(RegisterName.ECX, 2);
-        asm.Outs(RegisterName.EAX, RegisterName.ECX);   // prompt
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
         asm.MovImm16(RegisterName.EAX, LineBuf);
         asm.MovImm(RegisterName.ECX, LineMax);
-        asm.Ins(RegisterName.EAX, RegisterName.ECX);    // read a line (blocks until one arrives)
-        // Scan the line for a '&' token → background flag in R8; truncate the line there so exec
-        // never sees the '&' (a word-per-char scan; stops at the null terminator).
-        asm.MovImm(RegisterName.R8, 0);                 // R8 = background flag (survives FORK into the parent)
+        asm.Ins(RegisterName.EAX, RegisterName.ECX);
+        // Builtin dispatch: shell-internal commands act on the jobs table (they cannot be /bin
+        // programs). Compare the first token against "jobs" / "kill".
+        asm.MovImm16(RegisterName.R14, JobsCmdOff);
+        asm.Call("cmd_is");
+        asm.MovImm(RegisterName.EBX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jz("do_jobs");
+        asm.MovImm16(RegisterName.R14, KillCmdOff);
+        asm.Call("cmd_is");
+        asm.MovImm(RegisterName.EBX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jz("do_kill");
+        asm.MovImm16(RegisterName.R14, StopCmdOff);
+        asm.Call("cmd_is");
+        asm.MovImm(RegisterName.EBX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jz("do_stop");
+        asm.MovImm16(RegisterName.R14, BgCmdOff);
+        asm.Call("cmd_is");
+        asm.MovImm(RegisterName.EBX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jz("do_bg");
+        asm.MovImm16(RegisterName.R14, FgCmdOff);
+        asm.Call("cmd_is");
+        asm.MovImm(RegisterName.EBX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jz("do_fg");
+        // Scan for a trailing '&' → background flag R8; truncate the line there.
+        asm.MovImm(RegisterName.R8, 0);
         asm.MovImm16(RegisterName.ESI, LineBuf);
-        asm.MovImm(RegisterName.R9, 0);                 // R9 = index
+        asm.MovImm(RegisterName.R9, 0);
         asm.Label("amp");
         asm.MovImm(RegisterName.R10, LineMax);
         asm.Cmp(RegisterName.R9, RegisterName.R10);
-        asm.Jns("amp_end");                             // scanned the whole buffer
-        asm.Load(RegisterName.R11, RegisterName.ESI);   // R11 = current char word
+        asm.Jns("amp_end");
+        asm.Load(RegisterName.R11, RegisterName.ESI);
         asm.MovImm(RegisterName.R12, 0);
         asm.Cmp(RegisterName.R11, RegisterName.R12);
-        asm.Jz("amp_end");                              // null terminator: no '&'
+        asm.Jz("amp_end");
         asm.MovImm(RegisterName.R12, AmpChar);
         asm.Cmp(RegisterName.R11, RegisterName.R12);
         asm.Jnz("amp_next");
         asm.MovImm(RegisterName.R11, 0);
-        asm.Store(RegisterName.ESI, RegisterName.R11);  // truncate the line at the '&'
-        asm.MovImm(RegisterName.R8, 1);                 // background
+        asm.Store(RegisterName.ESI, RegisterName.R11);
+        asm.MovImm(RegisterName.R8, 1);
         asm.Jmp("amp_end");
         asm.Label("amp_next");
         asm.MovImm(RegisterName.R12, 4);
-        asm.Add(RegisterName.ESI, RegisterName.R12);    // next word
+        asm.Add(RegisterName.ESI, RegisterName.R12);
         asm.Inc(RegisterName.R9);
         asm.Jmp("amp");
         asm.Label("amp_end");
@@ -404,33 +448,242 @@ public static class Programs
         asm.MovImm(RegisterName.EBX, 0);
         asm.Cmp(RegisterName.EAX, RegisterName.EBX);
         asm.Jnz("parent");
-        // Child (EAX == 0): become the typed command. FSYS Exec returns only on failure.
         asm.MovImm(RegisterName.EAX, Hardware.FsysExec);
         asm.MovImm16(RegisterName.EBX, LineBuf);
         asm.Fsys();
         asm.MovImm16(RegisterName.EAX, ErrOff);
         asm.MovImm(RegisterName.ECX, 1);
-        asm.Outs(RegisterName.EAX, RegisterName.ECX);   // command not found / not a file
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
         asm.MovImm(RegisterName.EAX, 0);
         asm.Exit(RegisterName.EAX);
-        // Parent (EAX == child PID): background → just loop (drain reaps it later); foreground →
-        // focus + wait, then loop. Save the PID before WAIT (which clobbers EAX with the status).
         asm.Label("parent");
-        asm.Mov(RegisterName.ESI, RegisterName.EAX);
+        asm.Mov(RegisterName.ESI, RegisterName.EAX);    // ESI = child pid
         asm.MovImm(RegisterName.R9, 0);
         asm.Cmp(RegisterName.R8, RegisterName.R9);
-        asm.Jnz("loop");                                // R8 != 0 → background: don't focus/wait
+        asm.Jz("fg");                                   // R8 == 0 → foreground
+        // Background: record the child pid in a free jobs-table slot, then loop (no wait/focus).
+        asm.MovImm16(RegisterName.R9, JobsBase);
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Label("rec_find");
+        asm.MovImm(RegisterName.R11, MaxJobs);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jns("loop");                                // table full: still reaped later via REAP(any)
+        asm.Load(RegisterName.R11, RegisterName.R9);
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("rec_store");
+        asm.MovImm(RegisterName.R11, 4);
+        asm.Add(RegisterName.R9, RegisterName.R11);
+        asm.Inc(RegisterName.R10);
+        asm.Jmp("rec_find");
+        asm.Label("rec_store");
+        asm.Store(RegisterName.R9, RegisterName.ESI);   // slot = child pid
+        asm.Jmp("loop");
+        asm.Label("fg");
         asm.SetFocus(RegisterName.ESI);
         asm.Wait(RegisterName.ESI);
         asm.Jmp("loop");
-        byte[] code = asm.Build();
 
-        // The line buffer lives in the DATA region, not the image; the image is just code + strings.
-        byte[] image = new byte[DoneOff + 8 * 4];
+        // do_jobs: print each active background job's pid (as an int).
+        asm.Label("do_jobs");
+        asm.MovImm16(RegisterName.R9, JobsBase);
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Label("jobs_loop");
+        asm.MovImm(RegisterName.R11, MaxJobs);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jns("loop");
+        asm.Load(RegisterName.R11, RegisterName.R9);
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("jobs_next");
+        asm.Out(RegisterName.R11);                      // print the job's pid
+        asm.Label("jobs_next");
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R9, RegisterName.R12);
+        asm.Inc(RegisterName.R10);
+        asm.Jmp("jobs_loop");
+
+        // Job-control builtins, all "cmd <n>": resolve the job number to a pid (job_lookup), then
+        // signal it. kill = terminate, stop = SIGSTOP, bg = SIGCONT (leave unfocused), fg = SIGCONT +
+        // focus + WAIT (and clear the slot once the job actually exits).
+        asm.Label("do_kill");
+        asm.Call("job_lookup");                         // ESI = pid (0 = no such job)
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.ESI, RegisterName.R12);
+        asm.Jz("loop");
+        asm.MovImm(RegisterName.EDX, Hardware.SigTerm);
+        asm.Kill(RegisterName.ESI, RegisterName.EDX);
+        asm.Jmp("loop");
+
+        asm.Label("do_stop");
+        asm.Call("job_lookup");
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.ESI, RegisterName.R12);
+        asm.Jz("loop");
+        asm.MovImm(RegisterName.EDX, Hardware.SigStop);
+        asm.Kill(RegisterName.ESI, RegisterName.EDX);
+        asm.Jmp("loop");
+
+        asm.Label("do_bg");
+        asm.Call("job_lookup");
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.ESI, RegisterName.R12);
+        asm.Jz("loop");
+        asm.MovImm(RegisterName.EDX, Hardware.SigCont);
+        asm.Kill(RegisterName.ESI, RegisterName.EDX);   // resume in the background (unfocused)
+        asm.Jmp("loop");
+
+        asm.Label("do_fg");
+        asm.Call("job_lookup");
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.ESI, RegisterName.R12);
+        asm.Jz("loop");
+        asm.Mov(RegisterName.R15, RegisterName.ESI);    // R15 = pid (survives Kill/SetFocus/Wait)
+        asm.MovImm(RegisterName.EDX, Hardware.SigCont);
+        asm.Kill(RegisterName.R15, RegisterName.EDX);   // resume if stopped (harmless if already running)
+        asm.SetFocus(RegisterName.R15);
+        asm.Wait(RegisterName.R15);                     // EAX = status (-2 if it stops again)
+        asm.MovImm(RegisterName.R14, 0);
+        asm.Dec(RegisterName.R14);
+        asm.Dec(RegisterName.R14);                      // R14 = -2 (stopped)
+        asm.Cmp(RegisterName.EAX, RegisterName.R14);
+        asm.Jz("loop");                                 // stopped again → keep the job in the table
+        asm.Mov(RegisterName.R8, RegisterName.R15);
+        asm.Call("job_clear");                          // exited → drop it from the jobs table
+        asm.Jmp("loop");
+
+        // cmd_is: EAX = 1 if LineBuf's first token equals the null-terminated const string at R14,
+        // else 0. A token ends at a space or null. Clobbers EAX/R10-R14. CALL/RET (user stack).
+        asm.Label("cmd_is");
+        asm.MovImm16(RegisterName.R13, LineBuf);
+        asm.Label("ci_loop");
+        asm.Load(RegisterName.R11, RegisterName.R14);   // const char
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("ci_constend");
+        asm.Load(RegisterName.R10, RegisterName.R13);   // line char
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jnz("ci_no");
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R13, RegisterName.R12);
+        asm.Add(RegisterName.R14, RegisterName.R12);
+        asm.Jmp("ci_loop");
+        asm.Label("ci_constend");
+        asm.Load(RegisterName.R10, RegisterName.R13);   // line char just past the token
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R10, RegisterName.R12);
+        asm.Jz("ci_yes");
+        asm.MovImm(RegisterName.R12, SpaceChar);
+        asm.Cmp(RegisterName.R10, RegisterName.R12);
+        asm.Jz("ci_yes");
+        asm.Label("ci_no");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Ret();
+        asm.Label("ci_yes");
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Ret();
+
+        // parse_uint: R13 = pointer to the first digit (word-per-char); EAX = accumulated value.
+        // Stops at the first non-digit. Clobbers EAX/R10/R11/R13. CALL/RET.
+        asm.Label("parse_uint");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Label("pu_loop");
+        asm.Load(RegisterName.R11, RegisterName.R13);
+        asm.MovImm(RegisterName.R10, DigitZero);
+        asm.Cmp(RegisterName.R11, RegisterName.R10);
+        asm.Js("pu_done");                              // char < '0'
+        asm.MovImm(RegisterName.R10, DigitNine);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Js("pu_done");                              // char > '9'
+        asm.MovImm(RegisterName.R10, 10);
+        asm.Mul(RegisterName.EAX, RegisterName.R10);    // EAX *= 10
+        asm.MovImm(RegisterName.R10, DigitZero);
+        asm.Sub(RegisterName.R11, RegisterName.R10);    // digit value
+        asm.Add(RegisterName.EAX, RegisterName.R11);
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R13, RegisterName.R10);
+        asm.Jmp("pu_loop");
+        asm.Label("pu_done");
+        asm.Ret();
+
+        // job_lookup: parse LineBuf's job-number argument ("cmd <n>") → ESI = the job's pid, or 0 if
+        // there is no argument / n is out of range / that slot is empty. CALL/RET (calls parse_uint).
+        asm.Label("job_lookup");
+        asm.MovImm16(RegisterName.R13, LineBuf);
+        asm.Label("jl_tospace");
+        asm.Load(RegisterName.R11, RegisterName.R13);
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("jl_none");                              // no argument
+        asm.MovImm(RegisterName.R12, SpaceChar);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("jl_skipsp");
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R13, RegisterName.R12);
+        asm.Jmp("jl_tospace");
+        asm.Label("jl_skipsp");
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R13, RegisterName.R12);    // step over the space
+        asm.Load(RegisterName.R11, RegisterName.R13);
+        asm.MovImm(RegisterName.R12, SpaceChar);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("jl_skipsp");                            // skip extra spaces
+        asm.Call("parse_uint");                         // R13 → EAX = n
+        asm.MovImm(RegisterName.R12, 1);
+        asm.Sub(RegisterName.EAX, RegisterName.R12);    // n - 1 (job numbers are 1-based)
+        asm.Js("jl_none");
+        asm.MovImm(RegisterName.R12, MaxJobs);
+        asm.Cmp(RegisterName.EAX, RegisterName.R12);
+        asm.Jns("jl_none");
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Mul(RegisterName.EAX, RegisterName.R12);
+        asm.MovImm16(RegisterName.R12, JobsBase);
+        asm.Add(RegisterName.EAX, RegisterName.R12);    // &slot
+        asm.Load(RegisterName.ESI, RegisterName.EAX);   // ESI = slot pid (0 if empty)
+        asm.Ret();
+        asm.Label("jl_none");
+        asm.MovImm(RegisterName.ESI, 0);
+        asm.Ret();
+
+        // job_clear: R8 = pid; zero the jobs-table slot holding it (if any). CALL/RET. Clobbers R9-R11.
+        asm.Label("job_clear");
+        asm.MovImm16(RegisterName.R9, JobsBase);
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Label("jc_find");
+        asm.MovImm(RegisterName.R11, MaxJobs);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jns("jc_done");
+        asm.Load(RegisterName.R11, RegisterName.R9);
+        asm.Cmp(RegisterName.R11, RegisterName.R8);
+        asm.Jnz("jc_next");
+        asm.MovImm(RegisterName.R11, 0);
+        asm.Store(RegisterName.R9, RegisterName.R11);
+        asm.Jmp("jc_done");
+        asm.Label("jc_next");
+        asm.MovImm(RegisterName.R11, 4);
+        asm.Add(RegisterName.R9, RegisterName.R11);
+        asm.Inc(RegisterName.R10);
+        asm.Jmp("jc_find");
+        asm.Label("jc_done");
+        asm.Ret();
+
+        byte[] code = asm.Build();
+        if (code.Length > StringBase)
+        {
+            throw new InvalidOperationException(
+                $"Shell code ({code.Length} bytes) overruns the image string area at {StringBase}; raise the string offsets.");
+        }
+
+        byte[] image = new byte[FgCmdOff + 8 * 4];
         Array.Copy(code, image, code.Length);
         WriteString(image, PromptOff, "$ ");
         WriteString(image, ErrOff, "?");
         WriteString(image, DoneOff, "done ");
+        WriteString(image, JobsCmdOff, "jobs");
+        WriteString(image, KillCmdOff, "kill");
+        WriteString(image, StopCmdOff, "stop");
+        WriteString(image, BgCmdOff, "bg");
+        WriteString(image, FgCmdOff, "fg");
         return image;
     }
 

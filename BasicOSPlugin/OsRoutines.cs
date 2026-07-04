@@ -76,6 +76,7 @@ public static partial class OsRoutines
         int exec          = OsLayout.CodeBase + asm.CodeLength; EmitExec(asm);
         int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
         int reap          = OsLayout.CodeBase + asm.CodeLength; EmitReap(asm);
+        int kill          = OsLayout.CodeBase + asm.CodeLength; EmitKill(asm);
         int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
         int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
         EmitPageIn(asm);          // shared subroutine "page_in"; ends with Ret
@@ -86,6 +87,7 @@ public static partial class OsRoutines
         int fsOp          = OsLayout.CodeBase + asm.CodeLength; EmitFsOp(asm);
         int fsSyscall     = OsLayout.CodeBase + asm.CodeLength; EmitFsSyscall(asm);
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
+        EmitTeardownReap(asm);  // shared subroutine "teardown_reap" (CALL/RET; exit_body + kill_core)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
         EmitReleaseFrames(asm); // shared subroutine "release_frames"; ends with Ret
@@ -132,6 +134,7 @@ public static partial class OsRoutines
         WriteWord(image, Hardware.IvtExec * 4,               exec);
         WriteWord(image, Hardware.IvtWait * 4,               wait);
         WriteWord(image, Hardware.IvtReap * 4,               reap);
+        WriteWord(image, Hardware.IvtKill * 4,               kill);
         WriteWord(image, Hardware.IvtSyscall * 4,            syscall);
         WriteWord(image, Hardware.IvtPageFault * 4,          pageFault);
         WriteWord(image, Hardware.IvtCacheOp * 4,            cacheOp);
@@ -308,8 +311,24 @@ public static partial class OsRoutines
     private static void EmitExitBody(Assembler asm)
     {
         asm.Label("exit_body");
-        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated); // hide from scans
         SetupPrivilegedStack(asm);
+        asm.Call("teardown_reap");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        asm.Jmp("resume_mlfq");
+    }
+
+    // ===== EmitTeardownReap ==================================================
+    // teardown_reap: free the process whose entry is EBX (index in CurrentIndexOffset) and resolve
+    // who collects its exit status — wake a parent blocked in wait(), else keep a Zombie, else reap
+    // as an orphan — then reap this process's own zombie children. CALL/RET; the caller MUST run
+    // SetupPrivilegedStack first (this sub must not, or it would reset ESP and lose its own return
+    // address). Extracted from exit_body (Shell §2.5) so kill_core can run the identical teardown on
+    // an arbitrary target by pointing CurrentIndexOffset (+ EBX) at it before the call.
+    private static void EmitTeardownReap(Assembler asm)
+    {
+        asm.Label("teardown_reap");
+        StoreFieldImm(asm, EBX, Hardware.ProcessEntryState, Terminated); // hide from scans
         asm.Call("free_sub");
         // Materialise any copy-on-write share first, so the partner keeps a private copy of
         // the shared pages before this process frees its frames and zeroes its slots.
@@ -320,7 +339,7 @@ public static partial class OsRoutines
         // Zero this process's swap slots so a slot reused by a later process never serves
         // the dead process's stale data.
         asm.Call("zero_swap_slots");
-        // resolve_cow clobbered EBX; reload it = this (current) process's entry.
+        // resolve_cow clobbered EBX; reload it = the target process's entry (CurrentIndexOffset).
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(EBX), R(EAX));
         EntryAddress(asm, EBX, EBX);
@@ -423,10 +442,7 @@ public static partial class OsRoutines
         asm.Inc(R(ESI));
         asm.Jmp("xb_orphan_scan");
         asm.Label("xb_orphan_done");
-
-        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
-        asm.Load(R(ECX), R(EAX));
-        asm.Jmp("resume_mlfq");
+        asm.Ret();
     }
 
     // ===== EmitWait ==========================================================
@@ -543,6 +559,182 @@ public static partial class OsRoutines
         asm.SaveRegs(R(EBX));                         // persist the caller's captured trap frame
         StoreFieldReg(asm, EBX, EaxSlot, R14);        // EAX = reaped pid (0 if none)
         StoreFieldReg(asm, EBX, EdxSlot, R15);        // EDX = exit status
+        asm.LoadRegs(R(EBX));
+        asm.SetLayout(R(EBX));
+        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+    }
+
+    // ===== EmitKill ==========================================================
+    // IvtKill: apply a signal to an arbitrary process (Shell §2.5 job control). EAX = target pid on
+    // entry; the signal number is in OsLayout.KillSig. Resumes the caller with 0 (delivered) or -1
+    // (no such live pid) in EAX. SigTerm/SigKill run the identical teardown as exit_body via the
+    // shared teardown_reap (freeing memory, waking a wait()ing parent, zombie/orphan handling);
+    // SigStop/SigCont are no-ops here (wired in JC-C). Killing self behaves exactly like EXIT
+    // (teardown + reschedule, never returns). Killing another process resumes the killer.
+    //   Scratch: EAX/EBX/ECX/ESI/EDI/R8-R12 (+ teardown_reap clobbers all).
+    private static void EmitKill(Assembler asm)
+    {
+        asm.Mov(R(R8), R(EAX));                    // R8 = target pid
+        // Resolve target pid -> live process index in R9 (-1 = not found). Skip dead slots
+        // (Terminated + Zombie) so we never re-tear-down an already-freed process.
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));
+        asm.MovImm(R(ESI), 0);
+        asm.MovImm(R(R9), 0);
+        asm.Dec(R(R9));                            // R9 = -1 (MovImm is 8-bit; -1 must be built, not immediate)
+        asm.Label("kl_scan");
+        asm.Cmp(R(ESI), R(EDI));
+        asm.Jns("kl_resolved");
+        EntryAddress(asm, ESI, R10);
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Terminated);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jz("kl_next");
+        asm.MovImm(R(R12), Zombie);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jz("kl_next");
+        LoadField(asm, R10, Hardware.ProcessEntryPid, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jnz("kl_next");
+        asm.Mov(R(R9), R(ESI));                    // found: R9 = target index
+        asm.Jmp("kl_resolved");
+        asm.Label("kl_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("kl_scan");
+
+        asm.Label("kl_resolved");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                  // ECX = killer index
+        EntryAddress(asm, ECX, EBX);               // EBX = killer entry (for result delivery)
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R9), R(EAX));
+        asm.Js("kl_deliver_fail");                 // R9 < 0: no such live pid -> -1
+
+        Imm16(asm, EAX, OsLayout.KillSig);
+        asm.Load(R(R10), R(EAX));                  // R10 = signal
+        asm.MovImm(R(R11), Hardware.SigTerm);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jz("kl_term");
+        asm.MovImm(R(R11), Hardware.SigKill);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jz("kl_term");
+        asm.MovImm(R(R11), Hardware.SigStop);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jz("kl_stop");
+        asm.MovImm(R(R11), Hardware.SigCont);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jz("kl_cont");
+        asm.Jmp("kl_deliver_ok");                  // unknown signal: no-op, deliver 0
+
+        asm.Label("kl_term");
+        // Suicide (killer == target) is exactly EXIT: set our own status and fall into exit_body.
+        asm.Cmp(R(ECX), R(R9));
+        asm.Jnz("kl_other");
+        EntryAddress(asm, R9, EBX);                // EBX = self entry
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryExitStatus); // killed => status -1
+        asm.Jmp("exit_body");                      // teardown + reschedule (never returns)
+
+        asm.Label("kl_other");
+        // Tear down a different process: teardown_reap runs on "the current process", so save the
+        // killer index, repoint CurrentIndex at the target for the teardown, then restore it.
+        Imm16(asm, EAX, OsLayout.KillSaveIndex);
+        asm.Store(R(EAX), R(ECX));                 // save killer index
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Store(R(EAX), R(R9));                  // CurrentIndex = target index
+        EntryAddress(asm, R9, EBX);                // EBX = target entry
+        StoreFieldMinusOne(asm, EBX, Hardware.ProcessEntryExitStatus); // killed => status -1
+        SetupPrivilegedStack(asm);
+        asm.Call("teardown_reap");
+        Imm16(asm, EAX, OsLayout.KillSaveIndex);
+        asm.Load(R(ECX), R(EAX));                  // ECX = killer index
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Store(R(EAX), R(ECX));                 // restore CurrentIndex = killer
+        EntryAddress(asm, ECX, EBX);               // EBX = killer entry
+        asm.Jmp("kl_deliver_ok");
+
+        // SIGCONT: clear the target's stop flag; it becomes schedulable again from its saved context
+        // (its underlying state — Ready or Blocked — was preserved while stopped). R8=pid, R9=index.
+        asm.Label("kl_cont");
+        EntryAddress(asm, R9, R15);                // R15 = target entry
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryStopped, 0);
+        EntryAddress(asm, ECX, EBX);               // EBX = killer entry (for delivery)
+        asm.Jmp("kl_deliver_ok");
+
+        // SIGSTOP: set the target's stop flag (the scheduler now skips it). Wake a parent blocked in
+        // WAIT on this target with the "stopped" status -2 (WUNTRACED) WITHOUT reaping the target — it
+        // is stopped, not dead. If we stopped ourselves, persist our context and reschedule (we cannot
+        // return). R8=target pid, R9=target index, ECX=killer index, EBX=killer entry.
+        asm.Label("kl_stop");
+        EntryAddress(asm, R9, R15);                // R15 = target entry
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryStopped, 1);
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));
+        asm.MovImm(R(ESI), 0);
+        asm.Label("kls_scan");
+        asm.Cmp(R(ESI), R(EDI));
+        asm.Jns("kls_done");
+        EntryAddress(asm, ESI, R10);
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Blocked);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("kls_next");
+        LoadField(asm, R10, Hardware.ProcessEntryWaitReason, R11);
+        asm.MovImm(R(R12), WaitChild);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("kls_next");
+        LoadField(asm, R10, Hardware.ProcessEntryWaitTarget, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jnz("kls_next");
+        // Found the waiting parent: deliver -2, wake it, clear its wait target (leave the child stopped).
+        asm.MovImm(R(R11), 0);
+        asm.Dec(R(R11));
+        asm.Dec(R(R11));                           // R11 = -2 (stopped status; MovImm is 8-bit)
+        StoreFieldReg(asm, R10, EaxSlot, R11);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryWaitReason, WaitNone);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryTicksUsed, 0);
+        StoreFieldMinusOne(asm, R10, Hardware.ProcessEntryWaitTarget);
+        asm.Jmp("kls_done");
+        asm.Label("kls_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("kls_scan");
+        asm.Label("kls_done");
+        // Self-stop? killer (ECX) == target (R9): we cannot resume ourselves; save our context (so a
+        // later SIGCONT resumes us after KILL with EAX=0) and reschedule. Otherwise deliver 0 to the killer.
+        asm.Cmp(R(ECX), R(R9));
+        asm.Jnz("kl_stop_other");
+        EntryAddress(asm, R9, EBX);                // EBX = self entry
+        asm.SaveRegs(R(EBX));
+        Imm16(asm, EAX, OsLayout.KillNoDeliver);
+        asm.Load(R(R10), R(EAX));
+        asm.MovImm(R(R11), 0);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jnz("kls_self_noeax");                 // terminal Ctrl-Z: leave the stopped job's EAX intact
+        StoreFieldImm(asm, EBX, EaxSlot, 0);       // KILL returns 0 to us when continued
+        asm.Label("kls_self_noeax");
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        asm.Jmp("resume_mlfq");
+        asm.Label("kl_stop_other");
+        EntryAddress(asm, ECX, EBX);               // EBX = killer entry (for delivery)
+
+        asm.Label("kl_deliver_ok");
+        asm.MovImm(R(R8), 0);                      // result = 0 (delivered)
+        asm.Jmp("kl_deliver");
+        asm.Label("kl_deliver_fail");
+        asm.MovImm(R(R8), 0);
+        asm.Dec(R(R8));                            // result = -1 (MovImm is 8-bit; build -1)
+        asm.Label("kl_deliver");
+        asm.SaveRegs(R(EBX));                      // persist the killer's captured trap frame
+        Imm16(asm, EAX, OsLayout.KillNoDeliver);
+        asm.Load(R(R9), R(EAX));
+        asm.MovImm(R(R10), 0);
+        asm.Cmp(R(R9), R(R10));
+        asm.Jnz("kl_deliver_noeax");               // terminal signal: no killer, so don't clobber EAX
+        StoreFieldReg(asm, EBX, EaxSlot, R8);       // override EAX = result
+        asm.Label("kl_deliver_noeax");
         asm.LoadRegs(R(EBX));
         asm.SetLayout(R(EBX));
         LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
@@ -1449,6 +1641,14 @@ public static partial class OsRoutines
 
         LoadField(asm, R11, Hardware.ProcessEntryState, R13);
         asm.MovImm(R(R14), Ready);
+        asm.Cmp(R(R13), R(R14));
+        asm.Jnz("rn_scan");
+
+        // Skip job-control-stopped processes even when Ready (Shell §2.5 JC-C): a Stopped process is
+        // not schedulable until SIGCONT clears the flag. Keeping Stopped orthogonal to State lets a
+        // Blocked-then-stopped process keep its wait state (its wake still fires underneath the flag).
+        LoadField(asm, R11, Hardware.ProcessEntryStopped, R13);
+        asm.MovImm(R(R14), 0);
         asm.Cmp(R(R13), R(R14));
         asm.Jnz("rn_scan");
 

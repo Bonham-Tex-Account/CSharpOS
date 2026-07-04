@@ -38,6 +38,8 @@ EmitSpawn            → IvtSpawn (slot 12)               OsRoutines.cs:1368
 EmitFork             → IvtFork (slot 9)                 OsRoutines.cs:1424
 EmitExec             → IvtExec (slot 10)                OsRoutines.cs:1608
 EmitWait             → IvtWait (slot 11)                OsRoutines.cs:1091
+EmitReap             → IvtReap (slot 20)                (Shell §2.5 JC-A; non-blocking reap)
+EmitKill             → IvtKill (slot 21)                (Shell §2.5 JC-B; CALLs teardown_reap)
 EmitSyscall          → IvtSyscall (slot 13)             OsRoutines.cs:1143
 EmitPageFault        → IvtPageFault (slot 14)           OsRoutines.cs:254
 EmitPageIn           → label "page_in" (CALL/RET; extracted from EmitPageFault)   (Phase 3)
@@ -47,6 +49,7 @@ EmitUserWordAddr     → label "user_word_addr" (CALL/RET)                      
 EmitCacheOp          → IvtCacheOp (slot 16)             (dispatch → cache_* subs)
 EmitFsOp             → IvtFsOp (slot 17)                (dispatch → fs_* subs)
 EmitExitBody         → label "exit_body"                OsRoutines.cs:960
+EmitTeardownReap     → label "teardown_reap" (CALL/RET; free+wake+zombie/orphan; exit_body & kill_core) (Shell §2.5 JC-B)
 EmitAllocSub         → label "alloc_sub" (CALL/RET)     OsRoutines.cs:1208
 EmitBuddyFree        → label "buddy_free_entry"         OsRoutines.cs:1721
 EmitReleaseFrames    → label "release_frames" (CALL/RET) OsRoutines.cs:501
