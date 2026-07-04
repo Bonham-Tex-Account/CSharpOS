@@ -53,6 +53,7 @@ public static partial class OsRoutines
     // (the register file mirrors the live registers: slot = register index * 4).
     private const int EaxSlot    = (int)RegisterName.EAX * 4;
     private const int EbxSlot    = (int)RegisterName.EBX * 4;
+    private const int EdxSlot    = (int)RegisterName.EDX * 4;
     private const int EipSlot    = (int)RegisterName.EIP * 4;
     private const int EspSlot    = (int)RegisterName.ESP * 4;
 
@@ -74,6 +75,7 @@ public static partial class OsRoutines
         int fork          = OsLayout.CodeBase + asm.CodeLength; EmitFork(asm);
         int exec          = OsLayout.CodeBase + asm.CodeLength; EmitExec(asm);
         int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
+        int reap          = OsLayout.CodeBase + asm.CodeLength; EmitReap(asm);
         int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
         int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
         EmitPageIn(asm);          // shared subroutine "page_in"; ends with Ret
@@ -129,6 +131,7 @@ public static partial class OsRoutines
         WriteWord(image, Hardware.IvtFork * 4,               fork);
         WriteWord(image, Hardware.IvtExec * 4,               exec);
         WriteWord(image, Hardware.IvtWait * 4,               wait);
+        WriteWord(image, Hardware.IvtReap * 4,               reap);
         WriteWord(image, Hardware.IvtSyscall * 4,            syscall);
         WriteWord(image, Hardware.IvtPageFault * 4,          pageFault);
         WriteWord(image, Hardware.IvtCacheOp * 4,            cacheOp);
@@ -476,6 +479,74 @@ public static partial class OsRoutines
         Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
         asm.Load(R(ECX), R(EAX));
         asm.Jmp("resume_mlfq");
+    }
+
+    // ===== EmitReap ==========================================================
+    // IvtReap: non-blocking reap (Shell §2.5 job control). EAX = target pid on entry (0 = reap
+    // any dead child of the caller; > 0 = reap that specific child). Resumes the caller with the
+    // reaped pid in EAX (0 if no matching dead child) and its exit status in EDX. Never blocks.
+    //
+    // A Zombie has already released its memory/frames/swap in exit_body — it only holds the
+    // process-table slot for its pid/status — so reaping is just marking the slot Terminated,
+    // exactly like EmitWait's reap path. This routine duplicates that ~12-line scan (rather than
+    // sharing it with EmitWait) to keep the well-tested blocking WAIT path untouched.
+    //   Input: EAX = target pid. Scratch: EAX/EBX/ECX/ESI/EDI/R8-R15 (+ EBP via LoadField).
+    private static void EmitReap(Assembler asm)
+    {
+        asm.Mov(R(R8), R(EAX));                     // R8 = target pid (0 = any)
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
+        EntryAddress(asm, ECX, EBX);                // EBX = caller (parent) entry
+        LoadField(asm, EBX, Hardware.ProcessEntryPid, R9);  // R9 = caller's own pid (parent match)
+
+        Imm16(asm, EAX, OsLayout.ProcessCountOffset);
+        asm.Load(R(EDI), R(EAX));                   // EDI = process count
+        asm.MovImm(R(ESI), 0);                      // ESI = scan index
+
+        asm.Label("rp_scan");
+        asm.Cmp(R(ESI), R(EDI));
+        asm.Jns("rp_none");                          // scanned all entries → nothing to reap
+        EntryAddress(asm, ESI, R10);                 // R10 = candidate entry
+        LoadField(asm, R10, Hardware.ProcessEntryState, R11);
+        asm.MovImm(R(R12), Zombie);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jnz("rp_next");                          // not a zombie
+        asm.MovImm(R(R13), 0);
+        asm.Cmp(R(R8), R(R13));
+        asm.Jz("rp_any");                            // target == 0 → match any child of caller
+        // Targeted: match Pid == target (preserves WAIT-style by-pid semantics, no parent check).
+        LoadField(asm, R10, Hardware.ProcessEntryPid, R11);
+        asm.Cmp(R(R11), R(R8));
+        asm.Jnz("rp_next");
+        asm.Jmp("rp_found");
+        asm.Label("rp_any");
+        // Reap-any: match ParentPid == caller's pid, so we only reap our own children.
+        LoadField(asm, R10, Hardware.ProcessEntryParentPid, R11);
+        asm.Cmp(R(R11), R(R9));
+        asm.Jnz("rp_next");
+
+        asm.Label("rp_found");
+        LoadField(asm, R10, Hardware.ProcessEntryPid, R14);         // R14 = reaped pid
+        LoadField(asm, R10, Hardware.ProcessEntryExitStatus, R15);  // R15 = exit status
+        StoreFieldImm(asm, R10, Hardware.ProcessEntryState, Terminated); // free the slot
+        asm.Jmp("rp_deliver");
+
+        asm.Label("rp_next");
+        asm.Inc(R(ESI));
+        asm.Jmp("rp_scan");
+
+        asm.Label("rp_none");
+        asm.MovImm(R(R14), 0);                       // no dead child: pid = 0
+        asm.MovImm(R(R15), 0);                       // status = 0
+
+        asm.Label("rp_deliver");
+        asm.SaveRegs(R(EBX));                         // persist the caller's captured trap frame
+        StoreFieldReg(asm, EBX, EaxSlot, R14);        // EAX = reaped pid (0 if none)
+        StoreFieldReg(asm, EBX, EdxSlot, R15);        // EDX = exit status
+        asm.LoadRegs(R(EBX));
+        asm.SetLayout(R(EBX));
+        LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
     }
 
     // ===== EmitSyscall =======================================================

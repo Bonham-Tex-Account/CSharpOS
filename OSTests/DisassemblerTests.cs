@@ -105,6 +105,14 @@ public class DisassemblerTests
     }
 
     [Fact]
+    public void Decodes_Reap_WithSingleRegisterOperand()
+    {
+        // REAP r — non-blocking reap of a dead child (Shell §2.5 job control).
+        Assert.Equal("REAP EAX", Disassembler.Decode(Instruction.REAP, Idx(RegisterName.EAX), 0, 0));
+        Assert.Equal("REAP EDI", Disassembler.Decode(Instruction.REAP, Idx(RegisterName.EDI), 0, 0));
+    }
+
+    [Fact]
     public void Decodes_UnknownOpcode_AsHexFallback()
     {
         Assert.Equal("??? FF", Disassembler.Decode(0xFF, 0, 0, 0));

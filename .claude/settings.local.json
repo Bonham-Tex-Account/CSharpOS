@@ -40,7 +40,10 @@
       "Bash(mkdir -p .claude/skills/os-facts/dump .claude/skills/run-tests)",
       "PowerShell(.claude/skills/run-tests/run-tests.ps1 -Filter FsBootTests)",
       "Bash(git check-ignore *)",
-      "Bash(xargs git log --oneline -1)"
+      "Bash(xargs git log --oneline -1)",
+      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1)",
+      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter ShellTests)",
+      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter ReapTests)"
     ]
   }
 }

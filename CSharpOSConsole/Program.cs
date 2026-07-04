@@ -18,7 +18,11 @@ for (int i = 0; i < args.Length - 1; i++)
     }
 }
 
-const int MemorySize = 32768;
+// Machine memory must exceed the OS region (OsLayout.TotalSize) with room for the buddy
+// heap on top; deriving it from TotalSize keeps it from silently going stale when the OS
+// region grows (as it did in Shell §2, when TotalSize crossed the old hardcoded 32768 and
+// left the heap starting past the end of memory). +32768 = an exact-power-of-two 32 KB heap.
+const int MemorySize = OsLayout.TotalSize + 32768;
 const int RequiredMemory = 128;
 const int RequiredStackSize = 64;
 const int StepDelayMs = 100;

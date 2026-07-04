@@ -69,7 +69,13 @@ public partial class Hardware
     public const int FdCount                        = 8;
     public const int StdIn                          = 0;
     public const int StdOut                         = 1;
-    public const int ProcessEntrySize               = 192;  // 160 + FdCount * 4
+    // Job control (Shell §2.5). Both reserved up front (JC-A) so the entry grows exactly once.
+    // Stopped: 0 = runnable, 1 = job-control-stopped (an orthogonal flag beside ProcessState, so a
+    // Blocked process can be stopped without losing its wait state). Used from JC-C. SigHandler:
+    // reserved virtual address of a future catchable-signal handler; unused until JC-E (sigaction).
+    public const int ProcessEntryStopped            = 192;
+    public const int ProcessEntrySigHandler         = 196;
+    public const int ProcessEntrySize               = 200;  // 160 + FdCount*4 + Stopped + SigHandler
 
     // ---- device ids ------------------------------------------------------
     // Character device ids 0..MaxProcesses-1 are the per-process I/O devices (the
@@ -145,7 +151,12 @@ public partial class Hardware
     // rectification) — never by ISA code, which calls the underlying ensure_user_page
     // subroutine directly via CALL/RET instead.
     public const int IvtEnsureUserPage     = 19;
-    public const int IvtSlotCount          = 20;
+    // Non-blocking reap (Shell §2.5 job control, JC-A). REAP dispatches this atomic routine (like
+    // FORK dispatches IvtFork); it reaps a dead child — targeted (EAX = pid) or any (EAX = 0) — and
+    // resumes the caller with the reaped pid in EAX (0 if none dead) and its exit status in EDX. It
+    // never blocks, so it runs atomically rather than through the preemptible IvtSyscall path.
+    public const int IvtReap               = 20;
+    public const int IvtSlotCount          = 21;
     public const int IvtSize               = IvtSlotCount * 4;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
@@ -457,6 +468,7 @@ public partial class Hardware
             case IvtFsOp:               return "FsOp";
             case IvtFsSyscall:          return "FsSyscall";
             case IvtEnsureUserPage:     return "EnsureUserPage";
+            case IvtReap:               return "Reap";
             default:                    return $"slot {slot}";
         }
     }
@@ -1589,6 +1601,20 @@ public partial class Hardware
         if (OsManaged)
         {
             DispatchOsRoutine(IvtWait, childPid);
+            return;
+        }
+        trapTaken = true;
+    }
+
+    // REAP: non-blocking reap of a dead child (Shell §2.5 job control). targetPid = 0 reaps any
+    // dead child of the caller; targetPid > 0 reaps that specific child. Dispatches the atomic
+    // IvtReap routine, which resumes the caller with the reaped PID in EAX (0 if none dead) and
+    // its exit status in EDX. Never blocks. Without an OS image it is a no-op trap.
+    public void Reap(int targetPid)
+    {
+        if (OsManaged)
+        {
+            DispatchOsRoutine(IvtReap, targetPid);
             return;
         }
         trapTaken = true;

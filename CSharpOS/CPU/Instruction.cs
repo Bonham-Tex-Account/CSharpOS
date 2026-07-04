@@ -49,6 +49,14 @@ public static class Instruction
     public const byte WAIT        = 0x36;
     public const byte EXIT        = 0x37;
     public const byte SETFOCUS    = 0x38;
+    // Job control (Shell §2.5), grouped with the other process-control opcodes.
+    // KILL r,s — send signal reg[s] (TERM/KILL/STOP/CONT) to the process with PID reg[r]. (JC-B.)
+    // REAP r   — non-blocking reap: reg[r] = target PID (0 = any child); delivers reaped PID in EAX
+    //            (0 if none dead) and its exit status in EDX. (JC-A.)
+    // SIGACTION — reserved for catchable signal handlers (JC-E); documented but not yet wired.
+    public const byte KILL        = 0x39;
+    public const byte REAP        = 0x3A;
+    public const byte SIGACTION   = 0x3B;
 
     // ---- privileged OS-support opcodes ------------------------------------
     // Used by OS ISA code running in Privileged mode to save/restore a process's
@@ -140,6 +148,7 @@ public static class Instruction
         opcodeTable[WAIT]        = InstructionFunctions.Wait;
         opcodeTable[EXIT]        = InstructionFunctions.Exit;
         opcodeTable[SETFOCUS]    = InstructionFunctions.SetFocus;
+        opcodeTable[REAP]        = InstructionFunctions.Reap;
         opcodeTable[OUTS]        = InstructionFunctions.Outs;
         opcodeTable[INS]         = InstructionFunctions.Ins;
         opcodeTable[INK]         = InstructionFunctions.Ink;
