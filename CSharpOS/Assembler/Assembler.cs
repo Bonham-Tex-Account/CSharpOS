@@ -288,6 +288,13 @@ public sealed partial class Assembler
         Emit(Instruction.SETFOCUS, (byte)pid, 0, 0);
     }
 
+    // Non-blocking reap of a dead child (Shell §2.5): reg[targetPid] = 0 reaps any dead child,
+    // > 0 reaps that specific child. Delivers the reaped PID in EAX (0 if none) and its status in EDX.
+    public void Reap(RegisterName targetPid)
+    {
+        Emit(Instruction.REAP, (byte)targetPid, 0, 0);
+    }
+
     /// <summary>Reserves a 4-byte zero-initialized slot in the data section, addressable by <paramref name="name"/>.</summary>
     public void DataInt(string name)
     {

@@ -331,31 +331,75 @@ public static class Programs
         return image;
     }
 
-    // A real command shell (Shell §2): prompt, read a command line (INS), fork, have the child
-    // exec-by-path the typed command with its arguments (FSYS Exec) while the parent focuses the
-    // child (so its output is foreground) and WAITs for it, then loops. v1 uses absolute paths (no
-    // CWD): commands are typed like "/bin/ls /", "/bin/cat /note". A command that does not resolve
-    // prints "?".
+    // A real command shell (Shell §2 + §2.5 job control): prompt, read a command line (INS), fork,
+    // have the child exec-by-path the typed command with its arguments (FSYS Exec). If the line ends
+    // with " &" the job runs in the BACKGROUND — the parent records nothing to wait on and returns to
+    // the prompt immediately; otherwise (foreground) the parent focuses the child and WAITs. At the
+    // top of every loop the parent drains finished background jobs with REAP (non-blocking), printing
+    // "done " for each. v1 uses absolute paths (no CWD): "/bin/ls /", "/bin/cat /note", "/bin/counter &".
+    // A command that does not resolve prints "?".
     //
-    // The parent reads the line (it is the focused foreground process, so keyboard input reaches
-    // it) into a DATA-region buffer, then forks: the child inherits the buffer and execs it. This
-    // relies on FORK propagating the parent's just-typed line to the child — which works now that
+    // The parent reads the line (it is the focused foreground process, so keyboard input reaches it)
+    // into a DATA-region buffer, then forks: the child inherits the buffer and execs it. This relies
+    // on FORK propagating the parent's just-typed line to the child — which works now that
     // kernel-mediated writes (INS) mark their frame dirty so fork's flush_frames carries them.
     public static byte[] Shell()
     {
-        const int PromptOff = 128;   // "$ " prompt (image-resident, read-only)
-        const int ErrOff = 160;      // "?" printed when a command fails to exec
-        const int LineBuf = 512;     // typed command line — a DATA-region page (needs memory >= 1024)
+        const int PromptOff = 320;   // "$ " prompt (image-resident, read-only; clear of the code below)
+        const int ErrOff = 352;      // "?" printed when a command fails to exec
+        const int DoneOff = 368;     // "done " printed when a background job is reaped
+        const int LineBuf = 768;     // typed command line — a DATA-region page (needs memory >= 1024)
         const int LineMax = 32;      // buffer capacity in words
+        const int AmpChar = 0x26;    // '&' — a trailing one backgrounds the command
 
         Assembler asm = new Assembler();
         asm.Label("loop");
+        // Drain any finished background jobs (non-blocking); announce each reaped child with "done ".
+        asm.Label("drain");
+        asm.MovImm(RegisterName.EAX, 0);                // target = any child
+        asm.Reap(RegisterName.EAX);                     // EAX = reaped pid (0 when none dead)
+        asm.MovImm(RegisterName.EBX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EBX);
+        asm.Jz("drained");
+        asm.MovImm16(RegisterName.EAX, DoneOff);
+        asm.MovImm(RegisterName.ECX, 5);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Jmp("drain");
+        asm.Label("drained");
+        // Prompt + read a command line.
         asm.MovImm16(RegisterName.EAX, PromptOff);
         asm.MovImm(RegisterName.ECX, 2);
         asm.Outs(RegisterName.EAX, RegisterName.ECX);   // prompt
         asm.MovImm16(RegisterName.EAX, LineBuf);
         asm.MovImm(RegisterName.ECX, LineMax);
         asm.Ins(RegisterName.EAX, RegisterName.ECX);    // read a line (blocks until one arrives)
+        // Scan the line for a '&' token → background flag in R8; truncate the line there so exec
+        // never sees the '&' (a word-per-char scan; stops at the null terminator).
+        asm.MovImm(RegisterName.R8, 0);                 // R8 = background flag (survives FORK into the parent)
+        asm.MovImm16(RegisterName.ESI, LineBuf);
+        asm.MovImm(RegisterName.R9, 0);                 // R9 = index
+        asm.Label("amp");
+        asm.MovImm(RegisterName.R10, LineMax);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jns("amp_end");                             // scanned the whole buffer
+        asm.Load(RegisterName.R11, RegisterName.ESI);   // R11 = current char word
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("amp_end");                              // null terminator: no '&'
+        asm.MovImm(RegisterName.R12, AmpChar);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jnz("amp_next");
+        asm.MovImm(RegisterName.R11, 0);
+        asm.Store(RegisterName.ESI, RegisterName.R11);  // truncate the line at the '&'
+        asm.MovImm(RegisterName.R8, 1);                 // background
+        asm.Jmp("amp_end");
+        asm.Label("amp_next");
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.ESI, RegisterName.R12);    // next word
+        asm.Inc(RegisterName.R9);
+        asm.Jmp("amp");
+        asm.Label("amp_end");
+        // Fork; the child execs the (possibly '&'-stripped) command line.
         asm.Fork();
         asm.MovImm(RegisterName.EBX, 0);
         asm.Cmp(RegisterName.EAX, RegisterName.EBX);
@@ -369,20 +413,24 @@ public static class Programs
         asm.Outs(RegisterName.EAX, RegisterName.ECX);   // command not found / not a file
         asm.MovImm(RegisterName.EAX, 0);
         asm.Exit(RegisterName.EAX);
-        // Parent (EAX == child PID): focus the child + wait, then prompt again. Save the PID before
-        // WAIT (which clobbers EAX with the exit status).
+        // Parent (EAX == child PID): background → just loop (drain reaps it later); foreground →
+        // focus + wait, then loop. Save the PID before WAIT (which clobbers EAX with the status).
         asm.Label("parent");
         asm.Mov(RegisterName.ESI, RegisterName.EAX);
+        asm.MovImm(RegisterName.R9, 0);
+        asm.Cmp(RegisterName.R8, RegisterName.R9);
+        asm.Jnz("loop");                                // R8 != 0 → background: don't focus/wait
         asm.SetFocus(RegisterName.ESI);
         asm.Wait(RegisterName.ESI);
         asm.Jmp("loop");
         byte[] code = asm.Build();
 
-        // The line buffer lives in the DATA region, not the image; the image is just code + prompt.
-        byte[] image = new byte[ErrOff + 4];
+        // The line buffer lives in the DATA region, not the image; the image is just code + strings.
+        byte[] image = new byte[DoneOff + 8 * 4];
         Array.Copy(code, image, code.Length);
         WriteString(image, PromptOff, "$ ");
         WriteString(image, ErrOff, "?");
+        WriteString(image, DoneOff, "done ");
         return image;
     }
 

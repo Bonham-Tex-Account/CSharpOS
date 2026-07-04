@@ -99,6 +99,9 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x36 | WAIT | Wait | b1=pid-reg; dispatches IvtWait |
 | 0x37 | EXIT | Exit | b1=status-reg; dispatches IvtHalt(status) |
 | 0x38 | SETFOCUS | SetFocus | b1=pid-reg; C# Hardware.SetFocus (no ISA routine) |
+| 0x39 | KILL | (reserved) | JC-B: b1=pid-reg, b2=sig-reg → IvtKill. **Not yet wired** (Shell §2.5) |
+| 0x3A | REAP | Reap | b1=pid-reg (0=any child); non-blocking → IvtReap; EAX=reaped pid (0 if none), EDX=status (Shell §2.5 JC-A) |
+| 0x3B | SIGACTION | (reserved) | JC-E catchable-signal handler install; documented, unimplemented |
 | 0x40 | SAVEREGS | SaveRegs | b1=ptr-reg; save trap frame to absolute address; privileged |
 | 0x41 | LOADREGS | LoadRegs | b1=ptr-reg; stage entry for OSRET; privileged |
 | 0x42 | SETLAYOUT | SetLayout | b1=entry-ptr-reg; rebuild HW layout from entry; privileged |
@@ -118,7 +121,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 
 ## IVT Slot Table
 
-`IvtSlotCount=20`, `IvtSize=80`, `CodeBase=80` (Phase 3 rectification added slot 19, `IvtEnsureUserPage`; was 19/76/76 after Inc 6 removed dead IvtDiskLoad)
+`IvtSlotCount=21`, `IvtSize=84`, `CodeBase=84` (Shell §2.5 JC-A added slot 20, `IvtReap`; was 20/80/80 after Phase 3 added slot 19 `IvtEnsureUserPage`)
 
 | Slot | Constant | C# addr field | Emit Method | Purpose |
 |------|----------|--------------|-------------|---------|
@@ -142,6 +145,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 17 | IvtFsOp | — | EmitFsOp | FS block/dir/file layer: EAX=op, args in EBX/ECX/EDX/ESI → result in FsResult |
 | 18 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
 | 19 | IvtEnsureUserPage | — | EmitEnsureUserPageOp | Fault-in/COW-resolve one user page; EAX=page (isWrite via `OsLayout.EnsureUserPageIsWrite`); dispatched only via `RunOsRoutineSynchronously` (Hardware.UserToPhysical), never by ISA code |
+| 20 | IvtReap | — | EmitReap | Non-blocking reap (REAP 0x3A); EAX=target pid (0=any child) → EAX=reaped pid (0 if none), EDX=status. Atomic dispatch like FORK; duplicates EmitWait's reap scan minus the block (Shell §2.5 JC-A) |
 
 **Note:** SETFOCUS (0x38) has no IVT slot / ISA routine — it's intentionally C#-only (`Hardware.SetFocus`), because "focused process" is a hardware-side field (`activeProcess`) with no OS-memory representation; it's a device/foreground concern, not an OS service.
 
@@ -151,7 +155,9 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 ## OsLayout Offsets
 
-`DataBase = 20480` (raised from 16384 in Inc 6 once file read/write + exec-by-path pushed the OS code to ~16.7 KB). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
+`DataBase = 24576` (raised from 20480 in Shell §2.5 JC-A once IvtReap pushed the OS code past 20.7 KB). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
+
+> ⚠️ **Post-process-table `+N` offsets below are stale by +64** since Shell §2.5 grew `ProcessEntrySize` 192→200 (process table 1536→1600). The **Header** rows (through ProcessTableOffset +48) are correct; every row in **After Process Table** and below is now +64 larger. **Use the `os-facts` skill for exact values** (`dotnet run --project .claude/skills/os-facts/dump -- layout`) rather than trusting these until they're re-synced. Confirmed anchors: `ProcessEntrySize=200`, `DataBase=24576`, `TotalSize=36984` (abs).
 
 ### Header
 
@@ -166,7 +172,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | BuddyMinBlockOffset | +36 |
 | BuddyLevelsOffset | +40 |
 | NextPidOffset | +44 |
-| ProcessTableOffset | +48 (MaxProcesses=8 × ProcessEntrySize=192 = 1536 bytes) |
+| ProcessTableOffset | +48 (MaxProcesses=8 × ProcessEntrySize=200 = 1600 bytes) |
 
 ### After Process Table
 
@@ -194,7 +200,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | FsArgvBase | +11488 | 524 (FsArgvWords=131: exec argv staging — Shell §2. Cursor/Argc/StrOff/SrcPtr/I bookkeeping + FsArgvCmd (FsArgvCmdWords=63, captured command line) + FsArgvTokenBuf (63, one extracted token). `fsy_exec` captures the whole command line here via `user_word_addr` before teardown; `exec_next_token`/`exec_build_argv` tokenize it) |
 | InstallPathBase | +12012 | 80 (InstallPathWords=20: LoadProcess FS-install path staging "/bin/p<seq>") — Phase 4 |
 | InstallBufBase | +12092 | 252 (InstallBufWords=CharsPerBlock=63: one-block chunk buffer for the FS install write) — Phase 4 |
-| **TotalSize** | **+12344** (= 32824 abs, with DataBase 20480) | — |
+| **TotalSize** | **+12408** (= 36984 abs, with DataBase 24576) | — |
 
 **Shell §2 argv (exec-by-path with arguments):** `FSYS` syscall 4 (`FsysExec`) now takes `EBX` = a whole command-line pointer (word-per-char, null-terminated). `fs_exec_core` tokenizes it (split on space, via `exec_next_token`): token0 is the program path (resolved as before); the remaining tokens become `argv`. On exec the program region is grown by `ArgvReserveBytes=512` (RAM-home reservation appended after the loaded image, virtual base = `newLen`); `exec_build_argv` writes the `argv[]` pointer array + the arg strings there, and the new program starts with **`EAX = argc`, `EBX = argv base (virtual)`**. `argv[k]` is a virtual pointer to a null-terminated word-per-char string; `argv[0]` = the command as typed. Programs that ignore args ignore EBX. (Also: `fsy_readdir` now writes its out buffer page-correctly via `user_word_addr` — a flat write went stale once the buffer's page was resident, breaking `/bin/ls`.)
 
@@ -218,7 +224,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 ## ProcessEntry Field Map
 
-`ProcessEntrySize = 192`; `ProcessEntryAddress(i) = ProcessTableOffset + i * 192 = (DataBase + 48) + i * 192` (DataBase-relative so it survives DataBase bumps)
+`ProcessEntrySize = 200` (was 192 before Shell §2.5 added Stopped+SigHandler); `ProcessEntryAddress(i) = ProcessTableOffset + i * 200 = (DataBase + 48) + i * 200` (DataBase-relative so it survives DataBase bumps)
 
 | Byte Offset | Field Constant | Size | Notes |
 |-------------|---------------|------|-------|
@@ -240,7 +246,9 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | 152 | ProcessEntryDiskSlot | 4 | Bin disk slot for program image; -1 when FS-backed (Phase 4) |
 | 156 | ProcessEntryFirstBlock | 4 | FS first block of program image (Phase 4); -1 when slot-backed. IvtSpawn branches on DiskSlot: ≥0 → DREAD, <0 → `fs_load_image` |
 | 160 | ProcessEntryFdTable | 32 | FdCount=8 × 4-byte device ids; [0]=stdin, [1]=stdout, [2..7]=open files |
-| **192** | **(end)** | | |
+| 192 | ProcessEntryStopped | 4 | Job-control stop flag (0/1); orthogonal to State so a Blocked proc can be stopped. Reserved in JC-A, used from JC-C (Shell §2.5) |
+| 196 | ProcessEntrySigHandler | 4 | Reserved catchable-signal handler vaddr; unused until JC-E |
+| **200** | **(end)** | | |
 
 Process memory layout: `[program][memory][user stack][kernel stack]`
 `TotalSize = ProgramSize + RequiredMemory + RequiredStackSize + KernelStackSize(176)`
@@ -482,6 +490,10 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-03 | Visualizer/Shell/Snake §1: disk visualization. New `FsDiskView.cs` (cache-first block reader → superblock stats + block-allocation map + dir tree snapshot), wired through model/Frame/bridge; `d` key swaps the Buddy panel ↔ Disk view (`SpectreDashboard.ShowDisk`, `BuildFsDisk`); bridge rebuilds `model.DiskView` only on FS-slot `OsRoutineEntered` + once at boot. No Hardware/ISA changes | ~50K (2 Explore agents + inline) | 2 parallel Explore agents mapped the BuddyHeapView plumbing + FS/cache layout (~101K agent tokens) so implementation was mechanical mirror work. 7 new tests (5 FsDiskView reconstruction incl. cache-first-proves-unflushed, 1 dashboard render smoke, 1 `d`-key). 623 tests green. |
 | 2026-07-03 | Visualizer/Shell/Snake §2: shell + parsed argv. Inc A: FSYS-exec ABI → whole command line, captured via `user_word_addr` into new `FsArgv*` region, `exec_next_token` tokenizer, path from token0. Inc B: `exec_build_argv` writes argv[]+strings into a RAM-home reservation (`ProgramSize'=newLen+ArgvReserveBytes=512`), seeds EAX=argc/EBX=argv. Inc C: 6 `/bin` programs (ls/cat/rm/mkdir/echo/help) — exposed + fixed a `fsy_readdir` staleness bug (flat out-buffer write → page-correct via `user_word_addr`; also R15-clobber). Inc D: shell (`Programs.Shell`) + `RunShell` installs /bin. TotalSize→+12344 (32824) | ~3 Explore agents + heavy inline debug | 3 Explore agents mapped exec-core/shell/ISA-toolkit. 643 tests (10 FsArgvExec, 7 FsBinPrograms, 4 Shell, 2 ForkMemoryProbe). |
 | 2026-07-03 | Root-caused the "fork won't give the shell's typed line to the child": **kernel-mediated writes (INS/OUTS/FSYS/readdir) via `ensure_user_page` never marked the frame dirty**, so fork's flush_frames (and eviction) — both write back only *dirty* frames — silently dropped them (a STORE write, which sets dirty via StampFrame, DID propagate — that's the tell). Fixed `ensure_user_page` to mark the frame dirty on write. This turned the deferred **looping fork shell** into a working one (parent types line → fork → child inherits + execs → loop) | ~30K (inline; isolation probes) | Confirmed with a clean STORE-vs-INS fork probe (STORE propagated, INS didn't → pointed straight at the dirty bit). Latent eviction data-loss bug too. 643 tests; `Shell_LoopsAcrossMultipleCommands` runs two commands in one shell. |
+
+| 2026-07-03 | Fix shell mode-9 out-of-range in visualizer + job-control design plan. **Bug:** `CSharpOSConsole/Program.cs` hardcoded `MemorySize=32768` but Shell §2 grew `TotalSize` to 32824 → buddy heap started past end of memory → `/bin` install ran off `memory[]`. **Fix:** `MemorySize = OsLayout.TotalSize + 32768` (tracks TotalSize; can't drift again; +32768 = clean 32KB heap). Regression `ShellTests.Shell_InVisualizerSetup_...` (reproduces the crash at old size, verified). Then designed job-control plan (`~/.claude/plans/brisk-huddling-walrus.md`) — full job control, plan-only | ~28K (inline) | 645 tests (was 644). ShellTests never caught it — they use MachineWithHeap(16384); the stale const only lived in the host. Lesson: host memory must derive from TotalSize, not a magic number. |
+
+| 2026-07-03 | Shell §2.5 job control **JC-A** (background jobs + non-blocking reap): new `REAP` opcode 0x3A → `IvtReap` (slot 20; targeted-or-any, delivers EAX=pid/EDX=status, reuses EmitWait's reap-scan minus the block); reserved `KILL` 0x39 / `SIGACTION` 0x3B consts + `ProcessEntryStopped`@192 / `ProcessEntrySigHandler`@196 (size 192→200); shell `&` backgrounding + REAP-drain "done" notice; DataBase 20480→24576, TotalSize→36984 | ~40K (inline) | 650 tests (+3 ReapTests, +1 Shell bg, +1 Disasm; fixed a two-command ShellTests timing race my drain/scan exposed — refocus must follow the shell's own SetFocus). Plan `brisk-huddling-walrus.md`. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

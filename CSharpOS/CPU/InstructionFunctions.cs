@@ -504,4 +504,12 @@ internal static class InstructionFunctions
     {
         hw.SetFocus(hw.ReadRegisterAt(b1));
     }
+
+    // REAP r — non-blocking reap of a dead child (Shell §2.5). reg[r] = target PID (0 = any
+    // child); traps into the privileged OS reap routine, which delivers the reaped PID in EAX
+    // (0 if none dead) and its exit status in EDX. Used by a shell to collect background jobs.
+    internal static void Reap(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.Reap(hw.ReadRegisterAt(b1));
+    }
 }

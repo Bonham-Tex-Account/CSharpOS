@@ -19,8 +19,9 @@ public static class OsLayout
     // once the paging family (page-fault handler + frame/swap/COW subroutines) was added,
     // then to 16384 once the filesystem family (cache manager + block/directory/path
     // routines, Increments 2–4) was added, then to 20480 once the file read/write and
-    // exec-by-path routines (Increments 5–6) pushed the code to ~16.7 KB.
-    public const int DataBase = 20480;
+    // exec-by-path routines (Increments 5–6) pushed the code to ~16.7 KB, then to 24576 once
+    // the job-control family (IvtReap, and later IvtKill) pushed the code past 20.7 KB (Shell §2.5).
+    public const int DataBase = 24576;
 
     // ---- scheduler state header (4-byte fields at the data section base) ---
     public const int ProcessCountOffset    = DataBase + 0;
