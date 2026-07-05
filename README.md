@@ -41,7 +41,7 @@ The menu lets you pick one of 13 demo scenarios. After selecting a scenario you 
 | 6 | Memory churn — short jobs continuously load and exit; watch the buddy tree |
 | 7 | Fill & drain — mixed-size jobs fill heap then drain; watch coalescing/reclaim |
 | 8 | Scheduler + memory — counter + average run while short jobs churn the heap |
-| 9 | Shell — interactive: type a command id to fork/exec a program (fork/exec/wait/setfocus) |
+| 9 | Shell — interactive: type an absolute command (`/bin/ls /`), run it in the background with `&`, and use the built-in job control (`jobs`, `fg`, `bg`, `stop`, `kill <n>`); `Ctrl-C`/`Ctrl-Z` signal the foreground job. Includes `/bin/snake` (an arrow-key game) |
 | 10 | Two guessing games — Tab switches focus between them (process switching) |
 | 11 | Spawn tree — a parent forks two children; watch the Process tree panel |
 | 12 | String I/O demo — type a name in the Screen panel, press Enter (`OUTS`/`INS` in action) |
@@ -140,6 +140,7 @@ The `Hardware` class emulates a 32-bit CPU. The register file has 24 registers (
 | HLT | 0x32 | Halt (terminate process) |
 | IRET | 0x33 | Return from a kernel-mode syscall handler |
 | FORK / EXEC / WAIT / EXIT / SETFOCUS | 0x34–0x38 | Process control |
+| KILL / REAP | 0x39–0x3A | Job control: signal a process (TERM/KILL/STOP/CONT) / non-blocking reap (SIGACTION 0x3B reserved) |
 | SAVEREGS / LOADREGS / SETLAYOUT / OSRET | 0x40–0x43 | OS-privileged context switch primitives |
 | DREAD / DWRITE / DLEN | 0x44–0x46 | Disk slot transfers (Kernel-only) |
 | OUTS / INS | 0x47–0x48 | String output / line input |

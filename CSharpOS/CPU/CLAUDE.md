@@ -28,7 +28,23 @@ Hardware(int memorySize, RegisterName[] registerNames, IOperatingSystem os, Bin 
 
 ## Key Hardware Methods
 
-Section markers use `// ===== ` — search for them, then `Read(offset=N, limit=80)` to target reads.
+**Navigate by Grepping the `// ===== ` marker** (they name their methods) — the `:N` numbers in the
+tables below drift and are approximate (last synced 2026-07-05); use them only as a starting offset.
+Current `// ===== ` marker lines (Hardware.cs, 1961 lines):
+
+| Marker (Grep `// ===== <text>`) | Line | Marker | Line |
+|--------|------|--------|------|
+| IVT Dispatch | :449 | Process Loading | :1376 |
+| Traps | :512 | Kernel Entry / Exit | :1408 |
+| Program Base | :545 | Context Commit | :1486 |
+| Memory + Register Access | :569 | RunOsRoutineSynchronously | :1549 |
+| Disk | :691 | Process Lifecycle | :1595 |
+| Device Internals | :756 | TrapInvalidInstruction | :1755 |
+| Word Memory Helpers | :836 | Kernel I/O | :1784 |
+| Buffer Word Helpers | :1145 | Interrupt Raising | :1884 |
+| Run Loop Internals | :1161 | | |
+
+The method tables below add per-method detail; find the owning marker above, then Grep it.
 
 ### Run Loop (Hardware.cs:1037 `// ---- integral functions`)
 | Method | Line | Notes |
@@ -97,6 +113,9 @@ Section markers use `// ===== ` — search for them, then `Read(offset=N, limit=
 | `SetActiveProcess(int index) / GetActiveProcess() → int` | :291 | Foreground process; -1=none |
 | `SetFocus(int pid)` | :1414 | Maps pid→slot; calls SetActiveProcess |
 | `Fork() / Exec(int slot) / Wait(int pid) / Exit(int status) / Halt()` | :1383 | Dispatch appropriate IVT slots |
+| `Reap(int targetPid)` | Process Lifecycle marker | REAP 0x3A → IvtReap; non-blocking (EAX=pid, EDX=status) |
+| `Kill(int targetPid, int sig)` | Process Lifecycle marker | KILL 0x39 → IvtKill; sig ∈ Sig{Term=1,Kill=2,Stop=3,Cont=4} |
+| `RaiseForegroundSignal(int sig)` | Interrupt Raising marker | Ctrl-C/Ctrl-Z path: enqueues a `ForegroundSignal` interrupt → IvtKill on the focused pid with `KillNoDeliver=1` (no killer process) |
 
 ### Disk (Hardware.cs:611)
 | Method | Line | Notes |
