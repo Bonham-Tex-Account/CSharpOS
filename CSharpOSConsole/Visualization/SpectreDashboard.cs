@@ -929,6 +929,13 @@ public sealed class SpectreDashboard
         {
             lines.Add(new Markup("[grey39](no output yet)[/]"));
         }
+        else if (outputs[outputs.Count - 1].Contains('\n'))
+        {
+            // Canvas mode: the latest output is a full multi-line frame (e.g. a snake grid). Show only
+            // that frame — its newlines render as rows — instead of the horizontally-joined scroll log.
+            // Auto-detected by shape, so a program that redraws a whole screen each frame just works.
+            lines.Add(new Markup("[grey85]" + Markup.Escape(outputs[outputs.Count - 1]) + "[/]"));
+        }
         else
         {
             int skip = Math.Max(0, outputs.Count - ScreenLines);

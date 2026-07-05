@@ -236,9 +236,12 @@ public static partial class OsRoutines
         asm.Label("cs_boost_skip");
         asm.Label("cs_skip");
         // Periodic write-back: tick the flush countdown; on reaching zero, flush all dirty
-        // unpinned cache slots to disk and reload the interval. Registers are scratch here
-        // (SaveRegs already ran and resume_mlfq reloads the next process), so the CALL and
-        // its clobbers are safe. An empty/clean cache makes cache_flush a no-op.
+        // unpinned cache slots to disk and reload the interval. An empty/clean cache makes
+        // cache_flush a no-op. NOTE: cache_flush (like all cache_* subs) clobbers ECX, and
+        // resume_mlfq uses ECX as the round-robin start index — so cs_flush_skip reloads ECX from
+        // CurrentIndexOffset before jumping there. (This periodic flush only fires every
+        // CacheFlushInterval context switches, so the missing reload was a latent bug that only
+        // surfaced under OUTS/INS-heavy programs racking up hundreds of context switches.)
         Imm16(asm, R8, OsLayout.CacheFlushTimerOffset);
         asm.Load(R(R10), R(R8));
         asm.Dec(R(R10));
@@ -252,6 +255,10 @@ public static partial class OsRoutines
         Imm16(asm, R10, OsLayout.CacheFlushInterval);
         asm.Store(R(R8), R(R10));
         asm.Label("cs_flush_skip");
+        // Reload ECX = current index: cache_flush above clobbers it, and resume_mlfq round-robins
+        // from ECX. Harmless on the no-flush path (ECX already held this value).
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));
         asm.Jmp("resume_mlfq");
     }
 

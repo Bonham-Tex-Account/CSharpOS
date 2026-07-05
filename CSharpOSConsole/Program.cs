@@ -267,6 +267,7 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
     FsImage.WriteFile(hw, "/bin/counter", Programs.CounterToTen());
     FsImage.WriteFile(hw, "/bin/average", Programs.AverageOfList());
     FsImage.WriteFile(hw, "/bin/guess", Programs.GuessingGame());
+    FsImage.WriteFile(hw, "/bin/snake", Programs.Snake());   // a playable game (arrow keys, 'q' quits)
     // A text file for `cat` to read (word-per-char, the way cat/OUTS read file content).
     string noteText = "hello from the filesystem";
     byte[] note = new byte[noteText.Length * 4];
@@ -279,12 +280,15 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
     int shellSlot = hw.Disk.Store(Programs.Shell());
 
     Console.WriteLine("  Shell: focus it (Tab), type an absolute command + Enter (it forks/execs, then re-prompts):");
-    Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter");
+    Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter   /bin/snake");
+    Console.WriteLine("    (snake: arrow keys steer, 'q' quits; Ctrl-C kills the foreground job, /bin/snake & backgrounds)");
     Console.WriteLine();
 
     SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail);
-    // The shell needs enough memory for the largest program it execs into (image + argv reservation).
-    os.LoadProcess(new Process(shellSlot, 1024, RequiredStackSize));
+    // The shell needs enough memory for the largest program it execs into: exec preserves the
+    // process's RequiredMemory, so /bin/snake (grid + render buffer in DATA at ~2–3.4 KB) inherits
+    // this. 4096 gives it room; the shell's own DATA (LineBuf/jobs table) fits easily.
+    os.LoadProcess(new Process(shellSlot, 4096, RequiredStackSize));
     dashboard.Run();
 
     Console.WriteLine();

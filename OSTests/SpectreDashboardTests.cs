@@ -96,6 +96,54 @@ public class SpectreDashboardTests : IDisposable
         Assert.DoesNotContain("Buddy allocator", text); // the slot is swapped, not duplicated
     }
 
+    // Emits a single-line log string, then a multi-line "frame" string (rows split by '\n'). The
+    // Screen panel's canvas mode should show only the latest multi-line frame, not the joined log.
+    private static byte[] LogThenMultiLineFrame()
+    {
+        Assembler asm = new Assembler();
+        asm.MovImm16(RegisterName.EAX, 128);
+        asm.MovImm(RegisterName.ECX, 7);              // "OLDLINE"
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.MovImm16(RegisterName.EAX, 160);
+        asm.MovImm(RegisterName.ECX, 11);             // "ABCDE\nFGHIJ"
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Label("spin");
+        asm.Jmp("spin");                              // stay alive + focused so the frame renders
+        byte[] code = asm.Build();
+        byte[] image = new byte[160 + 11 * 4];
+        Array.Copy(code, image, code.Length);
+        WriteChars(image, 128, "OLDLINE");
+        WriteChars(image, 160, "ABCDE\nFGHIJ");
+        return image;
+    }
+
+    private static void WriteChars(byte[] image, int offset, string s)
+    {
+        for (int i = 0; i < s.Length; i++)
+        {
+            image[offset + i * 4] = (byte)s[i];       // word-per-char, low byte
+        }
+    }
+
+    [Fact]
+    public void Screen_CanvasMode_ShowsLatestMultiLineFrame_NotTheJoinedLog()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Test.MachineWithHeap(16384), Test.AllRegisters(), os);
+        SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Verbose, 0);
+        os.LoadProcess(new Process(CreateProgramFile(LogThenMultiLineFrame()), 128, 64));
+
+        StringWriter sink = new StringWriter();
+        dashboard.RenderSnapshot(PlainConsole(sink), 4000);
+
+        string text = sink.ToString();
+        // The first row of the latest frame is shown and the earlier log line is dropped — canvas
+        // mode shows only the latest multi-line frame. (Lower rows can clip in the small headless
+        // console's Screen panel; the real TUI panel is taller.)
+        Assert.Contains("ABCDE", text);
+        Assert.DoesNotContain("OLDLINE", text);
+    }
+
     [Fact]
     public void RendersWithTwoProcesses_ShowingSchedulerActivity()
     {

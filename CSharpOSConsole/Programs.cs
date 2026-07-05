@@ -687,6 +687,251 @@ public static class Programs
         return image;
     }
 
+    // Snake (Visualizer §3): a full playable game rendered as a text grid. Arrow keys steer (INPOLL,
+    // non-blocking), 'q' quits; eating food ('*') grows the snake ('O'); hitting a wall ('#') or itself
+    // ends the game. Each tick the WHOLE grid is drawn as one OUTS string (rows split by '\n'), which
+    // the dashboard's Screen canvas mode shows in place. The body uses the "life-countdown" scheme: a
+    // grid cell holds ticks-until-vacate (head = length, tail = 1); a normal tick decrements every
+    // snake cell (tail vacates) then sets the new head to length; a grow tick SKIPS the decrement and
+    // bumps length, so the snake lengthens. Launch as /bin/snake; killable/Ctrl-C-able via job control.
+    // Needs a roomy DATA region (grid + render buffer live past the image at 2048+), so the launching
+    // shell is loaded with extra memory (exec preserves RequiredMemory).
+    public static byte[] Snake()
+    {
+        const int W = 8;             // grid width  (power of two → AND-mask for random food, W<<-shift index)
+        const int H = 8;             // grid height (power of two). Small so the grid + render buffer
+                                     // working set fits the 4-frame page pool — 16×8 thrashed badly
+                                     // (≈1 tick per 65k steps); 8×8 keeps it responsive.
+        const int Cells = W * H;
+        int WShift = System.Numerics.BitOperations.Log2((uint)W);   // idx = y*W + x  →  y << WShift
+        // Image-resident: the game-over line lives above the code (guarded below).
+        const int OverOff = 1536;    // "GAME OVER\n"
+        // DATA (virtual, past the ~1.2 KB image; the process is loaded with ample memory).
+        const int HX = 2048, HY = 2052, DX = 2056, DY = 2060, LEN = 2064;
+        const int FX = 2068, FY = 2072, SCORE = 2076, RNG = 2080;
+        const int GRID = 2112;               // Cells words
+        const int REND = GRID + Cells * 4;   // render-string buffer
+        const int Wall = 0x23, Body = 0x4F, FoodCh = 0x2A, Empty = 0x2E, Nl = 0x0A; // # O * . \n
+        const int QuitKey = 0x71;            // 'q'
+
+        Assembler asm = new Assembler();
+
+        // ---- small emit helpers (keep the game code readable) ----
+        void Ld(int addr, RegisterName dst) { asm.MovImm16(RegisterName.EAX, addr); asm.Load(dst, RegisterName.EAX); }
+        void StR(int addr, RegisterName src) { asm.MovImm16(RegisterName.EAX, addr); asm.Store(RegisterName.EAX, src); }
+        void StI(int addr, int val)
+        {
+            asm.MovImm16(RegisterName.EAX, addr);
+            if (val == -1) { asm.MovImm(RegisterName.EBX, 0); asm.Dec(RegisterName.EBX); }
+            else if (val >= 0 && val <= 255) { asm.MovImm(RegisterName.EBX, val); }
+            else { asm.MovImm16(RegisterName.EBX, val); }
+            asm.Store(RegisterName.EAX, RegisterName.EBX);
+        }
+        // Store R11 (a char) at the render pointer R13, then advance R13 by one word.
+        void EmitR11() { asm.Store(RegisterName.R13, RegisterName.R11); asm.MovImm(RegisterName.R12, 4); asm.Add(RegisterName.R13, RegisterName.R12); }
+
+        // ---- INIT ----
+        // Clear the grid.
+        asm.MovImm16(RegisterName.R8, GRID);
+        asm.MovImm(RegisterName.R9, 0);
+        asm.Label("clr");
+        asm.MovImm(RegisterName.R10, Cells);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jns("clr_done");
+        asm.MovImm(RegisterName.R11, 0);
+        asm.Store(RegisterName.R8, RegisterName.R11);
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R8, RegisterName.R10);
+        asm.Inc(RegisterName.R9);
+        asm.Jmp("clr");
+        asm.Label("clr_done");
+        StI(HX, W / 2); StI(HY, H / 2); StI(DX, 1); StI(DY, 0); StI(LEN, 3); StI(SCORE, 0); StI(RNG, 12345);
+        // Initial 3-cell snake pointing right at the centre: head (W/2,H/2)=3, then 2, 1.
+        StI(GRID + ((H / 2) * W + (W / 2)) * 4, 3);
+        StI(GRID + ((H / 2) * W + (W / 2 - 1)) * 4, 2);
+        StI(GRID + ((H / 2) * W + (W / 2 - 2)) * 4, 1);
+        asm.Call("place_food");
+
+        // ---- MAIN LOOP ----
+        asm.Label("main");
+        asm.Call("render");
+        // Non-blocking input.
+        asm.InkPoll(RegisterName.R8);                 // R8 = keycode, or -1 if none
+        asm.MovImm(RegisterName.R10, QuitKey);
+        asm.Cmp(RegisterName.R8, RegisterName.R10);
+        asm.Jz("quit");
+        asm.MovImm16(RegisterName.R10, Hardware.KeyUp);
+        asm.Cmp(RegisterName.R8, RegisterName.R10);
+        asm.Jz("k_up");
+        asm.MovImm16(RegisterName.R10, Hardware.KeyDown);
+        asm.Cmp(RegisterName.R8, RegisterName.R10);
+        asm.Jz("k_down");
+        asm.MovImm16(RegisterName.R10, Hardware.KeyLeft);
+        asm.Cmp(RegisterName.R8, RegisterName.R10);
+        asm.Jz("k_left");
+        asm.MovImm16(RegisterName.R10, Hardware.KeyRight);
+        asm.Cmp(RegisterName.R8, RegisterName.R10);
+        asm.Jz("k_right");
+        asm.Jmp("move");
+        // Each arrow sets the direction, rejecting a 180° reversal (running into your own neck).
+        asm.Label("k_up");
+        Ld(DY, RegisterName.R10); asm.MovImm(RegisterName.R12, 1); asm.Cmp(RegisterName.R10, RegisterName.R12); asm.Jz("move");
+        StI(DX, 0); StI(DY, -1); asm.Jmp("move");
+        asm.Label("k_down");
+        Ld(DY, RegisterName.R10); asm.MovImm(RegisterName.R12, 0); asm.Dec(RegisterName.R12); asm.Cmp(RegisterName.R10, RegisterName.R12); asm.Jz("move");
+        StI(DX, 0); StI(DY, 1); asm.Jmp("move");
+        asm.Label("k_left");
+        Ld(DX, RegisterName.R10); asm.MovImm(RegisterName.R12, 1); asm.Cmp(RegisterName.R10, RegisterName.R12); asm.Jz("move");
+        StI(DX, -1); StI(DY, 0); asm.Jmp("move");
+        asm.Label("k_right");
+        Ld(DX, RegisterName.R10); asm.MovImm(RegisterName.R12, 0); asm.Dec(RegisterName.R12); asm.Cmp(RegisterName.R10, RegisterName.R12); asm.Jz("move");
+        StI(DX, 1); StI(DY, 0); asm.Jmp("move");
+
+        // ---- MOVE + COLLISION ----
+        asm.Label("move");
+        // new head = (HX+DX, HY+DY) → R8, R9
+        Ld(HX, RegisterName.R8); Ld(DX, RegisterName.R10); asm.Add(RegisterName.R8, RegisterName.R10);
+        Ld(HY, RegisterName.R9); Ld(DY, RegisterName.R10); asm.Add(RegisterName.R9, RegisterName.R10);
+        // wall: outside [0,W) × [0,H) → dead
+        asm.MovImm(RegisterName.R10, 0); asm.Cmp(RegisterName.R8, RegisterName.R10); asm.Js("dead");
+        asm.MovImm(RegisterName.R10, W); asm.Cmp(RegisterName.R8, RegisterName.R10); asm.Jns("dead");
+        asm.MovImm(RegisterName.R10, 0); asm.Cmp(RegisterName.R9, RegisterName.R10); asm.Js("dead");
+        asm.MovImm(RegisterName.R10, H); asm.Cmp(RegisterName.R9, RegisterName.R10); asm.Jns("dead");
+        // &grid[newhead] → R14  (idx = R9*W + R8; ×4; + GRID)
+        asm.Mov(RegisterName.R14, RegisterName.R9); asm.MovImm(RegisterName.R12, WShift); asm.Shl(RegisterName.R14, RegisterName.R12);
+        asm.Add(RegisterName.R14, RegisterName.R8);
+        asm.MovImm(RegisterName.R12, 2); asm.Shl(RegisterName.R14, RegisterName.R12);
+        asm.MovImm16(RegisterName.R12, GRID); asm.Add(RegisterName.R14, RegisterName.R12);
+        // grow?  new head == food
+        Ld(FX, RegisterName.R10); asm.Cmp(RegisterName.R8, RegisterName.R10); asm.Jnz("nogrow");
+        Ld(FY, RegisterName.R10); asm.Cmp(RegisterName.R9, RegisterName.R10); asm.Jnz("nogrow");
+        // GROW: length++, score++, set head cell = length (no decrement → snake lengthens), new food
+        Ld(LEN, RegisterName.R11); asm.Inc(RegisterName.R11); StR(LEN, RegisterName.R11);
+        Ld(SCORE, RegisterName.R10); asm.Inc(RegisterName.R10); StR(SCORE, RegisterName.R10);
+        asm.Store(RegisterName.R14, RegisterName.R11);
+        StR(HX, RegisterName.R8); StR(HY, RegisterName.R9);
+        asm.Call("place_food");
+        asm.Jmp("main");
+        asm.Label("nogrow");
+        // decrement every snake cell (>0) — the tail vacates
+        asm.MovImm16(RegisterName.EDI, GRID); asm.MovImm(RegisterName.ESI, 0);
+        asm.Label("dec");
+        asm.MovImm(RegisterName.EDX, Cells); asm.Cmp(RegisterName.ESI, RegisterName.EDX); asm.Jns("dec_done");
+        asm.Load(RegisterName.EBX, RegisterName.EDI);
+        asm.MovImm(RegisterName.EDX, 0); asm.Cmp(RegisterName.EBX, RegisterName.EDX); asm.Jz("dec_next");
+        asm.Dec(RegisterName.EBX); asm.Store(RegisterName.EDI, RegisterName.EBX);
+        asm.Label("dec_next");
+        asm.MovImm(RegisterName.EDX, 4); asm.Add(RegisterName.EDI, RegisterName.EDX); asm.Inc(RegisterName.ESI); asm.Jmp("dec");
+        asm.Label("dec_done");
+        // self-collision: grid[newhead] still > 0 (body that hasn't vacated)
+        asm.Load(RegisterName.EBX, RegisterName.R14); asm.MovImm(RegisterName.EDX, 0); asm.Cmp(RegisterName.EBX, RegisterName.EDX); asm.Jnz("dead");
+        Ld(LEN, RegisterName.R11); asm.Store(RegisterName.R14, RegisterName.R11);
+        StR(HX, RegisterName.R8); StR(HY, RegisterName.R9);
+        asm.Jmp("main");
+
+        // ---- GAME OVER / QUIT ----
+        asm.Label("dead");
+        asm.Call("render");
+        asm.MovImm16(RegisterName.EAX, OverOff);
+        asm.MovImm(RegisterName.ECX, 10);
+        asm.Outs(RegisterName.EAX, RegisterName.ECX);        // "GAME OVER\n" (canvas mode shows it)
+        Ld(SCORE, RegisterName.EAX); asm.Exit(RegisterName.EAX);
+        asm.Label("quit");
+        Ld(SCORE, RegisterName.EAX); asm.Exit(RegisterName.EAX);
+
+        // ---- place_food (CALL/RET): pick a random empty cell via a 16-bit LCG ----
+        asm.Label("place_food");
+        asm.Label("pf_retry");
+        Ld(RNG, RegisterName.EAX);
+        asm.MovImm16(RegisterName.EBX, 25173); asm.Mul(RegisterName.EAX, RegisterName.EBX);
+        asm.MovImm16(RegisterName.EBX, 13849); asm.Add(RegisterName.EAX, RegisterName.EBX);
+        StR(RNG, RegisterName.EAX);
+        asm.Mov(RegisterName.EBX, RegisterName.EAX); asm.MovImm(RegisterName.ECX, W - 1); asm.And(RegisterName.EBX, RegisterName.ECX);  // fx = rng & (W-1)
+        asm.Mov(RegisterName.ECX, RegisterName.EAX); asm.MovImm(RegisterName.EDX, 4); asm.Shr(RegisterName.ECX, RegisterName.EDX);
+        asm.MovImm(RegisterName.EDX, H - 1); asm.And(RegisterName.ECX, RegisterName.EDX);   // fy = (rng>>4) & (H-1)
+        asm.Mov(RegisterName.R10, RegisterName.ECX); asm.MovImm(RegisterName.R12, WShift); asm.Shl(RegisterName.R10, RegisterName.R12);
+        asm.Add(RegisterName.R10, RegisterName.EBX);
+        asm.MovImm(RegisterName.R12, 2); asm.Shl(RegisterName.R10, RegisterName.R12);
+        asm.MovImm16(RegisterName.R12, GRID); asm.Add(RegisterName.R10, RegisterName.R12);
+        asm.Load(RegisterName.R12, RegisterName.R10); asm.MovImm(RegisterName.EDX, 0); asm.Cmp(RegisterName.R12, RegisterName.EDX); asm.Jnz("pf_retry"); // occupied → retry
+        StR(FX, RegisterName.EBX); StR(FY, RegisterName.ECX);
+        asm.Ret();
+
+        // ---- render (CALL/RET): build the whole frame at REND and OUTS it ----
+        asm.Label("render");
+        Ld(FX, RegisterName.R8); Ld(FY, RegisterName.R9);    // R8=FX, R9=FY (kept across the loop)
+        asm.MovImm16(RegisterName.R13, REND);
+        asm.Call("border");                                   // top border
+        asm.MovImm(RegisterName.R14, 0);                      // y
+        asm.Label("rrow");
+        asm.MovImm(RegisterName.R10, H); asm.Cmp(RegisterName.R14, RegisterName.R10); asm.Jns("rrow_done");
+        asm.MovImm(RegisterName.R11, Wall); EmitR11();        // left wall
+        asm.MovImm(RegisterName.R15, 0);                      // x
+        asm.Label("rcol");
+        asm.MovImm(RegisterName.R10, W); asm.Cmp(RegisterName.R15, RegisterName.R10); asm.Jns("rcol_done");
+        asm.Cmp(RegisterName.R15, RegisterName.R8); asm.Jnz("r_notfood");   // food? x==FX && y==FY
+        asm.Cmp(RegisterName.R14, RegisterName.R9); asm.Jnz("r_notfood");
+        asm.MovImm(RegisterName.R11, FoodCh); asm.Jmp("r_emit");
+        asm.Label("r_notfood");
+        asm.Mov(RegisterName.R10, RegisterName.R14); asm.MovImm(RegisterName.R12, WShift); asm.Shl(RegisterName.R10, RegisterName.R12);  // idx = y*W+x
+        asm.Add(RegisterName.R10, RegisterName.R15);
+        asm.MovImm(RegisterName.R12, 2); asm.Shl(RegisterName.R10, RegisterName.R12);
+        asm.MovImm16(RegisterName.R12, GRID); asm.Add(RegisterName.R10, RegisterName.R12);
+        asm.Load(RegisterName.R12, RegisterName.R10);
+        asm.MovImm(RegisterName.R10, 0); asm.Cmp(RegisterName.R12, RegisterName.R10); asm.Jz("r_empty");    // snake? grid[idx] > 0
+        asm.MovImm(RegisterName.R11, Body); asm.Jmp("r_emit");
+        asm.Label("r_empty");
+        asm.MovImm(RegisterName.R11, Empty);
+        asm.Label("r_emit");
+        EmitR11();
+        asm.Inc(RegisterName.R15); asm.Jmp("rcol");
+        asm.Label("rcol_done");
+        asm.MovImm(RegisterName.R11, Wall); EmitR11();        // right wall
+        asm.MovImm(RegisterName.R11, Nl); EmitR11();          // newline
+        asm.Inc(RegisterName.R14); asm.Jmp("rrow");
+        asm.Label("rrow_done");
+        asm.Call("border");                                   // bottom border
+        // score line: "S:" + 3 fixed decimal digits + newline
+        asm.MovImm(RegisterName.R11, 0x53); EmitR11();        // 'S'
+        asm.MovImm(RegisterName.R11, 0x3A); EmitR11();        // ':'
+        Ld(SCORE, RegisterName.EDI);
+        asm.Mov(RegisterName.EAX, RegisterName.EDI); asm.MovImm(RegisterName.EBX, 100); asm.Div(RegisterName.EAX, RegisterName.EBX);   // h
+        asm.MovImm(RegisterName.R11, 0x30); asm.Add(RegisterName.R11, RegisterName.EAX); EmitR11();
+        asm.Mov(RegisterName.EBX, RegisterName.EAX); asm.MovImm(RegisterName.ECX, 100); asm.Mul(RegisterName.EBX, RegisterName.ECX);
+        asm.Mov(RegisterName.ESI, RegisterName.EDI); asm.Sub(RegisterName.ESI, RegisterName.EBX);           // rem = score - h*100
+        asm.Mov(RegisterName.EAX, RegisterName.ESI); asm.MovImm(RegisterName.EBX, 10); asm.Div(RegisterName.EAX, RegisterName.EBX);    // t
+        asm.MovImm(RegisterName.R11, 0x30); asm.Add(RegisterName.R11, RegisterName.EAX); EmitR11();
+        asm.Mov(RegisterName.EBX, RegisterName.EAX); asm.MovImm(RegisterName.ECX, 10); asm.Mul(RegisterName.EBX, RegisterName.ECX);
+        asm.Mov(RegisterName.EAX, RegisterName.ESI); asm.Sub(RegisterName.EAX, RegisterName.EBX);           // o = rem - t*10
+        asm.MovImm(RegisterName.R11, 0x30); asm.Add(RegisterName.R11, RegisterName.EAX); EmitR11();
+        asm.MovImm(RegisterName.R11, Nl); EmitR11();
+        asm.MovImm(RegisterName.R11, 0); asm.Store(RegisterName.R13, RegisterName.R11);   // null-terminate
+        asm.MovImm16(RegisterName.EAX, REND); asm.MovImm(RegisterName.ECX, 250); asm.Outs(RegisterName.EAX, RegisterName.ECX);
+        asm.Ret();
+
+        // ---- border (CALL/RET): (W+2) '#' then newline at R13 ----
+        asm.Label("border");
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Label("brd");
+        asm.MovImm(RegisterName.R12, W + 2); asm.Cmp(RegisterName.R10, RegisterName.R12); asm.Jns("brd_done");
+        asm.MovImm(RegisterName.R11, Wall); EmitR11();
+        asm.Inc(RegisterName.R10); asm.Jmp("brd");
+        asm.Label("brd_done");
+        asm.MovImm(RegisterName.R11, Nl); EmitR11();
+        asm.Ret();
+
+        byte[] code = asm.Build();
+        if (code.Length > OverOff)
+        {
+            throw new InvalidOperationException(
+                $"Snake code ({code.Length} bytes) overruns the string area at {OverOff}; raise the offsets.");
+        }
+        byte[] image = new byte[OverOff + 10 * 4];
+        Array.Copy(code, image, code.Length);
+        WriteString(image, OverOff, "GAME OVER\n");
+        return image;
+    }
+
     // Parent forks three children with different lifetimes, then waits for all three.
     // Children output 1/2/3; parent outputs 0 last. Produces a 4-node tree.
     // WAIT clobbers EAX with the exit status, so each child PID is saved to a
