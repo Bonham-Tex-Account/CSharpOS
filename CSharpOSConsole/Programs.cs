@@ -7,6 +7,7 @@ namespace CSharpOSConsole;
 /// </summary>
 public static class Programs
 {
+    // ===== CounterToTen ======================================================
     // Counts 1..10, printing each value, then halts.
     public static byte[] CounterToTen()
     {
@@ -22,6 +23,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== AverageOfList =====================================================
     // Builds the list [10, 20, 30, 40] in memory, sums it, prints the average (25).
     public static byte[] AverageOfList()
     {
@@ -68,6 +70,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== BusyThenHalt ======================================================
     // Busy-works for `iterations` loop turns (a countdown), then prints `printValue`
     // and halts. Non-interactive and self-terminating, so it is ideal for memory-churn
     // demos: several can coexist (filling the buddy heap) and then drain as they finish.
@@ -85,6 +88,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== FilesystemDemo ====================================================
     // A filesystem demo (Phase 4): the process itself uses the FSYS syscall to create a file
     // "/note", write the string "HI!" into it, close and reopen it, read the bytes back into a
     // separate buffer, and OUTS the result to the screen — proving the FSYS open/write/close/
@@ -163,6 +167,7 @@ public static class Programs
         }
     }
 
+    // ===== Echo ==============================================================
     // echo: print each argument (argv[1..]) back, one per output. The clearest argv demo.
     public static byte[] Echo()
     {
@@ -187,6 +192,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== Rm ================================================================
     // rm <file>: delete a file via FsysUnlink(argv[1]).
     public static byte[] Rm()
     {
@@ -205,6 +211,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== Mkdir =============================================================
     // mkdir <dir>: create a directory via FsysMkdir(argv[1]).
     public static byte[] Mkdir()
     {
@@ -223,6 +230,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== Cat ===============================================================
     // cat <file>: print a file's contents. Reads in fixed chunks into a RAM-home image buffer and
     // OUTS each chunk until read returns 0 (EOF). (FSYS read buffers are page-translated, so a
     // RAM-home image buffer is fine; the path in argv[1] is likewise RAM-home for FsysOpen.)
@@ -272,6 +280,7 @@ public static class Programs
         return image;
     }
 
+    // ===== Ls ================================================================
     // ls [dir]: list a directory's entries (defaults to "/"). Walks FsysReaddir by index until it
     // returns -1, printing each entry's name. The out buffer + the default "/" path are RAM-home
     // image buffers (FsysReaddir uses flat path/out translation).
@@ -313,6 +322,7 @@ public static class Programs
         return image;
     }
 
+    // ===== Help ==============================================================
     // help: print the list of available commands.
     public static byte[] Help()
     {
@@ -331,6 +341,7 @@ public static class Programs
         return image;
     }
 
+    // ===== Shell =============================================================
     // A real command shell (Shell §2 + §2.5 job control): prompt, read a command line (INS), fork,
     // have the child exec-by-path the typed command with its arguments (FSYS Exec). If the line ends
     // with " &" the job runs in the BACKGROUND — the parent records nothing to wait on and returns to
@@ -687,6 +698,7 @@ public static class Programs
         return image;
     }
 
+    // ===== Snake =============================================================
     // Snake (Visualizer §3): a full playable game rendered as a text grid. Arrow keys steer (INPOLL,
     // non-blocking), 'q' quits; eating food ('*') grows the snake ('O'); hitting a wall ('#') or itself
     // ends the game. Each tick the WHOLE grid is drawn as one OUTS string (rows split by '\n'), which
@@ -932,6 +944,7 @@ public static class Programs
         return image;
     }
 
+    // ===== SpawnChildren =====================================================
     // Parent forks three children with different lifetimes, then waits for all three.
     // Children output 1/2/3; parent outputs 0 last. Produces a 4-node tree.
     // WAIT clobbers EAX with the exit status, so each child PID is saved to a
@@ -996,6 +1009,7 @@ public static class Programs
         return asm.Build();
     }
 
+    // ===== StringsDemo =======================================================
     // Interactive guessing game. Secret = 42. Reads guesses via IN, prints a hint
     // code (1 = too low, 2 = too high) until the guess is correct, then prints it.
     // Prompts for a name, reads it via INS, echoes it back via OUTS. Demonstrates
@@ -1043,6 +1057,7 @@ public static class Programs
         return asm;
     }
 
+    // ===== GuessingGame ======================================================
     public static byte[] GuessingGame()
     {
         Assembler asm = new Assembler();

@@ -46,18 +46,20 @@ Key data the bridge maintains and renderers read:
 
 ## SpectreDashboard (SpectreDashboard.cs)
 
-Section markers (search `// ===== `) — use `Read(offset=N, limit=80)` to target reads:
+Section markers name their own methods — **Grep `// ===== <text>` to jump** (drift-proof); the `:N`
+line numbers below are a convenience, last synced 2026-07-05. `BuildScreen` gained **canvas mode** (§3):
+if the latest OUTS string contains `\n`, it shows that frame alone (2D block) instead of the joined log.
 
 | Section | Line |
 |---------|------|
 | Constructor | :39 |
-| Focus + I/O Helpers (ToggleIo, SubmitInput, CycleFocus, EnsureFocus) | :73 |
-| Staggered Loading + Run Loop (ScheduleStaggeredLoads, Run, Inject) | :143 |
-| Headless Testing Seams (RenderSnapshot, RenderSummary) | :259 |
-| Layout + Top-Level Render (BuildLayout, RenderInto, Panel) | :327 |
-| MLFQ + Buddy Panels (BuildProcessAndQueues, BuildQueues, BuildBuddyTree) | :470 |
-| Registers + Heap Panels (BuildRegisters, BuildHeap, BuildMapBar, BuildStats) | :589 |
-| Screen + Status (BuildScreen, FocusedName, BuildStatus) | :743 |
+| Focus + I/O Helpers (ToggleIo, SubmitInput, CycleFocus, EnsureFocus) | :79 |
+| Staggered Loading + Run Loop (ScheduleStaggeredLoads, Run, Inject, ForegroundSignal wiring) | :174 |
+| Headless Testing Seams (RenderSnapshot, RenderSummary) | :316 |
+| Layout + Top-Level Render (BuildLayout, RenderInto, Panel) | :384 |
+| MLFQ + Buddy Panels (BuildProcessAndQueues, BuildQueues, BuildBuddyTree) | :534 |
+| Registers + Heap Panels (BuildRegisters, BuildHeap, BuildMapBar, BuildStats) | :732 |
+| Screen + Status (BuildScreen — **canvas mode** —, FocusedName, BuildStatus) | :913 |
 
 ### Constructor
 ```csharp

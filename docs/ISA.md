@@ -203,6 +203,9 @@ These instructions are available to user-mode processes. They trap into the priv
 | `WAIT reg` | 0x36 | `Wait(reg)` | `IvtWait` | Block until the child with PID `reg[reg]` terminates. Its exit status is delivered in EAX. Returns immediately if the child is already a zombie. |
 | `EXIT reg` | 0x37 | `Exit(reg)` | `IvtHalt` | Terminate the running process with exit status `reg[reg]`. Same tear-down as HLT. |
 | `SETFOCUS reg` | 0x38 | `SetFocus(reg)` | (C# path) | Make the process with PID `reg[reg]` the foreground (focused) process. The live keyboard and screen follow it. A no-op if the PID is not a live process. |
+| `KILL pidReg, sigReg` | 0x39 | `Kill(pidReg, sigReg)` | `IvtKill` | Send signal `reg[sigReg]` to the process with PID `reg[pidReg]`. Signals: `Term`(1)/`Kill`(2) tear the target down (running the same teardown as EXIT, via a temporary `CurrentIndex` swap; suicide routes to `exit_body`); `Stop`(3) sets the target's `Stopped` flag (orthogonal to `State`, so even a Blocked process can be stopped) and wakes a `WAIT`-ing parent with status −2 (WUNTRACED) without reaping; `Cont`(4) clears the flag. EAX ← 0 delivered / −1 no-such-PID (suppressed when the terminal-initiated `KillNoDeliver` flag is set — a keypress has no killer process to deliver to). |
+| `REAP pidReg` | 0x3A | `Reap(pidReg)` | `IvtReap` | Non-blocking reap: scan for a terminated child (PID `reg[pidReg]`, or any child if 0). EAX ← the reaped PID (0 if none ready), EDX ← its exit status. Unlike `WAIT`, never blocks — the shell uses it to drain finished background jobs. |
+| `SIGACTION` | 0x3B | *(reserved)* | *(reserved)* | Reserved opcode for installing a catchable-signal handler (documented, unimplemented). |
 
 ### OS / privileged support
 
@@ -459,7 +462,7 @@ The C# `Hardware` class implements a software MMU that translates user-mode data
 Key constants:
 - `PageSize = 256` bytes (= `BuddyDefaultMinBlock`)
 - `MaxPagesPerProcess = 128` (32 KiB of mappable virtual space per process)
-- `IvtPageFault = 15`; `IvtSlotCount = 20`; `OsLayout.CodeBase = 80` (= `IvtSlotCount * 4`)
+- `IvtPageFault = 15`; `IvtSlotCount = 22`; `OsLayout.CodeBase = 88` (= `IvtSlotCount * 4`). Slots 20 (`IvtReap`) and 21 (`IvtKill`) were added by the job-control work (see the `REAP`/`KILL` opcodes above).
 - PTE encodings: `>= 0` resident (physical frame base); `-1` unmapped (a user access is a protection fault, not a linear fallback); `-2` non-resident RAM-home; `<= -3` non-resident swap-backed (`SwapPte`); `<= -4096` copy-on-write share (`CowPte`)
 - Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 1024` swap slots (total: 1088 slots) — the filesystem's file-block region (below) is a separate address space and does not consume slots.
 - Kernel-mediated user-memory access: `IvtEnsureUserPage = 19` / `Hardware.UserToPhysical(va, isWrite)` synchronously faults in or COW-resolves one user page on demand, outside the normal instruction-level MMU path — used by the `FSYS` read/write wrapper (see [Filesystem](#filesystem)) to translate a user buffer one page-chunk at a time.
