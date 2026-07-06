@@ -264,6 +264,7 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
     FsImage.WriteFile(hw, "/bin/mkdir", Programs.Mkdir());
     FsImage.WriteFile(hw, "/bin/echo", Programs.Echo());
     FsImage.WriteFile(hw, "/bin/help", Programs.Help());
+    FsImage.WriteFile(hw, "/bin/edit", Programs.Edit());   // §4.0: author a source file (end input with ".")
     FsImage.WriteFile(hw, "/bin/counter", Programs.CounterToTen());
     FsImage.WriteFile(hw, "/bin/average", Programs.AverageOfList());
     FsImage.WriteFile(hw, "/bin/guess", Programs.GuessingGame());

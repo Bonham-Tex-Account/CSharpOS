@@ -28,6 +28,7 @@ marker and `Read(offset=…, limit=…)`** — never read the whole file.
 | `SpawnChildren` | demo | parent FORKs 3 children → process-tree demo |
 | `FilesystemDemo` | FS demo | creates a file, FSYS write/read, prints "HI!" from disk |
 | `Ls` / `Cat` / `Rm` / `Mkdir` / `Echo` / `Help` | **/bin programs** | the shell's command programs (argv ABI: EAX=argc, EBX=argv). Installed into `/bin` by `RunShell` |
+| `Edit` | **/bin program (§4.0)** | `edit <file>` — a line editor: INS lines → append each + `\n` to the file (FSYS write), a lone `.` ends input. The source-authoring brick for the write→compile→run toolchain; content is word-per-char (what a future `/bin/as` reads). Installed by `RunShell` |
 | **`Shell`** | shell (§2 + §2.5) | the interactive shell. ~340 lines. prompt→INS→`&`-detect→FORK→exec / builtins. Builtins: `jobs`/`kill`/`stop`/`bg`/`fg` (job control). Grep internal ISA labels: `drain`, `amp`, `parent`, `do_jobs`/`do_kill`/`do_stop`/`do_bg`/`do_fg`, helpers `cmd_is`/`parse_uint`/`job_lookup`/`job_clear`. DATA offsets: strings @1024+, LineBuf @1408, JobsBase @1664 |
 | **`Snake`** | game (§3) | the snake game. ~240 lines. W=8×H=8 grid, life-countdown body, INPOLL arrows, LCG food, whole-grid OUTS/frame. Grep internal labels: `main`, `move`, `nogrow`, `dead`, `place_food`, `render`, `border`. DATA: state @2048, GRID @2112, REND @2624. Local C# helpers `Ld`/`StR`/`StI`/`EmitR11` |
 
