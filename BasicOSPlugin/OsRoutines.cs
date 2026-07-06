@@ -77,6 +77,7 @@ public static partial class OsRoutines
         int wait          = OsLayout.CodeBase + asm.CodeLength; EmitWait(asm);
         int reap          = OsLayout.CodeBase + asm.CodeLength; EmitReap(asm);
         int kill          = OsLayout.CodeBase + asm.CodeLength; EmitKill(asm);
+        int sigReturn     = OsLayout.CodeBase + asm.CodeLength; EmitSigReturn(asm);
         int syscall       = OsLayout.CodeBase + asm.CodeLength; EmitSyscall(asm);
         int pageFault     = OsLayout.CodeBase + asm.CodeLength; EmitPageFault(asm);
         EmitPageIn(asm);          // shared subroutine "page_in"; ends with Ret
@@ -88,6 +89,7 @@ public static partial class OsRoutines
         int fsSyscall     = OsLayout.CodeBase + asm.CodeLength; EmitFsSyscall(asm);
         EmitExitBody(asm);      // shared label "exit_body" (HLT/EXIT/fault tail)
         EmitTeardownReap(asm);  // shared subroutine "teardown_reap" (CALL/RET; exit_body + kill_core)
+        EmitSignalSubroutines(asm); // shared subroutine "sig_copy" (CALL/RET; kill_core + sigreturn)
         EmitAllocSub(asm);      // shared subroutine "alloc_sub"; ends with Ret
         EmitBuddyFree(asm);     // label "buddy_free_entry"; ends with Jmp("resume_mlfq")
         EmitReleaseFrames(asm); // shared subroutine "release_frames"; ends with Ret
@@ -141,6 +143,7 @@ public static partial class OsRoutines
         WriteWord(image, Hardware.IvtFsOp * 4,               fsOp);
         WriteWord(image, Hardware.IvtFsSyscall * 4,          fsSyscall);
         WriteWord(image, Hardware.IvtEnsureUserPage * 4,     ensureUserPageOp);
+        WriteWord(image, Hardware.IvtSigReturn * 4,          sigReturn);
 
         // Default every process's copy-on-write partner to -1 (none) in the image itself, so
         // even minimal hand-seeded test images (which skip SeedOsData) never see a process
@@ -622,10 +625,13 @@ public static partial class OsRoutines
         asm.Load(R(R10), R(EAX));                  // R10 = signal
         asm.MovImm(R(R11), Hardware.SigTerm);
         asm.Cmp(R(R10), R(R11));
-        asm.Jz("kl_term");
+        asm.Jz("kl_catch");                        // SigTerm is catchable: handler, else default teardown
+        asm.MovImm(R(R11), Hardware.SigInt);
+        asm.Cmp(R(R10), R(R11));
+        asm.Jz("kl_catch");                        // SigInt is catchable (Ctrl-C)
         asm.MovImm(R(R11), Hardware.SigKill);
         asm.Cmp(R(R10), R(R11));
-        asm.Jz("kl_term");
+        asm.Jz("kl_term");                         // SigKill is uncatchable: always teardown
         asm.MovImm(R(R11), Hardware.SigStop);
         asm.Cmp(R(R10), R(R11));
         asm.Jz("kl_stop");
@@ -633,6 +639,68 @@ public static partial class OsRoutines
         asm.Cmp(R(R10), R(R11));
         asm.Jz("kl_cont");
         asm.Jmp("kl_deliver_ok");                  // unknown signal: no-op, deliver 0
+
+        // kl_catch: a catchable signal (SigTerm/SigInt). If the target installed a handler (SIGACTION),
+        // deliver to it — snapshot the target's register file into SignalSave, redirect its saved EIP to
+        // the handler, mark it in-handler + runnable — instead of the default teardown. No handler →
+        // fall through to kl_term (default action = teardown, status -1). Already inside a handler
+        // (InHandler=1) → leave the signal pending, delivered when the handler SIGRETURNs.
+        //   Live here: R8=target pid, R9=target index, R10=sig, ECX=killer index.
+        asm.Label("kl_catch");
+        EntryAddress(asm, R9, R15);                          // R15 = target entry
+        LoadField(asm, R15, Hardware.ProcessEntrySigHandler, R11);
+        asm.MovImm(R(R12), 0);
+        asm.Cmp(R(R11), R(R12));
+        asm.Jz("kl_term");                                  // no handler → default action
+        LoadField(asm, R15, Hardware.ProcessEntryInHandler, R12);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R12), R(EAX));
+        asm.Jnz("kl_defer");                                // mid-handler → queue as pending
+        // If we are signalling ourselves (killer == target — e.g. Ctrl-C to the running foreground
+        // process), the live context is only in the HW capture buffer; persist it into the entry with
+        // SaveRegs so the snapshot is the true pre-signal state.
+        asm.Cmp(R(ECX), R(R9));
+        asm.Jnz("kl_catch_snap");
+        asm.SaveRegs(R(R15));
+        asm.Label("kl_catch_snap");
+        SetupPrivilegedStack(asm);
+        // Snapshot entry.registerFile (offset 0) → SignalSave[targetIndex]. R13=src, R14=dst.
+        asm.Mov(R(R13), R(R15));
+        asm.Mov(R(R14), R(R9));
+        asm.MovImm(R(EAX), OsLayout.SignalSaveStride);       // 96 (< 256 → 8-bit immediate is safe)
+        asm.Mul(R(R14), R(EAX));
+        Imm16(asm, EAX, OsLayout.SignalSaveBase);
+        asm.Add(R(R14), R(EAX));
+        asm.Call("sig_copy");
+        // Redirect the target's saved EIP to the handler; mark in-handler and runnable. (Only the
+        // register file is saved/restored, not State — a Blocked target thus restarts its syscall
+        // after the handler, EINTR-style.)
+        LoadField(asm, R15, Hardware.ProcessEntrySigHandler, R11);
+        StoreFieldReg(asm, R15, EipSlot, R11);
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryInHandler, 1);
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryState, Ready);
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryStopped, 0);
+        // Self → resume the target (self) directly at the handler. Other → deliver 0 to the killer and
+        // let the target run its handler when next scheduled.
+        asm.Cmp(R(ECX), R(R9));
+        asm.Jnz("kl_catch_other");
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryPriority, 0);
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryTicksUsed, 0);
+        asm.LoadRegs(R(R15));
+        asm.SetLayout(R(R15));
+        LoadField(asm, R15, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+        asm.Label("kl_catch_other");
+        EntryAddress(asm, ECX, EBX);                        // EBX = killer entry (for delivery)
+        asm.Jmp("kl_deliver_ok");
+
+        // kl_defer: the target is mid-handler; queue the signal as pending (one slot — a later signal
+        // overwrites it). Deliver 0 to the killer (or, if self, resume self unchanged — the pending
+        // signal fires on this handler's SIGRETURN).
+        asm.Label("kl_defer");
+        StoreFieldReg(asm, R15, Hardware.ProcessEntrySigPending, R10);
+        EntryAddress(asm, ECX, EBX);                        // EBX = killer entry
+        asm.Jmp("kl_deliver_ok");
 
         asm.Label("kl_term");
         // Suicide (killer == target) is exactly EXIT: set our own status and fall into exit_body.
@@ -746,6 +814,76 @@ public static partial class OsRoutines
         asm.SetLayout(R(EBX));
         LoadField(asm, EBX, Hardware.ProcessEntryLevel, EAX);
         asm.OsRet(R(EAX));
+    }
+
+    // ===== EmitSigReturn =====================================================
+    // IvtSigReturn: return from a catchable-signal handler (Shell §2.5 job control, JC-E). The running
+    // process executed SIGRETURN. Restore its pre-signal register file from SignalSave, clear the
+    // in-handler flag, and — if a signal was left pending during the handler — immediately re-deliver
+    // it (re-snapshot the just-restored context, redirect to the handler again). Then resume.
+    //   Scratch: EAX/EBX/ECX/R9/R11/R12/R13/R14/R15 (+ sig_copy). Never returns (OSRETs).
+    private static void EmitSigReturn(Assembler asm)
+    {
+        Imm16(asm, EAX, OsLayout.CurrentIndexOffset);
+        asm.Load(R(ECX), R(EAX));                            // ECX = running (returning) index
+        EntryAddress(asm, ECX, R15);                         // R15 = entry
+        SetupPrivilegedStack(asm);
+        // Restore SignalSave[ECX] → entry.registerFile. R13=src, R14=dst.
+        asm.Mov(R(R13), R(ECX));
+        asm.MovImm(R(EAX), OsLayout.SignalSaveStride);
+        asm.Mul(R(R13), R(EAX));
+        Imm16(asm, EAX, OsLayout.SignalSaveBase);
+        asm.Add(R(R13), R(EAX));                             // src = &SignalSave[ECX]
+        asm.Mov(R(R14), R(R15));                             // dst = entry (register file at offset 0)
+        asm.Call("sig_copy");
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryInHandler, 0);
+        // Pending signal queued during the handler? Re-deliver it (handler is still installed).
+        LoadField(asm, R15, Hardware.ProcessEntrySigPending, R9);
+        asm.MovImm(R(EAX), 0);
+        asm.Cmp(R(R9), R(EAX));
+        asm.Jz("sr_resume");
+        StoreFieldImm(asm, R15, Hardware.ProcessEntrySigPending, 0);
+        // Re-snapshot the restored context → SignalSave[ECX], then redirect to the handler.
+        asm.Mov(R(R13), R(R15));
+        asm.Mov(R(R14), R(ECX));
+        asm.MovImm(R(EAX), OsLayout.SignalSaveStride);
+        asm.Mul(R(R14), R(EAX));
+        Imm16(asm, EAX, OsLayout.SignalSaveBase);
+        asm.Add(R(R14), R(EAX));
+        asm.Call("sig_copy");
+        LoadField(asm, R15, Hardware.ProcessEntrySigHandler, R11);
+        StoreFieldReg(asm, R15, EipSlot, R11);
+        StoreFieldImm(asm, R15, Hardware.ProcessEntryInHandler, 1);
+        asm.Label("sr_resume");
+        asm.LoadRegs(R(R15));
+        asm.SetLayout(R(R15));
+        LoadField(asm, R15, Hardware.ProcessEntryLevel, EAX);
+        asm.OsRet(R(EAX));
+    }
+
+    // ===== EmitSignalSubroutines =============================================
+    // sig_copy: copy one register file (SignalSaveStride bytes) from R13 (src) to R14 (dst). CALL/RET;
+    // requires the privileged stack. Clobbers EAX/R11/R12; preserves R13/R14 (bases; the loop indexes
+    // with R12). Used by kill_core (snapshot) and sigreturn (restore + re-snapshot).
+    private static void EmitSignalSubroutines(Assembler asm)
+    {
+        asm.Label("sig_copy");
+        asm.MovImm(R(R12), 0);                               // byte offset
+        asm.Label("sc_loop");
+        asm.MovImm(R(R11), OsLayout.SignalSaveStride);       // 96 (< 256 → 8-bit immediate is safe)
+        asm.Cmp(R(R12), R(R11));
+        asm.Jns("sc_done");
+        asm.Mov(R(EAX), R(R13));
+        asm.Add(R(EAX), R(R12));
+        asm.Load(R(R11), R(EAX));                            // R11 = *(src + off)
+        asm.Mov(R(EAX), R(R14));
+        asm.Add(R(EAX), R(R12));
+        asm.Store(R(EAX), R(R11));                           // *(dst + off) = R11
+        asm.MovImm(R(R11), 4);
+        asm.Add(R(R12), R(R11));
+        asm.Jmp("sc_loop");
+        asm.Label("sc_done");
+        asm.Ret();
     }
 
     // ===== EmitSyscall =======================================================

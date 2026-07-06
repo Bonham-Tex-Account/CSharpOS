@@ -356,13 +356,32 @@ public static class OsLayout
     public const int KillNoDeliver    = JobCtlBase + 8;
     public const int JobCtlWords      = 3;
 
+    // Signal-handler save area (Shell §2.5 JC-E). When a catchable signal (SigTerm/SigInt) is
+    // delivered to a process that installed a handler via SIGACTION, kill_core snapshots that
+    // process's register file AND its privilege level into its slot here before redirecting it to
+    // the handler; SIGRETURN restores them and resumes the interrupted instruction. The level must
+    // be saved too: while the process runs its handler, an unrelated OS routine (e.g. IvtWakeOutput
+    // after an OUT) can SaveRegs its mid-syscall context into the entry, clobbering entry.Level to
+    // Kernel — so restoring only the register file would make SIGRETURN's OsRet resume at the wrong
+    // (kernel) base. SignalSaveStride therefore spans the entry from the register file through the
+    // level field (= Hardware.ProcessEntryState, the offset just past Level). One slot per process.
+    public const int SignalSaveBase   = JobCtlBase + JobCtlWords * 4;
+    public const int SignalSaveStride = Hardware.ProcessEntryState;
+    public const int SignalSaveSize   = MaxProcesses * SignalSaveStride;
+
     public static int OftAddress(int index)
     {
         return OftBase + index * OftEntryBytes;
     }
 
+    // Absolute address of process slot `index`'s signal-save register file.
+    public static int SignalSaveAddress(int index)
+    {
+        return SignalSaveBase + index * SignalSaveStride;
+    }
+
     // Total OS region size.
-    public const int TotalSize = JobCtlBase + JobCtlWords * 4;
+    public const int TotalSize = SignalSaveBase + SignalSaveSize;
 
     // Absolute address of cache slot `i`.
     public static int CacheSlotAddress(int i)

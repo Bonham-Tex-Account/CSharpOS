@@ -302,6 +302,19 @@ public sealed partial class Assembler
         Emit(Instruction.KILL, (byte)targetPid, (byte)sig, 0);
     }
 
+    // Install reg[handler] as this process's catchable-signal handler vaddr (0 clears it); reg[sig]
+    // selects the signal (v1 has a single handler covering the catchable signals). (Shell §2.5 JC-E.)
+    public void Sigaction(RegisterName sig, RegisterName handler)
+    {
+        Emit(Instruction.SIGACTION, (byte)sig, (byte)handler, 0);
+    }
+
+    // Return from a signal handler: restore the pre-signal context and resume it. (Shell §2.5 JC-E.)
+    public void SigReturn()
+    {
+        Emit(Instruction.SIGRETURN, 0, 0, 0);
+    }
+
     /// <summary>Reserves a 4-byte zero-initialized slot in the data section, addressable by <paramref name="name"/>.</summary>
     public void DataInt(string name)
     {
