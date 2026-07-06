@@ -47,7 +47,9 @@
       "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter SignalTests)",
       "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter DisassemblerTests)",
       "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter KillTests)",
-      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter FrameHistoryTests)"
+      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter FrameHistoryTests)",
+      "Bash(awk 'NR>2 {printf \"%s %s\\\\n\", $1-24576, $2}')",
+      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter FsToolchainTests)"
     ]
   }
 }

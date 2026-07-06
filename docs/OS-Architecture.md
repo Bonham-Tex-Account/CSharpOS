@@ -70,9 +70,9 @@ At boot, `Hardware.ReserveOsMemory(OsLayout.TotalSize)` places the OS at address
 ```
 Address 0
 +------------------------------------------------------------+
-| Interrupt Vector Table (IVT)                               |  88 bytes (22 × 4)
+| Interrupt Vector Table (IVT)                               |  92 bytes (23 × 4)
 +------------------------------------------------------------+  offset 0x000 (= 0)
-| OS code (assembled ISA routines)                           |  starts at OsLayout.CodeBase = 88
+| OS code (assembled ISA routines)                           |  starts at OsLayout.CodeBase = 92
 |   ContextSwitch, Halt, InvalidInstruction, WakeInput,      |
 |   WakeOutput, Block, Schedule, BuddyAlloc,                 |
 |   Fork, Exec, Wait, Spawn, Syscall, PageFault, WakeKey,    |
@@ -88,12 +88,13 @@ Address 0
 |     close_core, oft_from_fd/fs_grow_chain/fs_read_core/   |
 |     fs_write_core, fs_exec_core, fs_load_image,            |
 |   exec_next_token/exec_build_argv (Shell §2 argv),         |
-|   reap, kill_core, teardown_reap (Shell §2.5 job control), |
+|   reap, kill_core, teardown_reap, sigreturn, sig_copy      |
+|     (Shell §2.5 job control + catchable signals),          |
 |   user_word_addr, resume_mlfq                              |
 +------------------------------------------------------------+  up to OsLayout.DataBase = 24576
 | OS data section (runtime-seeded by C#)                     |  starts at OsLayout.DataBase = 24576
 |   Scheduler state header (48 bytes)                        |
-|   Process table  (8 × 200 = 1600 bytes)                   |
+|   Process table  (8 × 208 = 1664 bytes)                   |
 |   Buddy bitmap   (8 × 4 = 32 bytes)                        |
 |   Privileged scratch stack (64 bytes)                      |
 |   Page tables    (8 processes × 128 PTEs × 4 = 4096 bytes)|
@@ -111,8 +112,9 @@ Address 0
 |   FSYS-exec argv staging (131 words, Shell §2)            |
 |   FS program-install staging (20+63 words, Phase 4)       |
 |   Job-control region (KillSig/SaveIndex/NoDeliver, §2.5)  |
+|   Signal save area (8 × 100 = 800 bytes, JC-E)            |
 +------------------------------------------------------------+
-| (total OS region)                                          |  OsLayout.TotalSize = 36996 bytes
+| (total OS region)                                          |  OsLayout.TotalSize = 37860 bytes
 +------------------------------------------------------------+  <-- heap start (process allocations)
 ```
 
@@ -129,29 +131,30 @@ Address 0
 | BuddyMinBlock | +36 | 4 | Minimum allocatable block size in bytes (default: 256). |
 | BuddyLevels | +40 | 4 | Buddy tree depth = log2(HeapSize / MinBlock). |
 | NextPid | +44 | 4 | Monotonic PID counter; incremented each time a process is created. Starts at 1 (0 = "no process"). |
-| ProcessTable | +48 | 1600 | 8 entries × 200 bytes (see entry layout below). |
-| BuddyBitmap | +1648 | 32 | 8 × 32-bit words; 1 bit per buddy tree node (1=free, 0=used/split). |
-| PrivilegedStack | +1680 | 64 | Scratch stack for CALL/RET within the atomic OS routines. |
-| PageTables | +1744 | 4096 | 8 processes × 128 PTEs × 4 bytes. PTE ≥ 0: resident frame base. PTE = −1: unmapped (a user access is a protection fault — see [Address translation (MMU)](#address-translation-mmu)). PTE = −2: non-resident RAM-home. PTE ≤ −3: non-resident swap-backed. PTE ≤ −4096: copy-on-write share. |
-| FrameTable | +5840 | 128 | 4 frames × 32 bytes each (see frame table layout below). |
-| FramePool | +5968 | 1024 | 4 frames × 256 bytes. Frame f lives at `FramePoolBase + f * PageSize`. |
-| ZeroPage | +6992 | 256 | Always-zero OS scratch page; `DWRITE` source when zeroing a swap slot. |
-| SwapScratch | +7248 | 256 | Transfer page for fork's per-slot deep-copy (DREAD src → scratch, DWRITE scratch → dst). |
-| CowPartners | +7504 | 32 | 8 × 4 bytes. `CowPartner[i]` = the partner process-table slot index, or −1 when no COW share is active. |
-| CacheHeader | +7536 | 12 | Clock counter, flush timer, and the `IvtCacheOp`/`IvtFsOp` result slot (4 bytes each). |
-| CacheSlotTable | +7548 | 3588 | 13 cache slots × 276 bytes each (see [Write-back buffer cache](#write-back-buffer-cache)). |
-| FsResult | +11136 | 4 | Result of the last `IvtFsOp`/`IvtFsSyscall` dispatch. |
-| FsScratch | +11140 | 40 | 10 words of directory-layer scratch (name/hash/type/first/dir/entryBlock/freeBlock/argA/argB + one spare). |
-| FsPath | +11180 | 60 | Path-resolve loop state (cursor, current dir, last-component flag) + a 12-word extracted-component buffer. |
-| Oft | +11240 | 192 | Open-file table: 8 entries × 24 bytes (see [Open-file table and file syscalls](#open-file-table-and-file-syscalls)). |
-| FsOpen | +11432 | 32 | `fs_open_core` spill scratch (absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset). |
-| FsRw | +11464 | 48 | `fs_read_core`/`fs_write_core` spill scratch (fd/buf/count/proc/oft/curBlock/remaining/charInBlock/bufPtr/copied/counter). |
-| PageXlate | +11512 | 8 | `user_word_addr` spill scratch (offset, page) — one virtual word address being translated at a time. |
-| EnsureUserPage | +11520 | 8 | C#↔ISA handoff for `IvtEnsureUserPage`: `Hardware.UserToPhysical` writes IsWrite before dispatch and reads Result after the routine returns. |
-| FsWrap | +11528 | 24 | `fsy_read`/`fsy_write` page-chunk loop scratch (fd/ptr/remaining/copied/isWrite/chunk) — walks a user buffer one page-chunk at a time, translating each chunk via `user_word_addr` before delegating to `fs_read_core`/`fs_write_core`. |
-| FsArgv | +11552 | 524 | **Exec argv staging (Shell §2):** the captured command line (`FsArgvCmd`, 63 words) plus one extracted token buffer and tokenizer bookkeeping. `fsy_exec` copies the whole command line here via `user_word_addr` *before* teardown, then `exec_next_token`/`exec_build_argv` split it into `argv`. |
-| InstallPath / InstallBuf | +12076 / +12156 | 80 / 252 | Phase 4 program-install staging: an absolute path buffer (`"/bin/p<seq>"`) and a one-block transfer buffer used by `LoadProcess` to write a program's bytes into the filesystem in block-sized chunks. |
-| JobCtl | +12408 | 12 | **Job control (Shell §2.5):** `KillSig` (the signal being delivered), `KillSaveIndex` (scratch for the temporary `CurrentIndex` swap in `kill_core`), and `KillNoDeliver` (set for terminal-initiated Ctrl-C/Ctrl-Z signals that have no killer process to receive a return value). |
+| ProcessTable | +48 | 1664 | 8 entries × 208 bytes (see entry layout below). |
+| BuddyBitmap | +1712 | 32 | 8 × 32-bit words; 1 bit per buddy tree node (1=free, 0=used/split). |
+| PrivilegedStack | +1744 | 64 | Scratch stack for CALL/RET within the atomic OS routines. |
+| PageTables | +1808 | 4096 | 8 processes × 128 PTEs × 4 bytes. PTE ≥ 0: resident frame base. PTE = −1: unmapped (a user access is a protection fault — see [Address translation (MMU)](#address-translation-mmu)). PTE = −2: non-resident RAM-home. PTE ≤ −3: non-resident swap-backed. PTE ≤ −4096: copy-on-write share. |
+| FrameTable | +5904 | 128 | 4 frames × 32 bytes each (see frame table layout below). |
+| FramePool | +6032 | 1024 | 4 frames × 256 bytes. Frame f lives at `FramePoolBase + f * PageSize`. |
+| ZeroPage | +7056 | 256 | Always-zero OS scratch page; `DWRITE` source when zeroing a swap slot. |
+| SwapScratch | +7312 | 256 | Transfer page for fork's per-slot deep-copy (DREAD src → scratch, DWRITE scratch → dst). |
+| CowPartners | +7568 | 32 | 8 × 4 bytes. `CowPartner[i]` = the partner process-table slot index, or −1 when no COW share is active. |
+| CacheHeader | +7600 | 12 | Clock counter, flush timer, and the `IvtCacheOp`/`IvtFsOp` result slot (4 bytes each). |
+| CacheSlotTable | +7612 | 3588 | 13 cache slots × 276 bytes each (see [Write-back buffer cache](#write-back-buffer-cache)). |
+| FsResult | +11200 | 4 | Result of the last `IvtFsOp`/`IvtFsSyscall` dispatch. |
+| FsScratch | +11204 | 40 | 10 words of directory-layer scratch (name/hash/type/first/dir/entryBlock/freeBlock/argA/argB + one spare). |
+| FsPath | +11244 | 60 | Path-resolve loop state (cursor, current dir, last-component flag) + a 12-word extracted-component buffer. |
+| Oft | +11304 | 192 | Open-file table: 8 entries × 24 bytes (see [Open-file table and file syscalls](#open-file-table-and-file-syscalls)). |
+| FsOpen | +11496 | 32 | `fs_open_core` spill scratch (absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset). |
+| FsRw | +11528 | 48 | `fs_read_core`/`fs_write_core` spill scratch (fd/buf/count/proc/oft/curBlock/remaining/charInBlock/bufPtr/copied/counter). |
+| PageXlate | +11576 | 8 | `user_word_addr` spill scratch (offset, page) — one virtual word address being translated at a time. |
+| EnsureUserPage | +11584 | 8 | C#↔ISA handoff for `IvtEnsureUserPage`: `Hardware.UserToPhysical` writes IsWrite before dispatch and reads Result after the routine returns. |
+| FsWrap | +11592 | 24 | `fsy_read`/`fsy_write` page-chunk loop scratch (fd/ptr/remaining/copied/isWrite/chunk) — walks a user buffer one page-chunk at a time, translating each chunk via `user_word_addr` before delegating to `fs_read_core`/`fs_write_core`. |
+| FsArgv | +11616 | 524 | **Exec argv staging (Shell §2):** the captured command line (`FsArgvCmd`, 63 words) plus one extracted token buffer and tokenizer bookkeeping. `fsy_exec` copies the whole command line here via `user_word_addr` *before* teardown, then `exec_next_token`/`exec_build_argv` split it into `argv`. |
+| InstallPath / InstallBuf | +12140 / +12220 | 80 / 252 | Phase 4 program-install staging: an absolute path buffer (`"/bin/p<seq>"`) and a one-block transfer buffer used by `LoadProcess` to write a program's bytes into the filesystem in block-sized chunks. |
+| JobCtl | +12472 | 12 | **Job control (Shell §2.5):** `KillSig` (the signal being delivered), `KillSaveIndex` (scratch for the temporary `CurrentIndex` swap in `kill_core`), and `KillNoDeliver` (set for terminal-initiated Ctrl-C/Ctrl-Z signals that have no killer process to receive a return value). |
+| SignalSave | +12484 | 800 | **Catchable signals (JC-E):** 8 per-process slots of 100 bytes (register file + privilege level). On delivery `kill_core` snapshots the interrupted context here and redirects the process to its handler; `SIGRETURN` restores it. Saving the level too is essential — see [Job control and signals](#job-control-and-signals). |
 
 **Frame table entry layout (32 bytes, one entry per physical frame):**
 
@@ -220,8 +223,10 @@ Each entry is 200 bytes. Source: `Hardware.ProcessEntry*` constants.
 | 156 | 4 | FirstBlock | First data block of the process's program image in the filesystem's block chain, or −1 if the process is slot-backed (`DiskSlot >= 0`). `IvtSpawn` branches on `DiskSlot`: `>= 0` DREADs the disk slot; `< 0` chain-loads the image from `FirstBlock` via `fs_load_image`. |
 | 160 | 32 | FdTable | 8 × 4-byte file descriptor → device-id/OFT mappings. fd 0 = stdin, fd 1 = stdout, fd 2–7 hold `OFT index + 1` for open files (0 = free — a zeroed table means no open files, no seeding required). |
 | 192 | 4 | Stopped | Job-control stop flag (0/1). Orthogonal to `State`, so even a Blocked process can be stopped; the scheduler (`resume_mlfq`) skips any entry with `Stopped = 1`. Set by `SIGSTOP`, cleared by `SIGCONT`. |
-| 196 | 4 | SigHandler | Reserved catchable-signal handler virtual address; unused until the (deferred) `SIGACTION` work. |
-| **200** | — | *(total)* | `ProcessEntrySize = 200` |
+| 196 | 4 | SigHandler | Catchable-signal handler virtual address (0 = none), installed by `SIGACTION`; `SIGTERM`/`SIGINT` are delivered here instead of the default action. |
+| 200 | 4 | SigPending | A catchable signal that arrived while the process was already in its handler; re-delivered on `SIGRETURN` (0 = none). |
+| 204 | 4 | InHandler | 1 while the process is executing its signal handler, so a second catchable signal defers (sets SigPending) rather than re-entering. |
+| **208** | — | *(total)* | `ProcessEntrySize = 208` |
 
 The register-file region (offset 0–95) is the save area written by `SAVEREGS` and read by `LOADREGS`. Because EIP is stored as a base-relative offset, the same saved context works after a `FORK` (the child's copy is at a different physical base but the offset is unchanged).
 
@@ -273,7 +278,7 @@ Atomic OS-routine instructions (those running with interrupts masked) are never 
 
 ## Interrupt vector table (IVT) and dispatch model
 
-The IVT occupies the first 88 bytes of the OS region (`IvtSlotCount = 22` slots × 4 bytes, `IvtSize = 88`). Each slot holds the absolute address of the corresponding OS routine. Hardware reads slot `s` as `ReadWord(0 + s * 4)` and jumps there in Kernel mode. Slot `IvtSyscall` is special: `EnterKernel` jumps there directly **without** masking interrupts (so the syscall handler stays preemptible), while all other dispatched routines — including `IvtFsSyscall`, which `FSYS` reaches via the ordinary atomic `DispatchOsRoutine` path (the same mechanism as `FORK`/`EXEC`/`WAIT`/`EXIT`, not `EnterKernel`) — mask interrupts and run atomically.
+The IVT occupies the first 92 bytes of the OS region (`IvtSlotCount = 23` slots × 4 bytes, `IvtSize = 92`). Each slot holds the absolute address of the corresponding OS routine. Hardware reads slot `s` as `ReadWord(0 + s * 4)` and jumps there in Kernel mode. Slot `IvtSyscall` is special: `EnterKernel` jumps there directly **without** masking interrupts (so the syscall handler stays preemptible), while all other dispatched routines — including `IvtFsSyscall`, which `FSYS` reaches via the ordinary atomic `DispatchOsRoutine` path (the same mechanism as `FORK`/`EXEC`/`WAIT`/`EXIT`, not `EnterKernel`) — mask interrupts and run atomically.
 
 `SETFOCUS` (0x38) is intentionally C#-only (`Hardware.SetFocus`) — it has no IVT slot or ISA routine, because "focused process" is a hardware-side field with no OS-memory representation.
 
@@ -308,9 +313,10 @@ The IVT occupies the first 88 bytes of the OS region (`IvtSlotCount = 22` slots 
 | 18 | FsSyscall | `FSYS` instruction (dispatched atomically, like `FORK`/`EXEC`/`WAIT`/`EXIT` — not via `EnterKernel`) |
 | 19 | EnsureUserPage | `Hardware.UserToPhysical` (C#), used by the `FSYS` read/write wrapper (`user_word_addr`) to fault in or COW-resolve one user page synchronously, outside the normal per-instruction MMU path |
 | 20 | Reap | `REAP` instruction — non-blocking reap of a terminated child (dispatched atomically, like `FORK`) |
-| 21 | Kill | `KILL` instruction, and the terminal `ForegroundSignal` interrupt (Ctrl-C/Ctrl-Z) — signal a process (TERM/KILL/STOP/CONT) |
+| 21 | Kill | `KILL` instruction, and the terminal `ForegroundSignal` interrupt (Ctrl-C/Ctrl-Z) — signal a process (TERM/KILL/STOP/CONT/INT); delivers a catchable signal to an installed handler or runs the default action |
+| 22 | SigReturn | `SIGRETURN` instruction — return from a catchable-signal handler: restore the saved context (register file + level) and resume |
 
-The dead `IvtDiskLoad` slot (a leftover from an earlier C#-driven load path, never dispatched) was removed and slots 9–18 renumbered down by one; `IvtEnsureUserPage` was then added as slot 19. The job-control work (see [Job control and signals](#job-control-and-signals)) then appended slots 20 (`IvtReap`) and 21 (`IvtKill`), bringing `IvtSlotCount` to 22.
+The dead `IvtDiskLoad` slot (a leftover from an earlier C#-driven load path, never dispatched) was removed and slots 9–18 renumbered down by one; `IvtEnsureUserPage` was then added as slot 19. The job-control work (see [Job control and signals](#job-control-and-signals)) then appended slots 20 (`IvtReap`), 21 (`IvtKill`), and 22 (`IvtSigReturn`), bringing `IvtSlotCount` to 23.
 
 ---
 
@@ -384,7 +390,7 @@ The buddy allocator manages physical RAM above the OS region. It is implemented 
 2. Set the node's bit to 1 (free).
 3. Merge loop: if the buddy node is also free, clear both, set their parent free, ascend. Repeat until root or buddy is used.
 
-**Default parameters:** `BuddyDefaultMinBlock = 256` bytes. `OsLayout.TotalSize = 36996` bytes. Tests commonly size a machine as `Test.MinMachineSize = OsLayout.TotalSize + 4096` (see `OSTests/TestSupport.cs`); with that sizing the heap starts at `TotalSize` with exactly 4096 bytes available, giving `BuddyLevels = log2(4096 / 256) = 4`. A larger machine yields a larger power-of-2 heap and correspondingly more levels.
+**Default parameters:** `BuddyDefaultMinBlock = 256` bytes. `OsLayout.TotalSize = 37860` bytes. Tests commonly size a machine as `Test.MinMachineSize = OsLayout.TotalSize + 4096` (see `OSTests/TestSupport.cs`); with that sizing the heap starts at `TotalSize` with exactly 4096 bytes available, giving `BuddyLevels = log2(4096 / 256) = 4`. A larger machine yields a larger power-of-2 heap and correspondingly more levels.
 
 ---
 
@@ -791,7 +797,7 @@ When a process's `OUT` or `IN` executes in user mode:
 
 ## Job control and signals
 
-Two opcodes and one process-entry flag turn the process model into a job-control-capable one, so the shell can run background jobs, reap them without blocking, and signal the foreground job.
+A handful of opcodes and a few process-entry fields turn the process model into a job-control-capable one, so the shell can run background jobs, reap them without blocking, signal the foreground job, and let a program install a handler that catches a signal instead of dying.
 
 ### REAP (non-blocking reap)
 
@@ -799,9 +805,10 @@ Two opcodes and one process-entry flag turn the process model into a job-control
 
 ### KILL (signals)
 
-`KILL pidReg, sigReg` dispatches `IvtKill` with the target PID and a signal number (`Hardware.Sig{Term=1, Kill=2, Stop=3, Cont=4}`, staged in `OsLayout.KillSig`). The handler resolves the target's process-table index and acts by signal:
+`KILL pidReg, sigReg` dispatches `IvtKill` with the target PID and a signal number (`Hardware.Sig{Term=1, Kill=2, Stop=3, Cont=4, Int=5}`, staged in `OsLayout.KillSig`). The handler resolves the target's process-table index and acts by signal:
 
-- **TERM / KILL** — run the full teardown on the target. The teardown logic (free region, resolve COW, release frames, zero swap, wake a waiting parent, zombie/orphan handling) was **extracted from `exit_body` into a `teardown_reap` CALL/RET subroutine** so it can run against an *arbitrary* target: `kill_core` temporarily swaps `CurrentIndexOffset` to the victim, CALLs `teardown_reap`, then restores it. Killing yourself routes to `exit_body` instead (no return).
+- **KILL** — uncatchable; always runs the full teardown on the target. The teardown logic (free region, resolve COW, release frames, zero swap, wake a waiting parent, zombie/orphan handling) was **extracted from `exit_body` into a `teardown_reap` CALL/RET subroutine** so it can run against an *arbitrary* target: `kill_core` temporarily swaps `CurrentIndexOffset` to the victim, CALLs `teardown_reap`, then restores it. Killing yourself routes to `exit_body` instead (no return).
+- **TERM / INT** — **catchable** (see [Catchable signals](#catchable-signals-sigaction--sigreturn) below). If the target installed a handler, the signal is delivered to it; otherwise the default action is the same teardown as KILL.
 - **STOP** — set the target's `Stopped` flag (process-entry offset 192). Because `Stopped` is **orthogonal to `State`**, a Blocked process can be stopped too. A `WAIT`-ing parent is woken with status −2 (a WUNTRACED-style notification) *without* reaping the child. Stopping yourself does a `SAVEREGS` + reschedule.
 - **CONT** — clear the `Stopped` flag.
 
@@ -809,9 +816,19 @@ The scheduler enforces stop at a **single point**: `resume_mlfq` skips any entry
 
 Delivery of the 0/−1 result to the caller is suppressed when `OsLayout.KillNoDeliver = 1`. That flag is set for **terminal-initiated** signals, which have no killer process to receive a return value.
 
+### Catchable signals (SIGACTION / SIGRETURN)
+
+A user program installs a handler with `SIGACTION sigReg, handlerReg` — a C#-side write (like `SETFOCUS`) of a user virtual address into the running process's `SigHandler` field (0 clears it). Thereafter a catchable signal (`TERM`/`INT`) delivered to that process runs the handler instead of the default teardown. `kill_core`'s `kl_catch` path:
+
+1. If no handler is installed, fall through to the default action (teardown). If the process is *already* running a handler (`InHandler = 1`), record the new signal in `SigPending` and return — one pending signal, delivered later.
+2. Otherwise **snapshot** the target's saved context — the register file **and its privilege level** — into the process's `SignalSave` slot, then point its saved `EIP` at the handler and set `InHandler = 1`. (Saving the level too is essential: while the process runs its handler, an unrelated OS routine such as `IvtWakeOutput` can `SAVEREGS` its mid-syscall Kernel-level context into the entry, clobbering the level; restoring only the register file would make `SIGRETURN`'s `OSRET` resume against the wrong program base.)
+3. Resume — into the handler directly if the target is the running process (e.g. a Ctrl-C to the foreground job), otherwise deliver 0 to the killer and let the target run its handler when next scheduled.
+
+The handler ends with **`SIGRETURN`** → `IvtSigReturn`, which restores the `SignalSave` slot (register file + level) back into the entry, clears `InHandler`, re-delivers a `SigPending` signal if one was queued, and `OSRET`s back to the interrupted instruction. The handler runs in user mode and may itself make syscalls.
+
 ### Foreground signals (Ctrl-C / Ctrl-Z)
 
-`Hardware.RaiseForegroundSignal(sig)` enqueues a pending `ForegroundSignal` interrupt. On the next tick, `TryDispatchPendingInterrupt` writes `KillSig` + `KillNoDeliver = 1` and dispatches `IvtKill` targeting the **focused** process. The console's `InteractionController` maps **Ctrl-C → TERM** and **Ctrl-Z → STOP** (via `Console.TreatControlCAsInput`), so the keys behave like a Unix terminal against whatever job currently holds focus.
+`Hardware.RaiseForegroundSignal(sig)` enqueues a pending `ForegroundSignal` interrupt. On the next tick, `TryDispatchPendingInterrupt` writes `KillSig` + `KillNoDeliver = 1` and dispatches `IvtKill` targeting the **focused** process. The console's `InteractionController` maps **Ctrl-C → INT** (catchable — a job with a handler catches it, otherwise it terminates) and **Ctrl-Z → STOP** (via `Console.TreatControlCAsInput`), so the keys behave like a Unix terminal against whatever job currently holds focus.
 
 ### Shell integration
 

@@ -108,7 +108,7 @@ See `CSharpOSConsole/Programs.cs` for more examples including memory loads/store
 
 | Document | Description |
 |---|---|
-| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 48 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
+| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 49 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
 | [docs/OS-Architecture.md](docs/OS-Architecture.md) | OS structure and function — memory layout with exact offsets, IVT dispatch model, MLFQ scheduler, buddy allocator, device table, Bin disk, demand paging/COW fork, the ISA filesystem (cache, block allocator, directories, file syscalls), process lifecycle (spawn/fork/exec/wait/exit), and the plugin loading mechanism. |
 | [docs/Visualizer-Guide.md](docs/Visualizer-Guide.md) | How to use the console visualizer — launching, every menu option, reading each dashboard panel, key bindings, the interactive **shell** (argv, foreground/background, job-control builtins, Ctrl-C/Ctrl-Z) and **snake**, the disk view, and how the visualizer is implemented. |
 
@@ -122,7 +122,7 @@ The `Hardware` class emulates a 32-bit CPU. The register file has 24 registers (
 
 ### Instruction set
 
-48 opcodes, grouped by category (full table with encodings in `docs/ISA.md`):
+49 opcodes, grouped by category (full table with encodings in `docs/ISA.md`):
 
 | Mnemonic | Opcode | Description |
 |---|---|---|
@@ -141,7 +141,8 @@ The `Hardware` class emulates a 32-bit CPU. The register file has 24 registers (
 | HLT | 0x32 | Halt (terminate process) |
 | IRET | 0x33 | Return from a kernel-mode syscall handler |
 | FORK / EXEC / WAIT / EXIT / SETFOCUS | 0x34–0x38 | Process control |
-| KILL / REAP | 0x39–0x3A | Job control: signal a process (TERM/KILL/STOP/CONT) / non-blocking reap (SIGACTION 0x3B reserved) |
+| KILL / REAP | 0x39–0x3A | Job control: signal a process (TERM/KILL/STOP/CONT/INT) / non-blocking reap |
+| SIGACTION / SIGRETURN | 0x3B–0x3C | Catchable signals: install a handler (TERM/INT) / return from it (restore + resume) |
 | SAVEREGS / LOADREGS / SETLAYOUT / OSRET | 0x40–0x43 | OS-privileged context switch primitives |
 | DREAD / DWRITE / DLEN | 0x44–0x46 | Disk slot transfers (Kernel-only) |
 | OUTS / INS | 0x47–0x48 | String output / line input |

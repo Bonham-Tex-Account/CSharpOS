@@ -93,7 +93,7 @@ There is no carry, overflow, parity, or auxiliary-carry flag.
 
 ## Complete instruction list
 
-48 opcodes are currently defined. The "Assembler method" column shows the C# `Assembler` method that emits the instruction.
+49 opcodes are currently defined. The "Assembler method" column shows the C# `Assembler` method that emits the instruction.
 
 ### Data movement
 
@@ -203,9 +203,10 @@ These instructions are available to user-mode processes. They trap into the priv
 | `WAIT reg` | 0x36 | `Wait(reg)` | `IvtWait` | Block until the child with PID `reg[reg]` terminates. Its exit status is delivered in EAX. Returns immediately if the child is already a zombie. |
 | `EXIT reg` | 0x37 | `Exit(reg)` | `IvtHalt` | Terminate the running process with exit status `reg[reg]`. Same tear-down as HLT. |
 | `SETFOCUS reg` | 0x38 | `SetFocus(reg)` | (C# path) | Make the process with PID `reg[reg]` the foreground (focused) process. The live keyboard and screen follow it. A no-op if the PID is not a live process. |
-| `KILL pidReg, sigReg` | 0x39 | `Kill(pidReg, sigReg)` | `IvtKill` | Send signal `reg[sigReg]` to the process with PID `reg[pidReg]`. Signals: `Term`(1)/`Kill`(2) tear the target down (running the same teardown as EXIT, via a temporary `CurrentIndex` swap; suicide routes to `exit_body`); `Stop`(3) sets the target's `Stopped` flag (orthogonal to `State`, so even a Blocked process can be stopped) and wakes a `WAIT`-ing parent with status −2 (WUNTRACED) without reaping; `Cont`(4) clears the flag. EAX ← 0 delivered / −1 no-such-PID (suppressed when the terminal-initiated `KillNoDeliver` flag is set — a keypress has no killer process to deliver to). |
+| `KILL pidReg, sigReg` | 0x39 | `Kill(pidReg, sigReg)` | `IvtKill` | Send signal `reg[sigReg]` to the process with PID `reg[pidReg]`. `Kill`(2) is uncatchable and tears the target down (the same teardown as EXIT, via a temporary `CurrentIndex` swap; suicide routes to `exit_body`); `Stop`(3) sets the target's `Stopped` flag (orthogonal to `State`, so even a Blocked process can be stopped) and wakes a `WAIT`-ing parent with status −2 (WUNTRACED) without reaping; `Cont`(4) clears the flag. `Term`(1) and `Int`(5) are **catchable** — if the target installed a handler via `SIGACTION` they are delivered to it (see below), otherwise they run the default teardown. EAX ← 0 delivered / −1 no-such-PID (suppressed when the terminal-initiated `KillNoDeliver` flag is set — a keypress has no killer process to deliver to). |
 | `REAP pidReg` | 0x3A | `Reap(pidReg)` | `IvtReap` | Non-blocking reap: scan for a terminated child (PID `reg[pidReg]`, or any child if 0). EAX ← the reaped PID (0 if none ready), EDX ← its exit status. Unlike `WAIT`, never blocks — the shell uses it to drain finished background jobs. |
-| `SIGACTION` | 0x3B | *(reserved)* | *(reserved)* | Reserved opcode for installing a catchable-signal handler (documented, unimplemented). |
+| `SIGACTION sigReg, handlerReg` | 0x3B | `Sigaction(sigReg, handlerReg)` | (C# path) | Install `reg[handlerReg]` (a user virtual address) as the running process's catchable-signal handler; 0 clears it. C#-only like `SETFOCUS` — it just writes the running process's `ProcessEntrySigHandler` field. A single handler covers the catchable signals (`Term`/`Int`). |
+| `SIGRETURN` | 0x3C | `SigReturn()` | `IvtSigReturn` | Return from a catchable-signal handler. On delivery the kernel snapshots the interrupted context (register file **and** privilege level) into a per-process `SignalSave` slot and redirects the process to its handler; `SIGRETURN` restores that snapshot and resumes the interrupted instruction. A signal that arrived while the handler was running (queued in `SigPending`) is re-delivered before resuming. |
 
 ### OS / privileged support
 
@@ -462,7 +463,7 @@ The C# `Hardware` class implements a software MMU that translates user-mode data
 Key constants:
 - `PageSize = 256` bytes (= `BuddyDefaultMinBlock`)
 - `MaxPagesPerProcess = 128` (32 KiB of mappable virtual space per process)
-- `IvtPageFault = 15`; `IvtSlotCount = 22`; `OsLayout.CodeBase = 88` (= `IvtSlotCount * 4`). Slots 20 (`IvtReap`) and 21 (`IvtKill`) were added by the job-control work (see the `REAP`/`KILL` opcodes above).
+- `IvtPageFault = 15`; `IvtSlotCount = 23`; `OsLayout.CodeBase = 92` (= `IvtSlotCount * 4`). Slots 20 (`IvtReap`), 21 (`IvtKill`), and 22 (`IvtSigReturn`) were added by the job-control work (see the `REAP`/`KILL`/`SIGRETURN` opcodes above).
 - PTE encodings: `>= 0` resident (physical frame base); `-1` unmapped (a user access is a protection fault, not a linear fallback); `-2` non-resident RAM-home; `<= -3` non-resident swap-backed (`SwapPte`); `<= -4096` copy-on-write share (`CowPte`)
 - Disk: `DefaultDiskSlots = 64` image slots followed by `MaxProcesses * MaxPagesPerProcess = 1024` swap slots (total: 1088 slots) — the filesystem's file-block region (below) is a separate address space and does not consume slots.
 - Kernel-mediated user-memory access: `IvtEnsureUserPage = 19` / `Hardware.UserToPhysical(va, isWrite)` synchronously faults in or COW-resolves one user page on demand, outside the normal instruction-level MMU path — used by the `FSYS` read/write wrapper (see [Filesystem](#filesystem)) to translate a user buffer one page-chunk at a time.

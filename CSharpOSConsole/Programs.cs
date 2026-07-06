@@ -341,6 +341,88 @@ public static class Programs
         return image;
     }
 
+    // ===== Edit ==============================================================
+    // edit <file>: a minimal line editor — the source-authoring brick for the write→compile→run
+    // toolchain (§4.0). Opens argv[1] (creating it), then reads lines from stdin (INS) and appends
+    // each line plus a newline to the file (FSYS write), until a line consisting of a single '.'
+    // ends input. The line buffer is a RAM-home image buffer (like cat's), so INS writes it and the
+    // FSYS write reads it back correctly. Content is stored word-per-char — the same convention
+    // cat/OUTS use and that /bin/as (§4.2) will read source from.
+    public static byte[] Edit()
+    {
+        const int LineBuf = 256;   // RAM-home line buffer (past the code)
+        const int LineMax = 32;    // words (max chars per line including the null terminator)
+        const int Newline = 0x0A;
+        const int Dot     = 0x2E;  // '.'
+
+        Assembler asm = new Assembler();
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);        // ESI = argv base
+        asm.MovImm(RegisterName.EDX, 2);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("edit_exit");                                // argc < 2 → nothing to edit
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EDI, RegisterName.EAX);       // EDI = argv[1] (path)
+        // open(path, create) → fd, kept in EBX across the loop (FSYS/INS preserve it — only EAX is the result)
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);
+        asm.MovImm(RegisterName.ECX, Hardware.FsysCreateFlag);
+        asm.Fsys();
+        asm.MovImm(RegisterName.EDX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.EDX);
+        asm.Js("edit_exit");                                // open failed
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);        // EBX = fd
+
+        asm.Label("edit_loop");
+        asm.MovImm16(RegisterName.EAX, LineBuf);
+        asm.MovImm(RegisterName.ECX, LineMax);
+        asm.Ins(RegisterName.EAX, RegisterName.ECX);        // read a line (blocks until one arrives)
+        // A lone "." ends input.
+        asm.MovImm16(RegisterName.EAX, LineBuf);
+        asm.Load(RegisterName.ECX, RegisterName.EAX);       // first char
+        asm.MovImm(RegisterName.EDX, Dot);
+        asm.Cmp(RegisterName.ECX, RegisterName.EDX);
+        asm.Jnz("edit_measure");
+        asm.MovImm16(RegisterName.EAX, LineBuf + 4);
+        asm.Load(RegisterName.ECX, RegisterName.EAX);       // second char
+        asm.MovImm(RegisterName.EDX, 0);
+        asm.Cmp(RegisterName.ECX, RegisterName.EDX);
+        asm.Jz("edit_close");                               // "." alone → done
+        // Measure the line: scan to the null word, counting chars in ECX; ESI ends at the null.
+        asm.Label("edit_measure");
+        asm.MovImm16(RegisterName.ESI, LineBuf);
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Label("edit_scan");
+        asm.Load(RegisterName.EDX, RegisterName.ESI);
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Cmp(RegisterName.EDX, RegisterName.EAX);
+        asm.Jz("edit_nl");
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.ESI, RegisterName.EAX);
+        asm.Inc(RegisterName.ECX);
+        asm.Jmp("edit_scan");
+        asm.Label("edit_nl");
+        asm.MovImm(RegisterName.EDX, Newline);
+        asm.Store(RegisterName.ESI, RegisterName.EDX);      // LineBuf[len] = '\n' (overwrites the null)
+        asm.Inc(RegisterName.ECX);                          // count now includes the newline
+        // write(fd, LineBuf, count)
+        asm.Mov(RegisterName.EDX, RegisterName.ECX);
+        asm.MovImm16(RegisterName.ECX, LineBuf);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysWrite);
+        asm.Fsys();
+        asm.Jmp("edit_loop");
+
+        asm.Label("edit_close");
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();
+        asm.Label("edit_exit");
+        asm.Hlt();
+        byte[] code = asm.Build();
+        byte[] image = new byte[LineBuf + (LineMax + 1) * 4];
+        Array.Copy(code, image, code.Length);
+        return image;
+    }
+
     // ===== Shell =============================================================
     // A real command shell (Shell §2 + §2.5 job control): prompt, read a command line (INS), fork,
     // have the child exec-by-path the typed command with its arguments (FSYS Exec). If the line ends
