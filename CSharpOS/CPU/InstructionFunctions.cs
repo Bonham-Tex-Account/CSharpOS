@@ -520,4 +520,19 @@ internal static class InstructionFunctions
     {
         hw.Kill(hw.ReadRegisterAt(b1), hw.ReadRegisterAt(b2));
     }
+
+    // SIGACTION s, h — install reg[h] as the running process's catchable-signal handler vaddr, with
+    // reg[s] the signal (Shell §2.5 JC-E). C#-side like SETFOCUS: it only writes a field in the
+    // current process's table entry, so no privileged OS routine is needed.
+    internal static void Sigaction(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.Sigaction(hw.ReadRegisterAt(b1), hw.ReadRegisterAt(b2));
+    }
+
+    // SIGRETURN — return from a signal handler (Shell §2.5 JC-E): restore the pre-signal context that
+    // was saved when the signal was delivered, and resume it.
+    internal static void SigReturn(Hardware hw, byte b1, byte b2, byte b3)
+    {
+        hw.SigReturn();
+    }
 }

@@ -101,7 +101,8 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 0x38 | SETFOCUS | SetFocus | b1=pid-reg; C# Hardware.SetFocus (no ISA routine) |
 | 0x39 | KILL | Kill | b1=pid-reg, b2=sig-reg → IvtKill; EAX=0 delivered / -1 no-such-pid. Sig{Term=1,Kill=2}→teardown, {Stop=3→set Stopped flag+wake waiter(-2), Cont=4→clear flag} (Shell §2.5 JC-B/C) |
 | 0x3A | REAP | Reap | b1=pid-reg (0=any child); non-blocking → IvtReap; EAX=reaped pid (0 if none), EDX=status (Shell §2.5 JC-A) |
-| 0x3B | SIGACTION | (reserved) | JC-E catchable-signal handler install; documented, unimplemented |
+| 0x3B | SIGACTION | Sigaction | b1=sig-reg, b2=handler-vaddr-reg → store handler into running proc's `ProcessEntrySigHandler` (0 clears). C#-only like SETFOCUS (no IVT). Single handler covers the catchable signals (JC-E) |
+| 0x3C | SIGRETURN | SigReturn | return from a catchable-signal handler → IvtSigReturn: restore pre-signal context from SignalSave, clear InHandler, re-deliver a pending signal, resume (JC-E) |
 | 0x40 | SAVEREGS | SaveRegs | b1=ptr-reg; save trap frame to absolute address; privileged |
 | 0x41 | LOADREGS | LoadRegs | b1=ptr-reg; stage entry for OSRET; privileged |
 | 0x42 | SETLAYOUT | SetLayout | b1=entry-ptr-reg; rebuild HW layout from entry; privileged |
@@ -121,7 +122,7 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 
 ## IVT Slot Table
 
-`IvtSlotCount=22`, `IvtSize=88`, `CodeBase=88` (Shell §2.5 JC-A added slot 20 `IvtReap`, JC-B added slot 21 `IvtKill`; was 20/80/80 after Phase 3 added slot 19 `IvtEnsureUserPage`)
+`IvtSlotCount=23`, `IvtSize=92`, `CodeBase=92` (Shell §2.5 JC-E added slot 22 `IvtSigReturn`; JC-A added slot 20 `IvtReap`, JC-B added slot 21 `IvtKill`; was 20/80/80 after Phase 3 added slot 19 `IvtEnsureUserPage`)
 
 | Slot | Constant | C# addr field | Emit Method | Purpose |
 |------|----------|--------------|-------------|---------|
@@ -146,7 +147,8 @@ All instructions are 4 bytes: `[opcode][b1][b2][b3]`. EFLAGS: bit 0 = Zero, bit 
 | 18 | IvtFsSyscall | — | EmitFsSyscall | FSYS user syscall: EAX=syscall#, args EBX/ECX/EDX; delivers result in caller EAX |
 | 19 | IvtEnsureUserPage | — | EmitEnsureUserPageOp | Fault-in/COW-resolve one user page; EAX=page (isWrite via `OsLayout.EnsureUserPageIsWrite`); dispatched only via `RunOsRoutineSynchronously` (Hardware.UserToPhysical), never by ISA code |
 | 20 | IvtReap | — | EmitReap | Non-blocking reap (REAP 0x3A); EAX=target pid (0=any child) → EAX=reaped pid (0 if none), EDX=status. Atomic dispatch like FORK; duplicates EmitWait's reap scan minus the block (Shell §2.5 JC-A) |
-| 21 | IvtKill | — | EmitKill | Signal a process (KILL 0x39); EAX=target pid, sig in `OsLayout.KillSig` → EAX=0/-1. TERM/KILL run `teardown_reap` on the target via a temporary CurrentIndex swap (suicide→exit_body, else deliver to killer); STOP sets Stopped flag + wakes a WAIT-ing parent (-2), self-stop SaveRegs+reschedule; CONT clears the flag. `OsLayout.KillNoDeliver`=1 (terminal Ctrl-C/Z) skips the EAX-writes (Shell §2.5 JC-B/C/D) |
+| 21 | IvtKill | — | EmitKill | Signal a process (KILL 0x39); EAX=target pid, sig in `OsLayout.KillSig` → EAX=0/-1. **SigTerm/SigInt are catchable** (`kl_catch`): if the target has a `ProcessEntrySigHandler`, snapshot its regfile+level into `SignalSave`, redirect EIP to the handler, set InHandler (self→OSRET into handler, other→deliver 0); no handler → default teardown; already InHandler → set `SigPending`. SigKill uncatchable → `teardown_reap` via a temporary CurrentIndex swap (suicide→exit_body, else deliver to killer); STOP sets Stopped flag + wakes a WAIT-ing parent (-2), self-stop SaveRegs+reschedule; CONT clears the flag. `OsLayout.KillNoDeliver`=1 (terminal Ctrl-C/Z) skips the EAX-writes (Shell §2.5 JC-B/C/D/E) |
+| 22 | IvtSigReturn | — | EmitSigReturn | Return from a catchable-signal handler (SIGRETURN 0x3C). Restore the running proc's `SignalSave` slot (regfile **+ level** — `sig_copy` copies `SignalSaveStride`=100 bytes through `ProcessEntryLevel`) back into its entry, clear InHandler; if `SigPending`≠0 re-snapshot+redirect to the handler again; then LoadRegs/SetLayout/OSRET. Atomic dispatch (Shell §2.5 JC-E) |
 
 **Note:** SETFOCUS (0x38) has no IVT slot / ISA routine — it's intentionally C#-only (`Hardware.SetFocus`), because "focused process" is a hardware-side field (`activeProcess`) with no OS-memory representation; it's a device/foreground concern, not an OS service.
 
@@ -158,7 +160,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 `DataBase = 24576` (raised from 20480 in Shell §2.5 JC-A once IvtReap pushed the OS code past 20.7 KB). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
 
-> ⚠️ **Post-process-table `+N` offsets below are stale by +64** since Shell §2.5 grew `ProcessEntrySize` 192→200 (process table 1536→1600). The **Header** rows (through ProcessTableOffset +48) are correct; every row in **After Process Table** and below is now +64 larger. **Use the `os-facts` skill for exact values** (`dotnet run --project .claude/skills/os-facts/dump -- layout`) rather than trusting these until they're re-synced. Confirmed anchors: `ProcessEntrySize=200`, `DataBase=24576`, `TotalSize=36996` (abs). JC-B/D region `JobCtlBase` (KillSig @0, KillSaveIndex @4, KillNoDeliver @8) sits just below TotalSize.
+> ⚠️ **Post-process-table `+N` offsets below are stale by +64** since Shell §2.5 grew `ProcessEntrySize` 192→200 (process table 1536→1600). The **Header** rows (through ProcessTableOffset +48) are correct; every row in **After Process Table** and below is now +64 larger. **Use the `os-facts` skill for exact values** (`dotnet run --project .claude/skills/os-facts/dump -- layout`) rather than trusting these until they're re-synced. Confirmed anchors (post JC-E): `ProcessEntrySize=208`, `DataBase=24576`, `TotalSize=37860` (abs), `SignalSaveBase=37060`, `CodeBase=92`, `IvtSlotCount=23`. JC-B/D region `JobCtlBase` (KillSig @0, KillSaveIndex @4, KillNoDeliver @8) then the JC-E `SignalSaveBase` (MaxProcesses × `SignalSaveStride`=100) sit just below TotalSize.
 
 ### Header
 
@@ -225,7 +227,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 ## ProcessEntry Field Map
 
-`ProcessEntrySize = 200` (was 192 before Shell §2.5 added Stopped+SigHandler); `ProcessEntryAddress(i) = ProcessTableOffset + i * 200 = (DataBase + 48) + i * 200` (DataBase-relative so it survives DataBase bumps)
+`ProcessEntrySize = 208` (192→200 in JC-A for Stopped+SigHandler, 200→208 in JC-E for SigPending+InHandler); `ProcessEntryAddress(i) = ProcessTableOffset + i * 208 = (DataBase + 48) + i * 208` (DataBase-relative so it survives DataBase bumps)
 
 | Byte Offset | Field Constant | Size | Notes |
 |-------------|---------------|------|-------|
@@ -248,8 +250,10 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 | 156 | ProcessEntryFirstBlock | 4 | FS first block of program image (Phase 4); -1 when slot-backed. IvtSpawn branches on DiskSlot: ≥0 → DREAD, <0 → `fs_load_image` |
 | 160 | ProcessEntryFdTable | 32 | FdCount=8 × 4-byte device ids; [0]=stdin, [1]=stdout, [2..7]=open files |
 | 192 | ProcessEntryStopped | 4 | Job-control stop flag (0/1); orthogonal to State so a Blocked proc can be stopped. Reserved in JC-A, used from JC-C (Shell §2.5) |
-| 196 | ProcessEntrySigHandler | 4 | Reserved catchable-signal handler vaddr; unused until JC-E |
-| **200** | **(end)** | | |
+| 196 | ProcessEntrySigHandler | 4 | Catchable-signal handler vaddr (0=none), set by SIGACTION; SigTerm/SigInt delivered here (JC-E) |
+| 200 | ProcessEntrySigPending | 4 | Signal queued while already in a handler; delivered on SIGRETURN (JC-E) |
+| 204 | ProcessEntryInHandler | 4 | 1 while running the handler; a second catchable signal defers to SigPending (JC-E) |
+| **208** | **(end)** | | |
 
 Process memory layout: `[program][memory][user stack][kernel stack]`
 `TotalSize = ProgramSize + RequiredMemory + RequiredStackSize + KernelStackSize(176)`
@@ -509,6 +513,8 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-05 | Docs + large-file traversability sweep. **Reader docs (README/ISA/OS-Architecture)** brought current with job control (KILL/REAP/SIGACTION opcodes, IvtReap/IvtKill slots 20/21, new "Job control and signals" section, Stopped/SigHandler entry fields) + snake/canvas mention + refreshed constants (DataBase 24576, TotalSize 36996, IvtSlotCount 22, CodeBase 88, ProcessEntrySize 200); **converted the OS-Architecture memory-map table from drift-prone absolute addresses to DataBase-relative offsets** (the project's own anti-drift lesson) via an os-facts layout dump. **Large-file metadata:** `Programs.cs` had 0 section markers → scripted a `// ===== Name =====` marker per program (15); created **`CSharpOSConsole/CLAUDE.md`** (Programs.cs Grep jump table + Program.cs modes); refreshed the drifted line-number indices in `CPU/CLAUDE.md` (Grep-first nav + current marker map + job-control methods) and `Visualization/CLAUDE.md` (SpectreDashboard markers). **Conclusion: no file needs splitting** — all 1000+ line files are Grep-navigable (per-Emit markers + `asm.Label` names). | ~40K (inline) | 666 tests green (only comments/docs touched). No fork/agent (targeted greps + os-facts instead of full doc re-reads). Biggest gap was Programs.cs (0 markers) + the OS-Arch absolute-address table (every row stale). |
 
 | 2026-07-05 | New `docs/Visualizer-Guide.md` (usage of the console visualizer — menu options, panels, key bindings, shell fg/bg/job-control, snake, disk view, implementation notes) + README link; then PLANNED the two remaining future items → plan files `nimble-signaling-otter.md` (JC-E catchable signals, scope=fuller) + `steady-forging-ibex.md` (§4 write→compile→run, engine=self-hosted ISA `/bin/as`) | ~30K (inline) | Targeted reads only (console CLAUDE.md + Program.cs + Shell/Snake markers via Grep — no full-file scans). Doc-only + plan-only, no code; 666 tests unaffected. User overrode the earlier tentative §4 direction (host-backed) → self-hosted assembler. |
+
+| 2026-07-05 | JC-E catchable signals (E1–E3): `SIGACTION` 0x3B (C#-only install) + `SIGRETURN` 0x3C → new `IvtSigReturn` slot 22 (IvtSlotCount 22→23, CodeBase 88→92); `Hardware.SigInt=5`; `ProcessEntrySigPending`@200/`InHandler`@204 (size 200→208); `OsLayout.SignalSaveBase` (8×100, TotalSize→37860); `EmitKill` `kl_catch`/`kl_defer` delivery + `EmitSigReturn` + `sig_copy`; Ctrl-C→SigInt. 9 new tests (7 SignalTests + 2 Disasm), 675 total | ~90K (inline, long debug) | **The debug tax was one bug: a handler that makes a *syscall* (OUT) then SIGRETURN crashed** — `IvtWakeOutput`'s `wk_resume` SaveRegs the mid-syscall context into the entry, clobbering `entry.Level`→Kernel; `sig_copy` restored only the 96-byte regfile (not Level@96), so SIGRETURN's OSRET resumed at kernel base+EIP → wild address. Fix: SignalSaveStride 96→100 (copy through Level). Found via instruction-address trace after signal (bare/STORE/INPOLL handlers worked, OUT didn't → isolated to the output path). |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
 

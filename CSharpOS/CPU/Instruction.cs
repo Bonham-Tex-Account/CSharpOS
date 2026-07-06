@@ -53,10 +53,14 @@ public static class Instruction
     // KILL r,s — send signal reg[s] (TERM/KILL/STOP/CONT) to the process with PID reg[r]. (JC-B.)
     // REAP r   — non-blocking reap: reg[r] = target PID (0 = any child); delivers reaped PID in EAX
     //            (0 if none dead) and its exit status in EDX. (JC-A.)
-    // SIGACTION — reserved for catchable signal handlers (JC-E); documented but not yet wired.
+    // SIGACTION s, h — install reg[h] as this process's catchable-signal handler vaddr (0 clears it);
+    //                  SIGTERM/SIGINT are then delivered to the handler instead of the default. (JC-E.)
+    // SIGRETURN      — return from a signal handler: restore the pre-signal context and resume it,
+    //                  re-delivering a signal that arrived during the handler. (JC-E.)
     public const byte KILL        = 0x39;
     public const byte REAP        = 0x3A;
     public const byte SIGACTION   = 0x3B;
+    public const byte SIGRETURN   = 0x3C;
 
     // ---- privileged OS-support opcodes ------------------------------------
     // Used by OS ISA code running in Privileged mode to save/restore a process's
@@ -150,6 +154,8 @@ public static class Instruction
         opcodeTable[SETFOCUS]    = InstructionFunctions.SetFocus;
         opcodeTable[REAP]        = InstructionFunctions.Reap;
         opcodeTable[KILL]        = InstructionFunctions.Kill;
+        opcodeTable[SIGACTION]   = InstructionFunctions.Sigaction;
+        opcodeTable[SIGRETURN]   = InstructionFunctions.SigReturn;
         opcodeTable[OUTS]        = InstructionFunctions.Outs;
         opcodeTable[INS]         = InstructionFunctions.Ins;
         opcodeTable[INK]         = InstructionFunctions.Ink;

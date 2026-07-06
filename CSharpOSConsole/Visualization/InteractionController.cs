@@ -89,10 +89,11 @@ public sealed class InteractionController
         }
         // Ctrl-C / Ctrl-Z: tty-style job-control signals to the foreground process. Always
         // intercepted (never forwarded to the process), like F1 — a real terminal does not deliver
-        // these to the app, it signals it. Ctrl-C terminates the foreground job, Ctrl-Z stops it.
+        // these to the app, it signals it. Ctrl-C sends SigInt (catchable: a job that installed a
+        // handler via SIGACTION runs it; otherwise the default action terminates it); Ctrl-Z stops it.
         if ((key.Modifiers & ConsoleModifiers.Control) != 0)
         {
-            if (key.Key == ConsoleKey.C) { foregroundSignal?.Invoke(Hardware.SigTerm); return StepAction.Redraw; }
+            if (key.Key == ConsoleKey.C) { foregroundSignal?.Invoke(Hardware.SigInt); return StepAction.Redraw; }
             if (key.Key == ConsoleKey.Z) { foregroundSignal?.Invoke(Hardware.SigStop); return StepAction.Redraw; }
         }
         if (keyPassthrough)

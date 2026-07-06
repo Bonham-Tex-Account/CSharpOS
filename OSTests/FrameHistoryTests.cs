@@ -131,8 +131,8 @@ public class FrameHistoryTests
     [Fact]
     public void CtrlC_And_CtrlZ_SendForegroundJobControlSignals()
     {
-        // Ctrl-C → SigTerm, Ctrl-Z → SigStop, delivered to the foreground process (Shell §2.5 JC-D).
-        // Always intercepted, so they work regardless of passthrough mode.
+        // Ctrl-C → SigInt (catchable; JC-E), Ctrl-Z → SigStop, delivered to the foreground process
+        // (Shell §2.5 JC-D). Always intercepted, so they work regardless of passthrough mode.
         List<int> signals = new List<int>();
         FrameHistory frames = new FrameHistory();
         frames.Capture(ModelAtStep(1));
@@ -143,7 +143,7 @@ public class FrameHistoryTests
         controller.HandleKey(CtrlKey(ConsoleKey.C));
         controller.HandleKey(CtrlKey(ConsoleKey.Z));
 
-        Assert.Equal(new List<int> { Hardware.SigTerm, Hardware.SigStop }, signals);
+        Assert.Equal(new List<int> { Hardware.SigInt, Hardware.SigStop }, signals);
     }
 
     [Fact]

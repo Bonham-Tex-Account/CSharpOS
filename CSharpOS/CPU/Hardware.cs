@@ -69,13 +69,19 @@ public partial class Hardware
     public const int FdCount                        = 8;
     public const int StdIn                          = 0;
     public const int StdOut                         = 1;
-    // Job control (Shell §2.5). Both reserved up front (JC-A) so the entry grows exactly once.
-    // Stopped: 0 = runnable, 1 = job-control-stopped (an orthogonal flag beside ProcessState, so a
-    // Blocked process can be stopped without losing its wait state). Used from JC-C. SigHandler:
-    // reserved virtual address of a future catchable-signal handler; unused until JC-E (sigaction).
+    // Job control (Shell §2.5). Stopped reserved up front (JC-A); the signal fields grow the entry
+    // again in JC-E. Stopped: 0 = runnable, 1 = job-control-stopped (an orthogonal flag beside
+    // ProcessState, so a Blocked process can be stopped without losing its wait state; JC-C).
+    // SigHandler: virtual address of an installed catchable-signal handler (0 = none), set by
+    // SIGACTION; SIGTERM/SIGINT are delivered here instead of the default action (JC-E). SigPending:
+    // a signal number queued because it arrived while the process was already running its handler
+    // (delivered on SIGRETURN; 0 = none). InHandler: 1 while the process is executing its handler,
+    // so a second catchable signal defers (sets SigPending) rather than re-entering (JC-E).
     public const int ProcessEntryStopped            = 192;
     public const int ProcessEntrySigHandler         = 196;
-    public const int ProcessEntrySize               = 200;  // 160 + FdCount*4 + Stopped + SigHandler
+    public const int ProcessEntrySigPending         = 200;
+    public const int ProcessEntryInHandler          = 204;
+    public const int ProcessEntrySize               = 208;  // 160 + FdCount*4 + Stopped + 3 signal words
 
     // ---- device ids ------------------------------------------------------
     // Character device ids 0..MaxProcesses-1 are the per-process I/O devices (the
@@ -167,16 +173,23 @@ public partial class Hardware
     // SigStop/SigCont set/clear the target's job-control stop flag (wired in JC-C). Resumes the caller
     // with 0 (delivered) or -1 (no such pid) in EAX; if the caller killed itself, reschedules instead.
     public const int IvtKill               = 21;
-    public const int IvtSlotCount          = 22;
+    // Return from a catchable-signal handler (Shell §2.5 job control, JC-E). SIGRETURN dispatches
+    // this atomic routine (like FORK): it restores the pre-signal context saved in SignalSave and
+    // resumes the process, re-delivering a signal that was left pending during the handler.
+    public const int IvtSigReturn          = 22;
+    public const int IvtSlotCount          = 23;
     public const int IvtSize               = IvtSlotCount * 4;
 
-    // KILL signal numbers (Shell §2.5). SigTerm/SigKill both run the kernel teardown (no catchable
-    // handlers this pass — that is the reserved SIGACTION/JC-E work). SigStop/SigCont are the
-    // job-control stop/continue signals, applied in JC-C.
+    // KILL signal numbers (Shell §2.5). SigKill/SigStop/SigCont are uncatchable, kernel-applied:
+    // Kill tears the target down (like exit_body), Stop/Cont set/clear the job-control stop flag
+    // (JC-C). SigTerm and SigInt are catchable (JC-E): if the target installed a handler via
+    // SIGACTION they are delivered to it, otherwise they run the default teardown. SigInt is the
+    // Ctrl-C signal (a keypress raises it on the foreground process); SigTerm is what `kill` sends.
     public const int SigTerm = 1;
     public const int SigKill = 2;
     public const int SigStop = 3;
     public const int SigCont = 4;
+    public const int SigInt  = 5;
 
     // IvtCacheOp op selectors (passed in EAX; block number in EBX). The dispatcher parks
     // each op's result (cache_get returns the block's cached data address; the rest return 0)
@@ -1660,6 +1673,41 @@ public partial class Hardware
             WriteWord(osMemoryBase + OsLayout.KillSig, sig);
             WriteWord(osMemoryBase + OsLayout.KillNoDeliver, 0); // process-initiated: deliver the result
             DispatchOsRoutine(IvtKill, targetPid);
+            return;
+        }
+        trapTaken = true;
+    }
+
+    // SIGACTION s, h — install `handler` (a user virtual address) as the running process's catchable-
+    // signal handler; 0 clears it (back to the default action). C#-side like SETFOCUS: it only writes
+    // a field in the current process's table entry, no atomic OS routine needed. v1 keeps a single
+    // handler field, so `sig` selects which catchable signal conceptually but the one handler covers
+    // both SigTerm and SigInt. The running process is the one the OS scheduled (CurrentIndexOffset,
+    // the same source the MMU uses to find the running process's page table).
+    public void Sigaction(int sig, int handler)
+    {
+        if (!OsManaged)
+        {
+            trapTaken = true;
+            return;
+        }
+        int index = ReadWord(osMemoryBase + OsLayout.CurrentIndexOffset);
+        if (index < 0 || index >= OsLayout.MaxProcesses)
+        {
+            return;
+        }
+        int entry = osMemoryBase + OsLayout.ProcessEntryAddress(index);
+        WriteWord(entry + ProcessEntrySigHandler, handler);
+    }
+
+    // SIGRETURN — return from a signal handler (Shell §2.5 JC-E): dispatches the atomic IvtSigReturn
+    // routine, which restores the pre-signal context snapshotted at delivery and resumes it (re-
+    // delivering a signal left pending during the handler). Traps as invalid without an OS image.
+    public void SigReturn()
+    {
+        if (OsManaged)
+        {
+            DispatchOsRoutine(IvtSigReturn);
             return;
         }
         trapTaken = true;

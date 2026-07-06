@@ -120,6 +120,20 @@ public class DisassemblerTests
     }
 
     [Fact]
+    public void Decodes_Sigaction_WithSignalAndHandlerRegisters()
+    {
+        // SIGACTION s, h — install reg[h] as the catchable-signal handler; reg[s] selects the signal.
+        Assert.Equal("SIGACTION EAX, EBX", Disassembler.Decode(Instruction.SIGACTION, Idx(RegisterName.EAX), Idx(RegisterName.EBX), 0));
+    }
+
+    [Fact]
+    public void Decodes_SigReturn_AsNoOperand()
+    {
+        // SIGRETURN — return from a signal handler (Shell §2.5 job control, JC-E).
+        Assert.Equal("SIGRETURN", Disassembler.Decode(Instruction.SIGRETURN, 0, 0, 0));
+    }
+
+    [Fact]
     public void Decodes_UnknownOpcode_AsHexFallback()
     {
         Assert.Equal("??? FF", Disassembler.Decode(0xFF, 0, 0, 0));
