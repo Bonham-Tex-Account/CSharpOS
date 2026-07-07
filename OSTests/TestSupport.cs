@@ -177,6 +177,29 @@ internal static class Test
     }
 
     /// <summary>
+    /// Runs the machine until it settles at a clean idle state — interrupts enabled and no
+    /// process running — with live processes gone. Use this (instead of a bare
+    /// <c>while (os.HasProcesses) hw.Run()</c>) whenever ONE machine runs several programs in
+    /// sequence, e.g. chained <c>os.LoadProcess</c>/exec parents.
+    ///
+    /// Why it matters: <c>os.HasProcesses</c> flips to false the instant the last process entry
+    /// is marked Terminated, but the exit-teardown ISA routine is still executing with interrupts
+    /// masked. A loop that stops on <c>!HasProcesses</c> parks the machine mid-teardown; the next
+    /// <c>LoadProcess</c> then injects a process into that half-finished state, which corrupts on
+    /// alternate runs (the historical "FSYS-exec alternation flake"). The combined condition below
+    /// keeps running until BOTH the process is gone AND the teardown has drained to idle. The idle
+    /// check alone would return immediately after LoadProcess (spawn is synchronous, so the machine
+    /// is momentarily idle before the process is scheduled), hence the <c>HasProcesses ||</c> guard.
+    /// </summary>
+    public static void RunUntilIdle(Hardware hw, IOperatingSystem os, int cap = 200000)
+    {
+        for (int i = 0; i < cap && (os.HasProcesses || !(hw.InterruptsEnabled() && !hw.IsProcessRunning())); i++)
+        {
+            hw.Run();
+        }
+    }
+
+    /// <summary>
     /// Reads a 4-byte little-endian word from hardware memory at the given address.
     /// </summary>
     public static int ReadWord(Hardware hw, int address)

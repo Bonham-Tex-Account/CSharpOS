@@ -143,7 +143,7 @@ Before the shell process starts, `RunShell` populates the filesystem (boot-time 
 `/bin` directory of command programs and a sample text file:
 
 ```
-/bin/ls  /bin/cat  /bin/rm  /bin/mkdir  /bin/echo  /bin/help
+/bin/ls  /bin/cat  /bin/rm  /bin/mkdir  /bin/echo  /bin/help  /bin/edit
 /bin/counter  /bin/average  /bin/guess  /bin/snake
 /note                       ← text file: "hello from the filesystem"
 ```
@@ -184,6 +184,10 @@ become `argv`. A launched program starts with **`EAX = argc`** and **`EBX = argv
 - `/bin/ls /` → argc=2, lists the root directory. `/bin/ls` alone defaults to `/`.
 - `/bin/cat /note` → prints the file contents in chunks until EOF.
 - `/bin/rm /path`, `/bin/mkdir /path` → single-arg FS operations.
+- `/bin/edit /path` → a line editor: type lines, a lone `.` on its own line ends input. Each line
+  (plus a newline) is appended to the file. This is how you author a source file inside the OS —
+  the first piece of the in-OS write→compile→run toolchain (a self-hosted `/bin/as` assembler is
+  the eventual companion). Example: `/bin/edit /hi.txt`, type a few lines, `.`, then `/bin/cat /hi.txt`.
 
 Programs that ignore arguments simply ignore EBX.
 
