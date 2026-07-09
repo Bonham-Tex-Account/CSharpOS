@@ -8,7 +8,8 @@ namespace OSTests;
 /// through a live scheduler: stage a word-per-char source file (as `/bin/edit` writes), exec
 /// `/bin/as /src /out`, then either read the produced image back through the FS cores and
 /// golden-compare it byte-for-byte against the C# <see cref="Assembler"/>, or exec the produced
-/// program and observe its output. Covers the label-free subset: None/Reg/RegReg/Mov shapes.
+/// program and observe its output. Covers every shape: None/Reg/RegReg/RegRegReg/Mov (§4.2a/b) and
+/// Addr16 labels + branches via the two-pass label table (§4.2c).
 ///
 /// Chained exec phases (assemble then run) drain to idle between programs via
 /// <see cref="Test.RunUntilIdle"/> — see <c>FsExecChainTests</c> for why.
@@ -189,6 +190,24 @@ public class FsAssemblerTests
     }
 
     [Fact]
+    public void Assembles_RegRegReg_DiskInstructions()
+    {
+        (BasicOS os, Hardware hw, List<int> _) = NewMachine();
+        // Also exercises a two-digit register name (R15) through the tokenizer/str_eq scan.
+        WriteSource(hw, "/src.s", "DREAD EAX EBX ECX\nDWRITE R8 R15 EDX\nHLT\n");
+
+        Exec(os, hw, "/bin/as /src.s /out");
+
+        int[] expected = GoldenWords(a =>
+        {
+            a.DRead(RegisterName.EAX, RegisterName.EBX, RegisterName.ECX);
+            a.DWrite(RegisterName.R8, RegisterName.R15, RegisterName.EDX);
+            a.Hlt();
+        });
+        Assert.Equal(expected, ReadWords(hw, "/out"));
+    }
+
+    [Fact]
     public void BlankLinesAndComments_AreIgnored()
     {
         (BasicOS os, Hardware hw, List<int> _) = NewMachine();
@@ -218,6 +237,96 @@ public class FsAssemblerTests
 
         Assert.False(os.HasProcesses);
         Assert.Equal(new List<int> { 42 }, outputs);
+    }
+
+    [Fact]
+    public void Assembles_LabelsAndBranches_MatchesGoldenAssembler()
+    {
+        (BasicOS os, Hardware hw, List<int> _) = NewMachine();
+        // A backward branch (loop) — the label is defined before its use.
+        WriteSource(hw, "/src.s",
+            "MOV EAX 0\nMOV EBX 3\nloop:\nINC EAX\nOUT EAX\nCMP EAX EBX\nJNZ loop\nHLT\n");
+
+        Exec(os, hw, "/bin/as /src.s /out");
+
+        int[] expected = GoldenWords(a =>
+        {
+            a.MovImm(RegisterName.EAX, 0);
+            a.MovImm(RegisterName.EBX, 3);
+            a.Label("loop");
+            a.Inc(RegisterName.EAX);
+            a.Out(RegisterName.EAX);
+            a.Cmp(RegisterName.EAX, RegisterName.EBX);
+            a.Jnz("loop");
+            a.Hlt();
+        });
+        Assert.Equal(expected, ReadWords(hw, "/out"));
+    }
+
+    [Fact]
+    public void Assembles_ForwardBranch_MatchesGoldenAssembler()
+    {
+        (BasicOS os, Hardware hw, List<int> _) = NewMachine();
+        // A forward branch — the label is used before it is defined (pass 1 resolves it).
+        WriteSource(hw, "/src.s",
+            "MOV EAX 1\nCMP EAX EAX\nJZ done\nOUT EAX\ndone:\nHLT\n");
+
+        Exec(os, hw, "/bin/as /src.s /out");
+
+        int[] expected = GoldenWords(a =>
+        {
+            a.MovImm(RegisterName.EAX, 1);
+            a.Cmp(RegisterName.EAX, RegisterName.EAX);
+            a.Jz("done");
+            a.Out(RegisterName.EAX);
+            a.Label("done");
+            a.Hlt();
+        });
+        Assert.Equal(expected, ReadWords(hw, "/out"));
+    }
+
+    [Fact]
+    public void AssembledLoop_ExecutesAndCountsToThree()
+    {
+        (BasicOS os, Hardware hw, List<int> outputs) = NewMachine();
+        WriteSource(hw, "/src.s",
+            "MOV EAX 0\nMOV EBX 3\nloop:\nINC EAX\nOUT EAX\nCMP EAX EBX\nJNZ loop\nHLT\n");
+
+        Exec(os, hw, "/bin/as /src.s /prog");   // assemble
+        Assert.False(os.HasProcesses);
+        outputs.Clear();
+        Exec(os, hw, "/prog");                  // run the assembled loop
+
+        Assert.False(os.HasProcesses);
+        Assert.Equal(new List<int> { 1, 2, 3 }, outputs);
+    }
+
+    [Fact]
+    public void AssembledCallRet_Subroutine_ExecutesAndReturns()
+    {
+        (BasicOS os, Hardware hw, List<int> outputs) = NewMachine();
+        WriteSource(hw, "/src.s",
+            "MOV EAX 5\nCALL sub\nOUT EAX\nHLT\nsub:\nINC EAX\nRET\n");
+
+        Exec(os, hw, "/bin/as /src.s /prog");   // assemble
+        Assert.False(os.HasProcesses);
+        outputs.Clear();
+        Exec(os, hw, "/prog");                  // CALL sub increments EAX 5→6, RET, OUT 6
+
+        Assert.False(os.HasProcesses);
+        Assert.Equal(new List<int> { 6 }, outputs);
+    }
+
+    [Fact]
+    public void UndefinedLabel_ProducesNoOutputFile()
+    {
+        (BasicOS os, Hardware hw, List<int> _) = NewMachine();
+        WriteSource(hw, "/src.s", "JMP nowhere\nHLT\n");
+
+        Exec(os, hw, "/bin/as /src.s /out");
+
+        // An unresolved branch aborts the assemble and unlinks the half-written image.
+        Assert.True(FsImage.ResolveFirstBlock(hw, "/out") < FsLayout.FirstDataBlock);
     }
 
     [Fact]

@@ -470,7 +470,14 @@ public static class Programs
         const int FdOut = 9616;                         // output file descriptor
         const int OpcodeC = 9620, ShapeC = 9624;        // current instruction's opcode + operand shape
         const int B1C = 9628, B2C = 9632, B3C = 9636;   // current instruction's operand bytes
-        const int ImageEnd = 9664;
+        const int LabelCount = 9640;                    // number of labels recorded in pass 1
+        const int Pc = 9644;                            // pass-1 byte offset of the next instruction
+        const int LabelTbl = 9648;                      // label table (fixed-width records; §4.2c)
+        const int MaxLabels = 32;                       // capacity; record[MaxLabels] stays 0 = scan terminator
+        const int LNameW = 12;                          // label-name field: 11 chars + null (words)
+        const int LRec = (LNameW + 1) * 4;              // record stride: name + offset word = 52 bytes
+        const int LNOff = LNameW * 4;                   // offset-field byte offset within a record
+        const int ImageEnd = LabelTbl + (MaxLabels + 1) * LRec; // one spare record = zero terminator
 
         if (mtab.Length > RegTbl - MnemTbl)
         {
@@ -560,13 +567,83 @@ public static class Programs
         asm.Js("as_earlyexit");
         PutC(FdOut, RegisterName.EAX);
 
-        // ---- assemble line by line ----
+        // ---- pass 1: record every label's byte offset (Pc) into the label table ----
+        // SrcPos is already 0. A non-label line = one 4-byte instruction (drain its tokens); a
+        // label line (first token ends ':') records name→Pc without advancing Pc.
+        PutCI(LabelCount, 0);
+        PutCI(Pc, 0);
+        asm.Label("as_p1");
+        asm.Call("nt");
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_p1_done");                                // EOF
+        asm.Js("as_p1");                                     // blank/comment line
+        asm.Call("il");                                      // label? (strips ':' into Token)
+        asm.MovImm(RegisterName.ECX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jnz("as_p1_instr");                              // not a label → count an instruction
+        // record the label: base = LabelTbl + LabelCount*LRec
+        GetC(LabelCount, RegisterName.R8);
+        asm.MovImm(RegisterName.R9, MaxLabels);
+        asm.Cmp(RegisterName.R8, RegisterName.R9);
+        asm.Jns("as_err");                                   // table full
+        asm.MovImm(RegisterName.R9, LRec);
+        asm.Mul(RegisterName.R8, RegisterName.R9);
+        asm.MovImm16(RegisterName.R9, LabelTbl);
+        asm.Add(RegisterName.R8, RegisterName.R9);           // R8 = record base (name field)
+        asm.Mov(RegisterName.R13, RegisterName.R8);          // R13 = record base (saved)
+        asm.MovImm16(RegisterName.R10, Token);               // R10 = name source cursor
+        asm.MovImm(RegisterName.R9, 0);                      // R9 = chars written
+        asm.Label("as_p1_cp");
+        asm.Load(RegisterName.R11, RegisterName.R10);        // char
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("as_p1_null");                                // null → write it, name done
+        asm.MovImm(RegisterName.R12, LNameW - 1);            // leave a slot for the terminator
+        asm.Cmp(RegisterName.R9, RegisterName.R12);
+        asm.Jns("as_err");                                   // label name too long
+        asm.Store(RegisterName.R8, RegisterName.R11);
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R8, RegisterName.R12);
+        asm.Add(RegisterName.R10, RegisterName.R12);
+        asm.Inc(RegisterName.R9);
+        asm.Jmp("as_p1_cp");
+        asm.Label("as_p1_null");
+        asm.Store(RegisterName.R8, RegisterName.R11);        // null-terminate the stored name
+        asm.MovImm(RegisterName.R12, LNOff);
+        asm.Add(RegisterName.R13, RegisterName.R12);         // R13 = offset field
+        GetC(Pc, RegisterName.R12);
+        asm.Store(RegisterName.R13, RegisterName.R12);       // label offset = current Pc
+        GetC(LabelCount, RegisterName.R8);
+        asm.Inc(RegisterName.R8);
+        PutC(LabelCount, RegisterName.R8);
+        asm.Jmp("as_p1");
+        asm.Label("as_p1_instr");                            // one instruction → Pc += 4, skip its operands
+        GetC(Pc, RegisterName.R8);
+        asm.MovImm(RegisterName.R9, 4);
+        asm.Add(RegisterName.R8, RegisterName.R9);
+        PutC(Pc, RegisterName.R8);
+        asm.Label("as_p1_drain");
+        asm.Call("nt");
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_p1_done");                                // EOF (this instruction already counted)
+        asm.Js("as_p1");                                     // end of line → next line
+        asm.Jmp("as_p1_drain");                              // another operand token → skip
+        asm.Label("as_p1_done");
+        PutCI(SrcPos, 0);                                    // rewind for pass 2
+
+        // ---- pass 2: assemble line by line ----
         asm.Label("as_line");
         asm.Call("nt");                                      // EAX: >0 mnemonic len, 0 EOF, -1 blank/comment line
         asm.MovImm(RegisterName.ECX, 0);
         asm.Cmp(RegisterName.EAX, RegisterName.ECX);
         asm.Jz("as_finish");                                 // EOF → done
         asm.Js("as_line");                                   // blank/comment → next line
+        asm.Call("il");                                      // label definition? (strips ':' from Token)
+        asm.MovImm(RegisterName.ECX, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_line");                                   // label emits nothing (recorded in pass 1) → next token
         asm.Call("ml");                                      // mnem_lookup → EAX 1/0; OpcodeC/ShapeC set
         asm.MovImm(RegisterName.ECX, 0);
         asm.Cmp(RegisterName.EAX, RegisterName.ECX);
@@ -587,7 +664,13 @@ public static class Programs
         asm.MovImm(RegisterName.ECX, (int)OperandShape.Mov);
         asm.Cmp(RegisterName.EAX, RegisterName.ECX);
         asm.Jz("as_mov");
-        asm.Jmp("as_err");                                   // shape not supported in §4.2a (Addr16/RegRegReg/…)
+        asm.MovImm(RegisterName.ECX, (int)OperandShape.RegRegReg);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_regregreg");
+        asm.MovImm(RegisterName.ECX, (int)OperandShape.Addr16);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_addr");
+        asm.Jmp("as_err");                                   // no other shapes exist
 
         asm.Label("as_reg");
         NeedToken();
@@ -603,6 +686,36 @@ public static class Programs
         NeedReg();
         PutC(B2C, RegisterName.EAX);
         asm.Jmp("as_emit");
+
+        asm.Label("as_regregreg");                           // DREAD/DWRITE: three register operands
+        NeedToken();
+        NeedReg();
+        PutC(B1C, RegisterName.EAX);
+        NeedToken();
+        NeedReg();
+        PutC(B2C, RegisterName.EAX);
+        NeedToken();
+        NeedReg();
+        PutC(B3C, RegisterName.EAX);
+        asm.Jmp("as_emit");
+
+        asm.Label("as_addr");                                // JMP/JZ/JNZ/CALL/JS/JNS <label>
+        NeedToken();                                         // the label operand (colon-less)
+        asm.Call("ll");                                      // EAX = label byte offset, or -1 if undefined
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Js("as_err");                                    // undefined label
+        asm.Mov(RegisterName.R8, RegisterName.EAX);          // B2 = offset & 255 (low byte)
+        asm.MovImm(RegisterName.R9, 255);
+        asm.And(RegisterName.R8, RegisterName.R9);
+        PutC(B2C, RegisterName.R8);
+        asm.Mov(RegisterName.R8, RegisterName.EAX);          // B1 = (offset >> 8) & 255 (high byte)
+        asm.MovImm(RegisterName.R9, 8);
+        asm.Shr(RegisterName.R8, RegisterName.R9);
+        asm.MovImm(RegisterName.R9, 255);
+        asm.And(RegisterName.R8, RegisterName.R9);
+        PutC(B1C, RegisterName.R8);
+        asm.Jmp("as_emit");                                  // B3C stays 0 (cleared per line)
 
         asm.Label("as_mov");
         NeedToken();                                         // operand 1
@@ -906,6 +1019,65 @@ public static class Programs
         asm.Add(RegisterName.R13, RegisterName.R10);
         asm.Jmp("pu_l");
         asm.Label("pu_done");
+        asm.Ret();
+
+        // il (is_label): if Token's last char is ':' it is a label definition — strip the ':' (making
+        // Token the null-terminated name) and return EAX = 1; otherwise leave Token intact, EAX = 0.
+        // Uses R10–R13 + EAX; leaves R14/R15 alone. Leaf.
+        asm.Label("il");
+        asm.MovImm16(RegisterName.R13, Token);
+        asm.MovImm(RegisterName.R11, 0);                     // R11 = addr of last non-null char (0 = none)
+        asm.Label("il_l");
+        asm.Load(RegisterName.R10, RegisterName.R13);
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R10, RegisterName.R12);
+        asm.Jz("il_end");
+        asm.Mov(RegisterName.R11, RegisterName.R13);
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R13, RegisterName.R12);
+        asm.Jmp("il_l");
+        asm.Label("il_end");
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R11, RegisterName.R12);
+        asm.Jz("il_no");                                     // empty token → not a label
+        asm.Load(RegisterName.R10, RegisterName.R11);        // last char
+        asm.MovImm(RegisterName.R12, 58);                    // ':'
+        asm.Cmp(RegisterName.R10, RegisterName.R12);
+        asm.Jnz("il_no");
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Store(RegisterName.R11, RegisterName.R12);       // strip the ':' → null-terminate the name
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Ret();
+        asm.Label("il_no");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Ret();
+
+        // ll (label_lookup): scan the label table for Token (a branch operand). EAX = the label's byte
+        // offset, or -1 if undefined. R15 = scan cursor (survives the se CALL); zero name = terminator.
+        asm.Label("ll");
+        asm.MovImm16(RegisterName.R15, LabelTbl);
+        asm.Label("ll_l");
+        asm.Load(RegisterName.R10, RegisterName.R15);
+        asm.MovImm(RegisterName.R11, 0);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jz("ll_none");
+        asm.Mov(RegisterName.R14, RegisterName.R15);
+        asm.Call("se");
+        asm.MovImm(RegisterName.R11, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.R11);
+        asm.Jz("ll_found");
+        asm.MovImm(RegisterName.R11, LRec);
+        asm.Add(RegisterName.R15, RegisterName.R11);
+        asm.Jmp("ll_l");
+        asm.Label("ll_found");
+        asm.MovImm(RegisterName.R11, LNOff);
+        asm.Mov(RegisterName.R12, RegisterName.R15);
+        asm.Add(RegisterName.R12, RegisterName.R11);
+        asm.Load(RegisterName.EAX, RegisterName.R12);        // the recorded offset
+        asm.Ret();
+        asm.Label("ll_none");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Dec(RegisterName.EAX);                           // -1
         asm.Ret();
 
         byte[] code = asm.Build();
