@@ -50,7 +50,8 @@
       "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter FrameHistoryTests)",
       "Bash(awk 'NR>2 {printf \"%s %s\\\\n\", $1-24576, $2}')",
       "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter FsToolchainTests)",
-      "PowerShell(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter ReproExecAlternation)"
+      "PowerShell(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter ReproExecAlternation)",
+      "Bash(pwsh .claude/skills/run-tests/run-tests.ps1 -Filter FsAssemblerTests)"
     ]
   }
 }
