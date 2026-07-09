@@ -195,6 +195,8 @@ public class ShellTests : IDisposable
         FsImage.WriteFile(hw, "/bin/mkdir", Programs.Mkdir());
         FsImage.WriteFile(hw, "/bin/echo", Programs.Echo());
         FsImage.WriteFile(hw, "/bin/help", Programs.Help());
+        FsImage.WriteFile(hw, "/bin/edit", Programs.Edit());
+        FsImage.WriteFile(hw, "/bin/as", Programs.As());
         FsImage.WriteFile(hw, "/bin/counter", Programs.CounterToTen());
         FsImage.WriteFile(hw, "/bin/average", Programs.AverageOfList());
         FsImage.WriteFile(hw, "/bin/guess", Programs.GuessingGame());
@@ -215,6 +217,8 @@ public class ShellTests : IDisposable
         FsDiskView.DiskNode? binDir = FindChild(boot.Root, "bin");
         Assert.NotNull(binDir);
         Assert.NotNull(FindChild(binDir!, "echo"));
+        Assert.NotNull(FindChild(binDir!, "edit"));   // §4.0 toolchain
+        Assert.NotNull(FindChild(binDir!, "as"));     // §4.2 toolchain — installs despite its larger image
 
         os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128)); // shell = slot 0
         hw.SetActiveProcess(0);

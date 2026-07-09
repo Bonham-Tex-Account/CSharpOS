@@ -111,6 +111,7 @@ See `CSharpOSConsole/Programs.cs` for more examples including memory loads/store
 | [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 49 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
 | [docs/OS-Architecture.md](docs/OS-Architecture.md) | OS structure and function — memory layout with exact offsets, IVT dispatch model, MLFQ scheduler, buddy allocator, device table, Bin disk, demand paging/COW fork, the ISA filesystem (cache, block allocator, directories, file syscalls), process lifecycle (spawn/fork/exec/wait/exit), and the plugin loading mechanism. |
 | [docs/Visualizer-Guide.md](docs/Visualizer-Guide.md) | How to use the console visualizer — launching, every menu option, reading each dashboard panel, key bindings, the interactive **shell** (argv, foreground/background, job-control builtins, Ctrl-C/Ctrl-Z) and **snake**, the disk view, and how the visualizer is implemented. |
+| [docs/Toolchain.md](docs/Toolchain.md) | The in-OS **write → compile → run** toolchain — the assembly text format, `/bin/edit` (author source) and `/bin/as` (the self-hosted two-pass assembler), instruction coverage, error handling, and a worked example. |
 
 ## Architecture overview
 
