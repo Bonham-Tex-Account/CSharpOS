@@ -423,6 +423,504 @@ public static class Programs
         return image;
     }
 
+    // ===== As ================================================================
+    // as <src> <out>: the self-hosted assembler (§4.2a). Reads the word-per-char source text file
+    // at argv[1], assembles one 4-byte instruction word per line, and writes the resulting program
+    // image to argv[2] (which `fs_exec_core` can then run). This increment covers the label-free
+    // subset: shapes None (HLT/RET/…), Reg (OUT/INC/…), RegReg (ADD/CMP/…), and the overloaded MOV
+    // (`MOV r, r2` | `MOV r, imm`). Jumps/CALL (Addr16, need a label table) and DREAD/DWRITE
+    // (RegRegReg) are deferred to §4.2b/c and currently error out.
+    //
+    // Text format: one instruction per line, single-space-separated tokens; registers by NAME
+    // (EAX, R8, …); immediates in decimal; ';' starts a comment; blank/comment lines are skipped.
+    // The mnemonic + register tables are the shared AsmTable images, embedded in the program at
+    // MnemTbl/RegTbl and scanned with the same fixed-width record layout AsmTable serializes.
+    //
+    // Everything (tables + buffers + parse-state cells) lives in the image (RAM-home), so like snake
+    // it thrashes the 4-frame pool and runs slowly-but-correctly. EBP is this program's dedicated
+    // address scratch for the GetC/PutC cell helpers; subroutines avoid it. Registers survive FSYS
+    // (only EAX carries the result), so parse state that must persist across a syscall lives in memory.
+    public static byte[] As()
+    {
+        // Instruction-word bytes we assemble into: b1<<8 etc.; opcode order MOV_REG_REG for MOV base.
+        const int MovImm8 = AsmTable.MovImm8Opcode;    // 0x02 — MOV r, imm8
+        const int MovImm16Op = AsmTable.MovImm16Opcode; // 0x03 — MOV r, imm16
+
+        // Fixed-width serialized-record strides / field offsets (bytes) from the shared table.
+        int MREC = AsmTable.MnemonicRecordWords * 4;   // mnemonic record stride
+        int MOPC = AsmTable.MnemonicOpcodeWord * 4;    // opcode field
+        int MSHP = AsmTable.MnemonicShapeWord * 4;     // shape field
+        int RREC = AsmTable.RegisterRecordWords * 4;   // register record stride
+        int RIDX = AsmTable.RegisterIndexWord * 4;     // index field
+
+        byte[] mtab = AsmTable.BuildMnemonicTableImage();
+        byte[] rtab = AsmTable.BuildRegisterTableImage();
+
+        // ---- image memory map (byte offsets; all past the code, which is guarded below) ----
+        const int MnemTbl = 4096;                       // embedded mnemonic table (2448 B; slot 2496 = 1 record headroom)
+        const int RegTbl = 6592;                        // embedded register table (800 B; slot Src-RegTbl = 832)
+        const int Src = 7424;                           // source text buffer (word-per-char)
+        const int SrcCapWords = 480;                    // stop reading here so a chunk can't overrun Src (2048 B)
+        const int ReadChunk = 32;                       // words per FSYS read
+        const int Token = 9472;                         // current token, word-per-char, null-terminated (128 B)
+        const int OutWord = 9600;                       // the 4-byte instruction word to write
+        const int ArgvBase = 9604;                      // saved argv base
+        const int SrcLen = 9608;                        // source length in chars (= words)
+        const int SrcPos = 9612;                        // parse cursor, byte offset into Src
+        const int FdOut = 9616;                         // output file descriptor
+        const int OpcodeC = 9620, ShapeC = 9624;        // current instruction's opcode + operand shape
+        const int B1C = 9628, B2C = 9632, B3C = 9636;   // current instruction's operand bytes
+        const int ImageEnd = 9664;
+
+        if (mtab.Length > RegTbl - MnemTbl)
+        {
+            throw new InvalidOperationException($"as: mnemonic table ({mtab.Length} B) overruns its slot.");
+        }
+        if (rtab.Length > Src - RegTbl)
+        {
+            throw new InvalidOperationException($"as: register table ({rtab.Length} B) overruns its slot.");
+        }
+
+        Assembler asm = new Assembler();
+
+        // ---- cell helpers (EBP = address scratch; used only in top-level code, not subroutines) ----
+        void SetReg(RegisterName r, int v)
+        {
+            if (v == -1) { asm.MovImm(r, 0); asm.Dec(r); }
+            else if (v >= 0 && v <= 255) { asm.MovImm(r, v); }
+            else { asm.MovImm16(r, v); }
+        }
+        void GetC(int addr, RegisterName dst) { asm.MovImm16(RegisterName.EBP, addr); asm.Load(dst, RegisterName.EBP); }
+        void PutC(int addr, RegisterName src) { asm.MovImm16(RegisterName.EBP, addr); asm.Store(RegisterName.EBP, src); }
+        void PutCI(int addr, int val) { asm.MovImm16(RegisterName.EBP, addr); SetReg(RegisterName.ECX, val); asm.Store(RegisterName.EBP, RegisterName.ECX); }
+        // Require next_token to return a real token (>0); otherwise a required operand is missing → error.
+        void NeedToken() { asm.Call("nt"); asm.MovImm(RegisterName.ECX, 1); asm.Cmp(RegisterName.EAX, RegisterName.ECX); asm.Js("as_err"); }
+        // reg_lookup must succeed (EAX >= 0); otherwise the operand was not a register name → error.
+        void NeedReg() { asm.Call("rl"); asm.MovImm(RegisterName.ECX, 0); asm.Cmp(RegisterName.EAX, RegisterName.ECX); asm.Js("as_err"); }
+
+        // ================= main =================
+        // Entry: EAX = argc, EBX = argv base. Need argc >= 3 (as, src, out).
+        PutC(ArgvBase, RegisterName.EBX);
+        asm.MovImm(RegisterName.ECX, 3);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Js("as_earlyexit");
+        // open src (argv[1]) read-only
+        asm.Mov(RegisterName.ESI, RegisterName.EBX);
+        asm.MovImm(RegisterName.EAX, 4);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EDI, RegisterName.EAX);        // src path ptr
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Fsys();
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Js("as_earlyexit");                              // open failed
+        asm.Mov(RegisterName.EBX, RegisterName.EAX);         // EBX = fd_src (survives FSYS)
+        // read the whole file into Src (ESI = dest ptr, EDI = total chars; both survive FSYS)
+        asm.MovImm16(RegisterName.ESI, Src);
+        asm.MovImm(RegisterName.EDI, 0);
+        asm.Label("as_read");
+        asm.MovImm(RegisterName.EAX, Hardware.FsysRead);
+        asm.Mov(RegisterName.ECX, RegisterName.ESI);
+        asm.MovImm(RegisterName.EDX, ReadChunk);
+        asm.Fsys();                                          // EAX = chars read (0 EOF, -1 error)
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_readdone");
+        asm.Js("as_readdone");
+        asm.Add(RegisterName.EDI, RegisterName.EAX);         // total += chars
+        asm.Mov(RegisterName.ECX, RegisterName.EAX);
+        asm.MovImm(RegisterName.EDX, 4);
+        asm.Mul(RegisterName.ECX, RegisterName.EDX);
+        asm.Add(RegisterName.ESI, RegisterName.ECX);         // dest += chars*4
+        asm.MovImm16(RegisterName.ECX, SrcCapWords);
+        asm.Cmp(RegisterName.EDI, RegisterName.ECX);
+        asm.Jns("as_readdone");                              // buffer full → stop (v1 caps source size)
+        asm.Jmp("as_read");
+        asm.Label("as_readdone");
+        PutC(SrcLen, RegisterName.EDI);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();                                          // close src (EBX = fd_src)
+        PutCI(SrcPos, 0);
+        // open out (argv[2]): unlink any old file first so a shorter re-assembly can't leave a stale tail
+        GetC(ArgvBase, RegisterName.ESI);
+        asm.MovImm(RegisterName.EAX, 8);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EDI, RegisterName.EAX);        // out path ptr
+        asm.MovImm(RegisterName.EAX, Hardware.FsysUnlink);
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);
+        asm.Fsys();
+        asm.MovImm(RegisterName.EAX, Hardware.FsysOpen);
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);
+        asm.MovImm(RegisterName.ECX, Hardware.FsysCreateFlag);
+        asm.Fsys();
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Js("as_earlyexit");
+        PutC(FdOut, RegisterName.EAX);
+
+        // ---- assemble line by line ----
+        asm.Label("as_line");
+        asm.Call("nt");                                      // EAX: >0 mnemonic len, 0 EOF, -1 blank/comment line
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_finish");                                 // EOF → done
+        asm.Js("as_line");                                   // blank/comment → next line
+        asm.Call("ml");                                      // mnem_lookup → EAX 1/0; OpcodeC/ShapeC set
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_err");                                    // unknown mnemonic
+        PutCI(B1C, 0);
+        PutCI(B2C, 0);
+        PutCI(B3C, 0);
+        GetC(ShapeC, RegisterName.EAX);
+        asm.MovImm(RegisterName.ECX, (int)OperandShape.None);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_emit");
+        asm.MovImm(RegisterName.ECX, (int)OperandShape.Reg);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_reg");
+        asm.MovImm(RegisterName.ECX, (int)OperandShape.RegReg);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_regreg");
+        asm.MovImm(RegisterName.ECX, (int)OperandShape.Mov);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Jz("as_mov");
+        asm.Jmp("as_err");                                   // shape not supported in §4.2a (Addr16/RegRegReg/…)
+
+        asm.Label("as_reg");
+        NeedToken();
+        NeedReg();
+        PutC(B1C, RegisterName.EAX);
+        asm.Jmp("as_emit");
+
+        asm.Label("as_regreg");
+        NeedToken();
+        NeedReg();
+        PutC(B1C, RegisterName.EAX);
+        NeedToken();
+        NeedReg();
+        PutC(B2C, RegisterName.EAX);
+        asm.Jmp("as_emit");
+
+        asm.Label("as_mov");
+        NeedToken();                                         // operand 1
+        NeedReg();
+        PutC(B1C, RegisterName.EAX);
+        NeedToken();                                         // operand 2 (register or decimal)
+        asm.Call("rl");                                      // EAX = reg index, or -1 if not a register
+        asm.MovImm(RegisterName.ECX, 0);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Js("as_mov_imm");
+        PutC(B2C, RegisterName.EAX);                         // MOV r, r2 — opcode stays MOV_REG_REG
+        asm.Jmp("as_emit");
+        asm.Label("as_mov_imm");
+        asm.Call("pu");                                      // EAX = decimal value from Token
+        asm.MovImm(RegisterName.ECX, 255);
+        asm.Cmp(RegisterName.EAX, RegisterName.ECX);
+        asm.Js("as_mov_i8");
+        asm.Jz("as_mov_i8");
+        // MOV r, imm16 → opcode 0x03, B2 = hi, B3 = lo
+        PutCI(OpcodeC, MovImm16Op);
+        asm.Mov(RegisterName.R8, RegisterName.EAX);
+        asm.MovImm(RegisterName.R9, 255);
+        asm.And(RegisterName.R8, RegisterName.R9);
+        PutC(B3C, RegisterName.R8);                          // low byte
+        asm.Mov(RegisterName.R8, RegisterName.EAX);
+        asm.MovImm(RegisterName.R9, 8);
+        asm.Shr(RegisterName.R8, RegisterName.R9);
+        asm.MovImm(RegisterName.R9, 255);
+        asm.And(RegisterName.R8, RegisterName.R9);
+        PutC(B2C, RegisterName.R8);                          // high byte
+        asm.Jmp("as_emit");
+        asm.Label("as_mov_i8");
+        PutCI(OpcodeC, MovImm8);                             // MOV r, imm8 → opcode 0x02
+        PutC(B2C, RegisterName.EAX);
+        asm.Jmp("as_emit");
+
+        // build the 4-byte word (opcode | b1<<8 | b2<<16 | b3<<24) and append it to the output file
+        asm.Label("as_emit");
+        GetC(B3C, RegisterName.R8);
+        asm.MovImm(RegisterName.R9, 8);
+        asm.Shl(RegisterName.R8, RegisterName.R9);
+        GetC(B2C, RegisterName.R10);
+        asm.Or(RegisterName.R8, RegisterName.R10);
+        asm.Shl(RegisterName.R8, RegisterName.R9);
+        GetC(B1C, RegisterName.R10);
+        asm.Or(RegisterName.R8, RegisterName.R10);
+        asm.Shl(RegisterName.R8, RegisterName.R9);
+        GetC(OpcodeC, RegisterName.R10);
+        asm.Or(RegisterName.R8, RegisterName.R10);
+        PutC(OutWord, RegisterName.R8);
+        GetC(FdOut, RegisterName.EBX);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysWrite);
+        asm.MovImm16(RegisterName.ECX, OutWord);
+        asm.MovImm(RegisterName.EDX, 1);
+        asm.Fsys();
+        asm.Jmp("as_line");
+
+        asm.Label("as_finish");
+        GetC(FdOut, RegisterName.EBX);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Exit(RegisterName.EAX);                          // success
+
+        asm.Label("as_err");
+        GetC(FdOut, RegisterName.EBX);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysClose);
+        asm.Fsys();
+        GetC(ArgvBase, RegisterName.ESI);
+        asm.MovImm(RegisterName.EAX, 8);
+        asm.Add(RegisterName.EAX, RegisterName.ESI);
+        asm.Load(RegisterName.EDI, RegisterName.EAX);
+        asm.MovImm(RegisterName.EAX, Hardware.FsysUnlink);   // no /bin/out left behind on a bad assemble
+        asm.Mov(RegisterName.EBX, RegisterName.EDI);
+        asm.Fsys();
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Exit(RegisterName.EAX);                          // failure
+
+        asm.Label("as_earlyexit");
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Exit(RegisterName.EAX);
+
+        // ================= subroutines (CALL/RET; avoid EBP; may clobber freely — the main loop
+        // keeps all persistent state in memory) =================
+
+        // nt (next_token): read the next token from Src at SrcPos into Token (UPPERCASED, null-
+        // terminated), advancing SrcPos. Returns EAX = token length (>0), 0 (EOF), or -1 (end of a
+        // blank/comment line, consumed). Leaf routine (no CALLs).
+        asm.Label("nt");
+        asm.MovImm16(RegisterName.R8, SrcPos);
+        asm.Load(RegisterName.R13, RegisterName.R8);         // R13 = cursor (byte offset)
+        asm.MovImm16(RegisterName.R8, SrcLen);
+        asm.Load(RegisterName.R12, RegisterName.R8);
+        asm.MovImm(RegisterName.R8, 4);
+        asm.Mul(RegisterName.R12, RegisterName.R8);          // R12 = limit (bytes)
+        asm.Label("nt_sp");
+        asm.Cmp(RegisterName.R13, RegisterName.R12);
+        asm.Jns("nt_eof");                                   // cursor >= limit → EOF
+        asm.MovImm16(RegisterName.R8, Src);
+        asm.Add(RegisterName.R8, RegisterName.R13);
+        asm.Load(RegisterName.R9, RegisterName.R8);          // R9 = char
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_eof");                                    // trailing null → EOF
+        asm.MovImm(RegisterName.R10, 32);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_sp_adv");                                 // space → skip
+        asm.MovImm(RegisterName.R10, 10);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_nl");                                     // newline → end of line
+        asm.MovImm(RegisterName.R10, 59);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_com");                                    // ';' → comment to end of line
+        asm.Jmp("nt_read");
+        asm.Label("nt_sp_adv");
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R13, RegisterName.R10);
+        asm.Jmp("nt_sp");
+        asm.Label("nt_nl");
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R13, RegisterName.R10);         // consume the newline
+        asm.MovImm16(RegisterName.R8, SrcPos);
+        asm.Store(RegisterName.R8, RegisterName.R13);
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Dec(RegisterName.EAX);                           // -1
+        asm.Ret();
+        asm.Label("nt_com");
+        asm.Cmp(RegisterName.R13, RegisterName.R12);
+        asm.Jns("nt_com_end");
+        asm.MovImm16(RegisterName.R8, Src);
+        asm.Add(RegisterName.R8, RegisterName.R13);
+        asm.Load(RegisterName.R9, RegisterName.R8);
+        asm.MovImm(RegisterName.R10, 10);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_com_eat");
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R13, RegisterName.R10);
+        asm.Jmp("nt_com");
+        asm.Label("nt_com_eat");
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R13, RegisterName.R10);         // consume the newline
+        asm.Label("nt_com_end");
+        asm.MovImm16(RegisterName.R8, SrcPos);
+        asm.Store(RegisterName.R8, RegisterName.R13);
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Dec(RegisterName.EAX);                           // -1
+        asm.Ret();
+        asm.Label("nt_eof");
+        asm.MovImm16(RegisterName.R8, SrcPos);
+        asm.Store(RegisterName.R8, RegisterName.R13);
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Ret();
+        asm.Label("nt_read");
+        asm.MovImm(RegisterName.R11, 0);                     // char count
+        asm.MovImm16(RegisterName.R15, Token);               // token write ptr
+        asm.Label("nt_rl");
+        asm.Cmp(RegisterName.R13, RegisterName.R12);
+        asm.Jns("nt_rl_end");
+        asm.MovImm16(RegisterName.R8, Src);
+        asm.Add(RegisterName.R8, RegisterName.R13);
+        asm.Load(RegisterName.R9, RegisterName.R8);
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_rl_end");
+        asm.MovImm(RegisterName.R10, 32);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_rl_end");
+        asm.MovImm(RegisterName.R10, 10);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_rl_end");
+        asm.MovImm(RegisterName.R10, 59);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Jz("nt_rl_end");                                 // ';' right after a token ends it (left for next call)
+        asm.MovImm(RegisterName.R10, 97);
+        asm.Cmp(RegisterName.R9, RegisterName.R10);
+        asm.Js("nt_store");                                  // char < 'a'
+        asm.MovImm(RegisterName.R10, 122);
+        asm.Cmp(RegisterName.R10, RegisterName.R9);
+        asm.Js("nt_store");                                  // char > 'z'
+        asm.MovImm(RegisterName.R10, 32);
+        asm.Sub(RegisterName.R9, RegisterName.R10);          // upcase a–z
+        asm.Label("nt_store");
+        asm.Store(RegisterName.R15, RegisterName.R9);
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R15, RegisterName.R10);
+        asm.Add(RegisterName.R13, RegisterName.R10);
+        asm.Inc(RegisterName.R11);
+        asm.Jmp("nt_rl");
+        asm.Label("nt_rl_end");
+        asm.MovImm(RegisterName.R10, 0);
+        asm.Store(RegisterName.R15, RegisterName.R10);       // null-terminate the token
+        asm.MovImm16(RegisterName.R8, SrcPos);
+        asm.Store(RegisterName.R8, RegisterName.R13);
+        asm.Mov(RegisterName.EAX, RegisterName.R11);         // length
+        asm.Ret();
+
+        // se (str_eq): compare Token against the null-terminated name field at R14. EAX = 1 if equal,
+        // else 0. Uses R10–R14 + EAX; leaves R15 alone so ml/rl keep their scan cursor there.
+        asm.Label("se");
+        asm.MovImm16(RegisterName.R13, Token);
+        asm.Label("se_l");
+        asm.Load(RegisterName.R10, RegisterName.R13);
+        asm.Load(RegisterName.R11, RegisterName.R14);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jnz("se_no");
+        asm.MovImm(RegisterName.R12, 0);
+        asm.Cmp(RegisterName.R10, RegisterName.R12);
+        asm.Jz("se_yes");                                    // both hit the null terminator → equal
+        asm.MovImm(RegisterName.R12, 4);
+        asm.Add(RegisterName.R13, RegisterName.R12);
+        asm.Add(RegisterName.R14, RegisterName.R12);
+        asm.Jmp("se_l");
+        asm.Label("se_no");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Ret();
+        asm.Label("se_yes");
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Ret();
+
+        // ml (mnem_lookup): scan the mnemonic table for Token. On match: OpcodeC/ShapeC set, EAX = 1.
+        // On the zero-name terminator: EAX = 0. R15 = scan cursor (survives the se CALL).
+        asm.Label("ml");
+        asm.MovImm16(RegisterName.R15, MnemTbl);
+        asm.Label("ml_l");
+        asm.Load(RegisterName.R10, RegisterName.R15);
+        asm.MovImm(RegisterName.R11, 0);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jz("ml_none");
+        asm.Mov(RegisterName.R14, RegisterName.R15);
+        asm.Call("se");
+        asm.MovImm(RegisterName.R11, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.R11);
+        asm.Jz("ml_found");
+        asm.MovImm(RegisterName.R11, MREC);
+        asm.Add(RegisterName.R15, RegisterName.R11);
+        asm.Jmp("ml_l");
+        asm.Label("ml_found");
+        asm.MovImm(RegisterName.R11, MOPC);
+        asm.Mov(RegisterName.R12, RegisterName.R15);
+        asm.Add(RegisterName.R12, RegisterName.R11);
+        asm.Load(RegisterName.R13, RegisterName.R12);
+        asm.MovImm16(RegisterName.R12, OpcodeC);
+        asm.Store(RegisterName.R12, RegisterName.R13);
+        asm.MovImm(RegisterName.R11, MSHP);
+        asm.Mov(RegisterName.R12, RegisterName.R15);
+        asm.Add(RegisterName.R12, RegisterName.R11);
+        asm.Load(RegisterName.R13, RegisterName.R12);
+        asm.MovImm16(RegisterName.R12, ShapeC);
+        asm.Store(RegisterName.R12, RegisterName.R13);
+        asm.MovImm(RegisterName.EAX, 1);
+        asm.Ret();
+        asm.Label("ml_none");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Ret();
+
+        // rl (reg_lookup): scan the register table for Token. EAX = register index, or -1.
+        asm.Label("rl");
+        asm.MovImm16(RegisterName.R15, RegTbl);
+        asm.Label("rl_l");
+        asm.Load(RegisterName.R10, RegisterName.R15);
+        asm.MovImm(RegisterName.R11, 0);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Jz("rl_none");
+        asm.Mov(RegisterName.R14, RegisterName.R15);
+        asm.Call("se");
+        asm.MovImm(RegisterName.R11, 1);
+        asm.Cmp(RegisterName.EAX, RegisterName.R11);
+        asm.Jz("rl_found");
+        asm.MovImm(RegisterName.R11, RREC);
+        asm.Add(RegisterName.R15, RegisterName.R11);
+        asm.Jmp("rl_l");
+        asm.Label("rl_found");
+        asm.MovImm(RegisterName.R11, RIDX);
+        asm.Mov(RegisterName.R12, RegisterName.R15);
+        asm.Add(RegisterName.R12, RegisterName.R11);
+        asm.Load(RegisterName.EAX, RegisterName.R12);
+        asm.Ret();
+        asm.Label("rl_none");
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Dec(RegisterName.EAX);                           // -1
+        asm.Ret();
+
+        // pu (parse Token as unsigned decimal): EAX = value. Stops at the first non-digit.
+        asm.Label("pu");
+        asm.MovImm16(RegisterName.R13, Token);
+        asm.MovImm(RegisterName.EAX, 0);
+        asm.Label("pu_l");
+        asm.Load(RegisterName.R11, RegisterName.R13);
+        asm.MovImm(RegisterName.R10, 48);
+        asm.Cmp(RegisterName.R11, RegisterName.R10);
+        asm.Js("pu_done");                                   // < '0'
+        asm.MovImm(RegisterName.R10, 57);
+        asm.Cmp(RegisterName.R10, RegisterName.R11);
+        asm.Js("pu_done");                                   // > '9'
+        asm.MovImm(RegisterName.R10, 10);
+        asm.Mul(RegisterName.EAX, RegisterName.R10);
+        asm.MovImm(RegisterName.R10, 48);
+        asm.Sub(RegisterName.R11, RegisterName.R10);
+        asm.Add(RegisterName.EAX, RegisterName.R11);
+        asm.MovImm(RegisterName.R10, 4);
+        asm.Add(RegisterName.R13, RegisterName.R10);
+        asm.Jmp("pu_l");
+        asm.Label("pu_done");
+        asm.Ret();
+
+        byte[] code = asm.Build();
+        if (code.Length > MnemTbl)
+        {
+            throw new InvalidOperationException(
+                $"as: code ({code.Length} bytes) overruns the table area at {MnemTbl}; raise the data offsets.");
+        }
+        byte[] image = new byte[ImageEnd];
+        Array.Copy(code, image, code.Length);
+        Array.Copy(mtab, 0, image, MnemTbl, mtab.Length);
+        Array.Copy(rtab, 0, image, RegTbl, rtab.Length);
+        return image;
+    }
+
     // ===== Shell =============================================================
     // A real command shell (Shell §2 + §2.5 job control): prompt, read a command line (INS), fork,
     // have the child exec-by-path the typed command with its arguments (FSYS Exec). If the line ends
