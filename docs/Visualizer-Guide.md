@@ -143,9 +143,10 @@ Before the shell process starts, `RunShell` populates the filesystem (boot-time 
 `/bin` directory of command programs and a sample text file:
 
 ```
-/bin/ls  /bin/cat  /bin/rm  /bin/mkdir  /bin/echo  /bin/help  /bin/edit
+/bin/ls  /bin/cat  /bin/rm  /bin/mkdir  /bin/echo  /bin/help  /bin/edit  /bin/as
 /bin/counter  /bin/average  /bin/guess  /bin/snake
 /note                       ← text file: "hello from the filesystem"
+/hello.s                    ← sample assembly source (assemble it with /bin/as)
 ```
 
 The shell is then loaded with **4096 bytes of DATA memory** — larger than a normal process —
@@ -185,9 +186,10 @@ become `argv`. A launched program starts with **`EAX = argc`** and **`EBX = argv
 - `/bin/cat /note` → prints the file contents in chunks until EOF.
 - `/bin/rm /path`, `/bin/mkdir /path` → single-arg FS operations.
 - `/bin/edit /path` → a line editor: type lines, a lone `.` on its own line ends input. Each line
-  (plus a newline) is appended to the file. This is how you author a source file inside the OS —
-  the first piece of the in-OS write→compile→run toolchain (a self-hosted `/bin/as` assembler is
-  the eventual companion). Example: `/bin/edit /hi.txt`, type a few lines, `.`, then `/bin/cat /hi.txt`.
+  (plus a newline) is appended to the file. This is how you author a source file inside the OS.
+  Example: `/bin/edit /hi.txt`, type a few lines, `.`, then `/bin/cat /hi.txt`.
+- `/bin/as /src /out` → the self-hosted assembler: reads an assembly source and writes a runnable
+  image (see §4.8 and `docs/Toolchain.md`).
 
 Programs that ignore arguments simply ignore EBX.
 
@@ -250,6 +252,38 @@ stop a runaway foreground `/bin/counter` or suspend `/bin/snake`.
   jobs come and go.
 - Pressing **`d`** during shell FS commands (`ls`, `cat`, `rm`, `mkdir`) shows the **disk view**
   updating as the filesystem changes.
+
+### 4.8 Write → compile → run (compile a program inside the OS)
+
+The shell can author, assemble, and run a program without leaving the running OS. Fastest path —
+assemble the bundled sample and run it:
+
+```
+$ /bin/as /hello.s /bin/hi     ← assembles /hello.s into a new command /bin/hi
+$ /bin/hi                      ← runs it → prints 72
+```
+
+Or write your own source with `/bin/edit`, then assemble and run it:
+
+```
+$ /bin/edit /prog.s
+MOV EAX 0
+MOV EBX 3
+loop:
+INC EAX
+OUT EAX
+CMP EAX EBX
+JNZ loop
+HLT
+.                              ← a lone dot ends input
+$ /bin/as /prog.s /bin/count3
+$ /bin/count3                  ← prints 1, 2, 3
+```
+
+`/bin/as` is itself an ISA program, so watch the **Kernel/OS stream** and **paging** panels while it
+runs — it is a large, buffer-heavy program that thrashes the 4-frame pool, so it runs deliberately
+slowly and visibly. A malformed source prints nothing and leaves **no** output file (it unlinks a
+partial image and exits non-zero). The full assembly text format is in `docs/Toolchain.md`.
 
 ---
 

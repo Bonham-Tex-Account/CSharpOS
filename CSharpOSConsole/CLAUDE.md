@@ -28,7 +28,8 @@ marker and `Read(offset=…, limit=…)`** — never read the whole file.
 | `SpawnChildren` | demo | parent FORKs 3 children → process-tree demo |
 | `FilesystemDemo` | FS demo | creates a file, FSYS write/read, prints "HI!" from disk |
 | `Ls` / `Cat` / `Rm` / `Mkdir` / `Echo` / `Help` | **/bin programs** | the shell's command programs (argv ABI: EAX=argc, EBX=argv). Installed into `/bin` by `RunShell` |
-| `Edit` | **/bin program (§4.0)** | `edit <file>` — a line editor: INS lines → append each + `\n` to the file (FSYS write), a lone `.` ends input. The source-authoring brick for the write→compile→run toolchain; content is word-per-char (what a future `/bin/as` reads). Installed by `RunShell` |
+| `Edit` | **/bin program (§4.0)** | `edit <file>` — a line editor: INS lines → append each + `\n` to the file (FSYS write), a lone `.` ends input. The source-authoring brick for the write→compile→run toolchain; content is word-per-char (what `/bin/as` reads). Installed by `RunShell` |
+| `As` | **/bin program (§4.2)** | `as <src> <out>` — the self-hosted **assembler**. ~510 lines. Reads a word-per-char asm source, emits one packed instruction word per line to `<out>` (a runnable image), then `EXIT 0`; malformed source → close+unlink `<out>`, `EXIT 1`. Two-pass (labels). Embeds the `AsmTable` mnemonic+register images (`MnemTbl=4096`/`RegTbl=6592`) + an in-image label table (`LabelTbl`). Grep internal labels: `as_line`/`as_p1` (pass 1) · shape handlers `as_reg`/`as_regreg`/`as_regregreg`/`as_mov`/`as_addr` · `as_emit`/`as_err` · subs `nt`(tokenize) `se`(str_eq) `ml`(mnem) `rl`(reg) `pu`(uint) `il`(is-label) `ll`(label). Installed by `RunShell`. See `docs/Toolchain.md` for the asm text format |
 | **`Shell`** | shell (§2 + §2.5) | the interactive shell. ~340 lines. prompt→INS→`&`-detect→FORK→exec / builtins. Builtins: `jobs`/`kill`/`stop`/`bg`/`fg` (job control). Grep internal ISA labels: `drain`, `amp`, `parent`, `do_jobs`/`do_kill`/`do_stop`/`do_bg`/`do_fg`, helpers `cmd_is`/`parse_uint`/`job_lookup`/`job_clear`. DATA offsets: strings @1024+, LineBuf @1408, JobsBase @1664 |
 | **`Snake`** | game (§3) | the snake game. ~240 lines. W=8×H=8 grid, life-countdown body, INPOLL arrows, LCG food, whole-grid OUTS/frame. Grep internal labels: `main`, `move`, `nogrow`, `dead`, `place_food`, `render`, `border`. DATA: state @2048, GRID @2112, REND @2624. Local C# helpers `Ld`/`StR`/`StI`/`EmitR11` |
 
@@ -39,9 +40,11 @@ via `ScheduleStaggeredLoads`), `9` = **Shell** (`RunShell`), `10`–`13` (two-gu
 FS demo). Each mode calls `PromptMode()` + `PromptDetail()` then a `Run*` launcher.
 
 **`RunShell`** (mode 9): `FsImage.EnsureDir("/bin")` + `WriteFile` the /bin programs (ls/cat/rm/mkdir/
-echo/help/counter/average/guess) **and `/bin/snake`** + a `/note` file, then loads `Programs.Shell()`
-with **memory 4096** (so an exec'd program — esp. snake's grid+render buffer — has DATA room; exec
-preserves `RequiredMemory`). Type absolute commands (`/bin/ls /`, `/bin/snake`, `/bin/echo hi &`).
+echo/help/**edit**/**as**/counter/average/guess) **and `/bin/snake`** + a `/note` file **and a `/hello.s`
+sample source**, then loads `Programs.Shell()` with **memory 4096** (so an exec'd program — esp. snake's
+grid+render buffer — has DATA room; exec preserves `RequiredMemory`). Type absolute commands (`/bin/ls /`,
+`/bin/snake`, `/bin/echo hi &`). **Write→compile→run:** `/bin/as /hello.s /bin/hi` then `/bin/hi` (prints
+72), or author with `/bin/edit /prog.s` (end input with a lone `.`) → `/bin/as /prog.s /bin/prog` → `/bin/prog`.
 
 ## Conventions
 - Program images are staged onto `hw.Disk` (slot ≤ `DefaultDiskSlotSize`=2048) then referenced by a

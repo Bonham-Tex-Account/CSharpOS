@@ -265,6 +265,7 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
     FsImage.WriteFile(hw, "/bin/echo", Programs.Echo());
     FsImage.WriteFile(hw, "/bin/help", Programs.Help());
     FsImage.WriteFile(hw, "/bin/edit", Programs.Edit());   // §4.0: author a source file (end input with ".")
+    FsImage.WriteFile(hw, "/bin/as", Programs.As());       // §4.2: assemble a source file into a runnable image
     FsImage.WriteFile(hw, "/bin/counter", Programs.CounterToTen());
     FsImage.WriteFile(hw, "/bin/average", Programs.AverageOfList());
     FsImage.WriteFile(hw, "/bin/guess", Programs.GuessingGame());
@@ -277,12 +278,24 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
         note[n * 4] = (byte)noteText[n];
     }
     FsImage.WriteFile(hw, "/note", note);
+    // A ready-to-assemble sample so the write→compile→run loop can be tried without editing first:
+    //   /bin/as /hello.s /bin/hi   then   /bin/hi   → prints 72. Source is word-per-char, like /note.
+    string helloSrc = "MOV EAX 72\nOUT EAX\nHLT\n";
+    byte[] helloBytes = new byte[helloSrc.Length * 4];
+    for (int h = 0; h < helloSrc.Length; h++)
+    {
+        helloBytes[h * 4] = (byte)helloSrc[h];
+    }
+    FsImage.WriteFile(hw, "/hello.s", helloBytes);
 
     int shellSlot = hw.Disk.Store(Programs.Shell());
 
     Console.WriteLine("  Shell: focus it (Tab), type an absolute command + Enter (it forks/execs, then re-prompts):");
     Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter   /bin/snake");
     Console.WriteLine("    (snake: arrow keys steer, 'q' quits; Ctrl-C kills the foreground job, /bin/snake & backgrounds)");
+    Console.WriteLine("  Write -> compile -> run, all inside the OS:");
+    Console.WriteLine("    /bin/as /hello.s /bin/hi   then   /bin/hi          (assemble the bundled sample, then run it)");
+    Console.WriteLine("    /bin/edit /prog.s   (type asm lines, end with a lone \".\")   /bin/as /prog.s /bin/prog   /bin/prog");
     Console.WriteLine();
 
     SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail);
