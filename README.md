@@ -27,7 +27,7 @@ dotnet build
 dotnet run --project CSharpOSConsole
 ```
 
-The menu lets you pick one of 13 demo scenarios. After selecting a scenario you are also prompted for visualizer detail level (1 minimal / 2 normal / 3 high) and rendering performance level.
+The menu lets you pick one of 15 demo scenarios. After selecting a scenario you are also prompted for visualizer detail level (1 minimal / 2 normal / 3 high) and rendering performance level.
 
 ### Demo scenarios
 
@@ -41,11 +41,13 @@ The menu lets you pick one of 13 demo scenarios. After selecting a scenario you 
 | 6 | Memory churn — short jobs continuously load and exit; watch the buddy tree |
 | 7 | Fill & drain — mixed-size jobs fill heap then drain; watch coalescing/reclaim |
 | 8 | Scheduler + memory — counter + average run while short jobs churn the heap |
-| 9 | Shell — interactive: type an absolute command (`/bin/ls /`), run it in the background with `&`, and use the built-in job control (`jobs`, `fg`, `bg`, `stop`, `kill <n>`); `Ctrl-C`/`Ctrl-Z` signal the foreground job. Includes `/bin/snake` (an arrow-key game) |
+| 9 | Shell — interactive: type an absolute command (`/bin/ls /`), run it in the background with `&`, and use the built-in job control (`jobs`, `fg`, `bg`, `stop`, `kill <n>`); `Ctrl-C`/`Ctrl-Z` signal the foreground job. Includes `/bin/snake` (an arrow-key game) and the in-OS **write→compile→run** toolchain — author source with `/bin/edit`, assemble it on the machine with the self-hosted `/bin/as`, and run the result (see [docs/Toolchain.md](docs/Toolchain.md)) |
 | 10 | Two guessing games — Tab switches focus between them (process switching) |
 | 11 | Spawn tree — a parent forks two children; watch the Process tree panel |
 | 12 | String I/O demo — type a name in the Screen panel, press Enter (`OUTS`/`INS` in action) |
 | 13 | Filesystem demo — a process creates a file, writes/reads it via `FSYS`, prints it back |
+| 14 | Auto-shell tour — a **hands-free** scripted shell session (`help`, `ls`, `echo`, `cat`, `counter`); watch fork/exec and the Process tree without typing |
+| 15 | Auto-shell job control — hands-free; launches several background jobs then `jobs`, so the Process tree fills with the shell's concurrent children |
 
 There is one shared Screen panel showing the focused process's I/O; `Tab` switches focus between running processes. Typed input is sent as an int or a string depending on what the focused process is waiting on.
 
@@ -108,7 +110,7 @@ See `CSharpOSConsole/Programs.cs` for more examples including memory loads/store
 
 | Document | Description |
 |---|---|
-| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 49 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
+| [docs/ISA.md](docs/ISA.md) | Complete instruction set reference — all 52 opcodes, encoding, operand forms, register set, flags, privilege-level restrictions, worked examples, and planned-but-unimplemented instructions. |
 | [docs/OS-Architecture.md](docs/OS-Architecture.md) | OS structure and function — memory layout with exact offsets, IVT dispatch model, MLFQ scheduler, buddy allocator, device table, Bin disk, demand paging/COW fork, the ISA filesystem (cache, block allocator, directories, file syscalls), process lifecycle (spawn/fork/exec/wait/exit), and the plugin loading mechanism. |
 | [docs/Visualizer-Guide.md](docs/Visualizer-Guide.md) | How to use the console visualizer — launching, every menu option, reading each dashboard panel, key bindings, the interactive **shell** (argv, foreground/background, job-control builtins, Ctrl-C/Ctrl-Z) and **snake**, the disk view, and how the visualizer is implemented. |
 | [docs/Toolchain.md](docs/Toolchain.md) | The in-OS **write → compile → run** toolchain — the assembly text format, `/bin/edit` (author source) and `/bin/as` (the self-hosted two-pass assembler), instruction coverage, error handling, and a worked example. |
@@ -123,7 +125,7 @@ The `Hardware` class emulates a 32-bit CPU. The register file has 24 registers (
 
 ### Instruction set
 
-49 opcodes, grouped by category (full table with encodings in `docs/ISA.md`):
+52 opcodes, grouped by category (full table with encodings in `docs/ISA.md`):
 
 | Mnemonic | Opcode | Description |
 |---|---|---|

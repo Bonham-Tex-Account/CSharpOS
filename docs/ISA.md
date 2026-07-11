@@ -93,7 +93,7 @@ There is no carry, overflow, parity, or auxiliary-carry flag.
 
 ## Complete instruction list
 
-49 opcodes are currently defined. The "Assembler method" column shows the C# `Assembler` method that emits the instruction.
+52 opcodes are currently defined. The "Assembler method" column shows the C# `Assembler` method that emits the instruction.
 
 ### Data movement
 

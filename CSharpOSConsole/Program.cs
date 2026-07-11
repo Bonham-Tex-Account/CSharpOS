@@ -70,6 +70,8 @@ while (true)
     Console.WriteLine(" 11) Spawn tree (parent forks two children — watch parent-child tree in Process tree panel)");
     Console.WriteLine(" 12) String I/O demo (type a name in the Screen panel, press Enter — OUTS/INS in action)");
     Console.WriteLine(" 13) Filesystem demo (a process creates a file, writes/reads it via FSYS — prints 'HI!' from disk)");
+    Console.WriteLine(" 14) Auto-shell tour (hands-free: the shell runs help/ls/echo/cat/counter — watch fork/exec & the process tree)");
+    Console.WriteLine(" 15) Auto-shell job control (hands-free: launches background jobs, then `jobs` — watch the process tree fill in)");
     Console.WriteLine("  q) Quit");
     Console.WriteLine("  (during a run: 'a' auto, 's' single-step, left/right arrows scrub history, 'o' toggle program I/O, 'q' quit run)");
     Console.WriteLine("  (one shared Screen panel shows the focused process; Tab switches focus, type text + Enter sends it as int or string)");
@@ -181,6 +183,40 @@ while (true)
             RunShared(new List<StagedProgram> { fsdemo }, mode, detail);
             break;
         }
+        case "14":
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            // Auto-shell tour: fork/exec a few commands hands-free — watch the Program/Kernel
+            // streams, the Screen panel's output, and the Process tree grow a child per command.
+            List<string> tour = new List<string>
+            {
+                "/bin/help",
+                "/bin/ls /",
+                "/bin/echo hello from the auto shell",
+                "/bin/cat /note",
+                "/bin/counter",
+            };
+            RunShell(mode, detail, tour);
+            break;
+        }
+        case "15":
+        {
+            VisualizerMode mode = PromptMode();
+            DetailLevel detail = PromptDetail();
+            // Auto-shell job control: launch several background jobs so the Process tree shows the
+            // shell with multiple concurrent children, list them with `jobs`, then they finish/reap.
+            List<string> jobs = new List<string>
+            {
+                "/bin/counter &",
+                "/bin/counter &",
+                "/bin/counter &",
+                "jobs",
+                "/bin/echo three background jobs launched",
+            };
+            RunShell(mode, detail, jobs);
+            break;
+        }
         default:
             Console.WriteLine("Unknown option.");
             break;
@@ -248,7 +284,7 @@ void RunShared(List<StagedProgram> programs, VisualizerMode mode, DetailLevel de
 // Shell run (mode 9): stage the demo programs to disk as commands, boot the shell as the
 // only initial process, and let the user type a command id to fork/exec it. Exercises
 // FORK / EXEC / SETFOCUS / WAIT live in the dashboard.
-void RunShell(VisualizerMode mode, DetailLevel detail)
+void RunShell(VisualizerMode mode, DetailLevel detail, IReadOnlyList<string>? autoScript = null)
 {
     Console.WriteLine();
     OperatingSystem os = OsPluginLoader.Load(pluginPath, Console.Out);
@@ -290,15 +326,32 @@ void RunShell(VisualizerMode mode, DetailLevel detail)
 
     int shellSlot = hw.Disk.Store(Programs.Shell());
 
-    Console.WriteLine("  Shell: focus it (Tab), type an absolute command + Enter (it forks/execs, then re-prompts):");
-    Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter   /bin/snake");
-    Console.WriteLine("    (snake: arrow keys steer, 'q' quits; Ctrl-C kills the foreground job, /bin/snake & backgrounds)");
-    Console.WriteLine("  Write -> compile -> run, all inside the OS:");
-    Console.WriteLine("    /bin/as /hello.s /bin/hi   then   /bin/hi          (assemble the bundled sample, then run it)");
-    Console.WriteLine("    /bin/edit /prog.s   (type asm lines, end with a lone \".\")   /bin/as /prog.s /bin/prog   /bin/prog");
+    if (autoScript == null)
+    {
+        Console.WriteLine("  Shell: focus it (Tab), type an absolute command + Enter (it forks/execs, then re-prompts):");
+        Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter   /bin/snake");
+        Console.WriteLine("    (snake: arrow keys steer, 'q' quits; Ctrl-C kills the foreground job, /bin/snake & backgrounds)");
+        Console.WriteLine("  Write -> compile -> run, all inside the OS:");
+        Console.WriteLine("    /bin/as /hello.s /bin/hi   then   /bin/hi          (assemble the bundled sample, then run it)");
+        Console.WriteLine("    /bin/edit /prog.s   (type asm lines, end with a lone \".\")   /bin/as /prog.s /bin/prog   /bin/prog");
+    }
+    else
+    {
+        Console.WriteLine("  Auto-shell demo: the shell is driven automatically — watch the Program/Kernel streams,");
+        Console.WriteLine("  the Screen panel, and the Process tree as each command forks and runs. Scripted commands:");
+        foreach (string cmd in autoScript)
+        {
+            Console.WriteLine($"    $ {cmd}");
+        }
+        Console.WriteLine("  ('a' auto / 's' step / Tab focus / 'q' quit — you can still take over the keyboard.)");
+    }
     Console.WriteLine();
 
     SpectreDashboard dashboard = new SpectreDashboard(hw, os, mode, StepDelayMs, detail);
+    if (autoScript != null)
+    {
+        dashboard.SetAutoInputScript(autoScript);
+    }
     // The shell needs enough memory for the largest program it execs into: exec preserves the
     // process's RequiredMemory, so /bin/snake (grid + render buffer in DATA at ~2–3.4 KB) inherits
     // this. 4096 gives it room; the shell's own DATA (LineBuf/jobs table) fits easily.

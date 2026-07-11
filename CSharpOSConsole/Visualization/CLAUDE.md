@@ -116,6 +116,9 @@ Tests create a `NoColors` Spectre console over a `StringWriter` and call these t
 ### Staggered Load
 `SpectreDashboard.ScheduleStaggeredLoads(IEnumerable<Process> processes, int intervalSteps)` — queues processes for injection at run time (modes 6–8 in Program.cs). Uses an **empty** terminals dict (no windows).
 
+### Scripted Input (auto-shell demos, modes 14–15)
+`SpectreDashboard.SetAutoInputScript(IEnumerable<string> commands)` installs a queue of shell command lines typed in hands-free. The run loop calls `DriveAutoScript()` each iteration: it injects the next line (`SubmitStringInput` → `RaiseStringInputInterrupt`) **only** when `TryFindShellAtPrompt` finds a process `Blocked` on `WaitReason.StringInput` (the shell's `INS` prompt), one at a time, with an `AutoCommandGapFrames`-frame readable pause (frame- not instruction-based, since the shell runs no instructions while blocked). `RunScriptedHeadless(maxSteps)` is the headless test seam (no TTY) — drives the same path until the script drains and the shell settles back at its prompt. Test: `ShellTests.AutoShell_ScriptedInput_DrivesTheShellHandsFree`.
+
 ---
 
 ## ConsoleVisualizer (coordinator used by tests)

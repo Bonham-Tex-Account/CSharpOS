@@ -22,8 +22,8 @@ Cross-file calls resolve two ways: C# calls (e.g. BuildOsImage → EmitFsOp) wor
 `OsRoutines.BuildOsImage()` emits routines in this order, recording each start address:
 
 ```
-[IVT: 20 slots × 4 bytes = 80 bytes]
-[CodeBase = 80]
+[IVT: 23 slots × 4 bytes = 92 bytes]   (IvtSlotCount=23, IvtSize=92)
+[CodeBase = 92]
 EmitContextSwitch    → IvtContextSwitch (slot 0)        OsRoutines.cs:124
 EmitSchedule         → IvtSchedule (slot 7)             OsRoutines.cs:208
 EmitBlock            → IvtBlockInput + IvtBlockOutput (slots 5 & 6, same address) :216
@@ -268,7 +268,7 @@ When an ISA routine misbehaves silently, **write trace values into free heap and
 ```csharp
 public class BasicOS : OperatingSystem
 {
-    public override int OsMemorySize => OsLayout.TotalSize;          // 32300 (DataBase 20480 + 11820)
+    public override int OsMemorySize => OsLayout.TotalSize;          // 37860 (DataBase 24576 + 13284)
     protected override bool UsesFilesystemBoot => true;             // programs install to /bin, run FS-backed (Phase 4)
     public override byte[] BuildOsImage(int osMemoryBase) => OsRoutines.BuildOsImage();
     public BasicOS(TextWriter log) : base(CollectTraps(), log) { }

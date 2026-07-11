@@ -247,6 +247,44 @@ public class ShellTests : IDisposable
         _ = ints;
     }
 
+    /// <summary>
+    /// The visualizer's auto-shell demos (Program.cs modes 14/15) type a scripted sequence of
+    /// commands into the shell with no keyboard. This drives the same
+    /// <see cref="SpectreDashboard.RunScriptedHeadless"/> / <c>DriveAutoScript</c> path headlessly and
+    /// confirms each scripted command reaches the shell (only injected when it is at its INS prompt),
+    /// forks/execs, and produces output.
+    /// </summary>
+    [Fact]
+    public void AutoShell_ScriptedInput_DrivesTheShellHandsFree()
+    {
+        BasicOS os = new BasicOS(new StringWriter());
+        Hardware hw = new Hardware(Memory, Test.AllRegisters(), os);
+
+        List<int> ints = new List<int>();
+        List<string?> strings = new List<string?>();
+        // Record only — the dashboard installs its own ProgramOutput handler that acknowledges
+        // output completion, so this must not also call RaiseOutputComplete (double-ack).
+        hw.ProgramOutput += (object? sender, ProgramOutputArgs e) =>
+        {
+            if (e.StringValue != null) { strings.Add(e.StringValue); } else { ints.Add(e.Value); }
+        };
+
+        FsImage.EnsureDir(hw, "/bin");
+        FsImage.WriteFile(hw, "/bin/echo", Programs.Echo());
+        FsImage.WriteFile(hw, "/bin/counter", Programs.CounterToTen());
+        os.LoadProcess(new Process(hw.Disk.Store(Programs.Shell()), 1024, 128));   // shell = slot 0
+        hw.SetActiveProcess(0);
+
+        SpectreDashboard dashboard = new SpectreDashboard(hw, os, VisualizerMode.Normal, 0, DetailLevel.High);
+        dashboard.SetAutoInputScript(new List<string> { "/bin/echo auto works", "/bin/counter" });
+        dashboard.RunScriptedHeadless(500_000);
+
+        Assert.Contains("auto", strings);    // first scripted command ran: echo argv[1]
+        Assert.Contains("works", strings);   // ...and argv[2] (the whole line was delivered)
+        Assert.Contains(10, ints);           // second scripted command ran: /bin/counter printed 1..10
+        Assert.True(os.HasProcesses);        // the shell is still looping at its prompt
+    }
+
     [Fact]
     public void Shell_BackgroundJob_RunsWithoutBlockingTheShell_ThenReapsItAtTheNextPrompt()
     {

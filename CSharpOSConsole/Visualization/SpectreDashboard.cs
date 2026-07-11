@@ -37,6 +37,16 @@ public sealed class SpectreDashboard
     private int staggerInterval;
     private int lastLoadStep;
 
+    // Optional scripted shell input: a queue of command lines fed to the shell automatically
+    // (hands-free demos — see Program.cs auto-shell modes). Each is injected only when a shell
+    // is sitting at its prompt (Blocked on StringInput), one at a time, with a short readable
+    // pause between them so the shell's fork/exec and the process tree are watchable.
+    private Queue<string>? autoScript;
+    private int autoFrameCounter;
+    private int lastAutoInjectFrame = -1000;
+    private int lastAutoInjectInstr = -1;
+    private const int AutoCommandGapFrames = 25;
+
     // When true the shared "Buddy allocator" panel slot renders the filesystem/disk view
     // instead (toggled by the `d` key). They are alternate resource views seen one at a time.
     // Public so the headless render seam can exercise the disk panel without a keyboard.
@@ -108,6 +118,98 @@ public sealed class SpectreDashboard
     private void SubmitStringInput(string value)
     {
         hw.RaiseStringInputInterrupt(value);
+    }
+
+    /// <summary>
+    /// Installs a scripted sequence of shell command lines. During the run the dashboard types
+    /// them into the shell automatically — one at a time, each only once the shell is waiting at
+    /// its prompt — so a viewer can watch the shell and process-tree panels without a keyboard.
+    /// </summary>
+    public void SetAutoInputScript(IEnumerable<string> commands)
+    {
+        autoScript = new Queue<string>(commands);
+    }
+
+    // Feeds the next scripted command to the shell when it is ready. Called once per run-loop
+    // iteration; the frame counter (not instruction count) drives the between-command pause,
+    // because the shell executes no instructions while it is blocked at the prompt.
+    private void DriveAutoScript()
+    {
+        autoFrameCounter++;
+        if (autoScript == null || autoScript.Count == 0)
+        {
+            return;
+        }
+        if (interaction.Paused)
+        {
+            return; // respect a manual pause — don't queue commands the viewer can't see run
+        }
+        if (autoFrameCounter - lastAutoInjectFrame < AutoCommandGapFrames)
+        {
+            return; // brief readable gap; also stops a second inject into the same prompt
+        }
+        if (!TryFindShellAtPrompt(out int shellIndex))
+        {
+            return; // shell is busy running a command — wait until it re-blocks on INS
+        }
+        hw.SetActiveProcess(shellIndex);          // make sure the line reaches the shell's stdin
+        SubmitStringInput(autoScript.Dequeue());
+        lastAutoInjectFrame = autoFrameCounter;
+        lastAutoInjectInstr = model.InstructionCount;
+    }
+
+    // A process sitting at a shell prompt is Blocked with WaitReason.StringInput (the INS wait).
+    // In the scripted demos the shell is the only such process, so the lowest-index match is it.
+    private bool TryFindShellAtPrompt(out int index)
+    {
+        for (int i = 0; i < OsLayout.MaxProcesses; i++)
+        {
+            int entry = OsLayout.ProcessTableOffset + i * Hardware.ProcessEntrySize;
+            int state = ReadOsWord(entry + Hardware.ProcessEntryState);
+            int wait = ReadOsWord(entry + Hardware.ProcessEntryWaitReason);
+            if (state == (int)ProcessState.Blocked && wait == (int)WaitReason.StringInput)
+            {
+                index = i;
+                return true;
+            }
+        }
+        index = -1;
+        return false;
+    }
+
+    private int ReadOsWord(int address)
+    {
+        byte[] b = hw.ReadBytes(address);
+        return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+    }
+
+    /// <summary>
+    /// Headless driver for the scripted-input demos (tests/smoke): steps the emulator, feeding the
+    /// shell each scripted command as it reaches its prompt, until the script is drained and the
+    /// shell has settled back at the prompt (the last command finished) or <paramref name="maxSteps"/>
+    /// is reached. No rendering — exercises the same <see cref="DriveAutoScript"/> path as the live loop.
+    /// </summary>
+    public void RunScriptedHeadless(int maxSteps)
+    {
+        frames.Capture(model);
+        bool drained = false;
+        for (int s = 0; s < maxSteps; s++)
+        {
+            DriveAutoScript();
+            drained = drained || autoScript == null || autoScript.Count == 0;
+            if (os.HasProcesses)
+            {
+                hw.Run();
+            }
+            bridge.RefreshProcessTable();
+            frames.Capture(model);
+            // Done once every scripted command has run: the queue is empty AND the shell is back at
+            // its prompt having made progress since the final injection.
+            if (drained && model.InstructionCount > lastAutoInjectInstr && TryFindShellAtPrompt(out _))
+            {
+                break;
+            }
+        }
     }
 
     // Sends a raw keycode to the focused process's key input queue (for INK/INPOLL).
@@ -206,6 +308,7 @@ public sealed class SpectreDashboard
                 while (true)
                 {
                     InjectPendingLoads();
+                    DriveAutoScript();
 
                     // If idle and more work is queued, load the next one immediately so
                     // the run keeps going (and the heap churns).

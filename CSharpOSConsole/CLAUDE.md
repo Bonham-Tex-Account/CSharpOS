@@ -37,7 +37,9 @@ marker and `Read(offset=…, limit=…)`** — never read the whole file.
 
 `1`–`5` per-process window modes (counter/average/guess/combos), `6`–`8` memory churn (`BusyThenHalt`
 via `ScheduleStaggeredLoads`), `9` = **Shell** (`RunShell`), `10`–`13` (two-guess/spawn-tree/strings/
-FS demo). Each mode calls `PromptMode()` + `PromptDetail()` then a `Run*` launcher.
+FS demo), `14`–`15` = **auto-shell demos** (`RunShell(mode, detail, autoScript)` — a scripted command
+list fed to the shell hands-free: 14 = tour, 15 = background-job/process-tree). Each mode calls
+`PromptMode()` + `PromptDetail()` then a `Run*` launcher.
 
 **`RunShell`** (mode 9): `FsImage.EnsureDir("/bin")` + `WriteFile` the /bin programs (ls/cat/rm/mkdir/
 echo/help/**edit**/**as**/counter/average/guess) **and `/bin/snake`** + a `/note` file **and a `/hello.s`

@@ -61,9 +61,13 @@ can't go stale when the OS grows).
 | 11 | Spawn tree | a parent that FORKs children | parent→child relationships in the MLFQ/process rows |
 | 12 | String I/O demo | OUTS/INS string process | type a **name** (text, not just digits) + Enter; it echoes a greeting |
 | 13 | Filesystem demo | a process that creates a file, FSYS write/read | prints `HI!` read back **from disk**; press `d` to watch the disk view change |
+| 14 | **Auto-shell tour** | the shell, driven by a scripted command sequence (no keyboard) | hands-free `help`/`ls`/`echo`/`cat`/`counter` — the **Program/Kernel streams**, **Screen** output, and a child appearing in the **Process tree** for each command |
+| 15 | **Auto-shell job control** | the shell, scripted to launch background jobs | hands-free `/bin/counter &` ×3 then `jobs` — the **Process tree** fills with the shell's concurrent children (see §4.9) |
 
 Modes 6–8 use `ScheduleStaggeredLoads`: the churn jobs are injected one at a time during the
-run (not all up front), which is what makes the allocator visibly cycle.
+run (not all up front), which is what makes the allocator visibly cycle. Modes 14–15 use the
+dashboard's **scripted-input** driver (§4.9): each command is typed into the shell automatically,
+one at a time, only once the shell is back at its prompt — no keyboard needed.
 
 ---
 
@@ -284,6 +288,25 @@ $ /bin/count3                  ← prints 1, 2, 3
 runs — it is a large, buffer-heavy program that thrashes the 4-frame pool, so it runs deliberately
 slowly and visibly. A malformed source prints nothing and leaves **no** output file (it unlinks a
 partial image and exits non-zero). The full assembly text format is in `docs/Toolchain.md`.
+
+### 4.9 Hands-free demos (menu 14 & 15)
+
+Driving the shell by hand (focus it, type an absolute path, watch, repeat) is fiddly if you just want
+to *see* the shell and process tree in action. Menu options **14** and **15** run the shell on
+**autopilot**: a scripted list of commands is typed in for you.
+
+- **14 — Auto-shell tour:** runs `help`, `ls /`, `echo …`, `cat /note`, `counter`. Each command forks a
+  child (visible for a moment as a second node in the **Process tree**) and its output lands in the
+  **Screen** panel.
+- **15 — Auto-shell job control:** launches `/bin/counter &` three times, then `jobs`. Because
+  background jobs don't block the shell, the **Process tree** briefly shows the shell parent with
+  several concurrent children before they finish and are reaped.
+
+You can still take over at any time — press `s` to single-step, `←/→` to scrub history, `Tab` to change
+focus, or just start typing (the script only injects a command while the shell is idle at its prompt, so
+your input and the script don't collide). Under the hood the dashboard injects each line via the same
+string-input path as the keyboard, but only when it detects the shell is blocked at its `INS` prompt, and
+with a short pause between commands so each one is watchable (`SpectreDashboard.DriveAutoScript`).
 
 ---
 

@@ -1,6 +1,6 @@
 # OSTests Quick Reference
 
-xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **616 tests across 52 files.**
+xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **721 tests across 64 files.**
 Goal of this file: pick the right test file *without* grepping the whole suite. Find the subsystem
 below, open that file, then grep the `[Fact]`/`[Theory]` method name inside it (names are full
 sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
@@ -31,7 +31,19 @@ sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
 | **SeedOsData math** (heap sizing, header, MLFQ seed) | `OsSeedDataTests` |
 | **Hardware.Run dispatch branches** | `OsRunLoopTests` |
 | **FORK / EXEC(slot) / WAIT / EXIT / zombies** | `ForkTests`, `ExecTests`, `WaitTests` |
-| **Shell program + SETFOCUS** (fork+exec+wait loop) | `ShellTests` |
+| **Job control: KILL / signals** (TERM/KILL/STOP/CONT + foreground Ctrl-C/Ctrl-Z) | `KillTests` |
+| **Non-blocking reap** (REAP / waitpid-WNOHANG) | `ReapTests` |
+| **Catchable signals** (SIGACTION/SIGRETURN, handler save/restore + re-deliver) | `SignalTests` |
+| **Repeated/chained exec** (`RunUntilIdle` harness; alternation-flake regression) | `FsExecChainTests` |
+| **Fork propagates kernel-written memory** (INS/OUTS dirty-bit carries across fork) | `ForkMemoryProbeTests` |
+| **Shell program + SETFOCUS** (fork+exec+wait loop, job-control builtins, **auto-shell scripted-input demo**) | `ShellTests` |
+| **`/bin` command programs** (ls/cat/rm/mkdir/echo/help) | `FsBinProgramsTests` |
+| **Exec with parsed argv** (command line → argv[]; EAX=argc/EBX=argv) | `FsArgvExecTests` |
+| **Assembler tables** (mnemonic→opcode/shape, register index; host-side) | `AsmTableTests` |
+| **`/bin/as` self-hosted assembler** (assemble source→image, all shapes + labels/branches, run) | `FsAssemblerTests` |
+| **`/bin/edit` line editor** (author a source file) | `FsToolchainTests` |
+| **Snake game** (render/input/collision + the `cache_flush`/ECX scheduler regression) | `SnakeTests` |
+| **Disk-view reconstruction** (`FsDiskView` snapshot: superblock/block-map/tree) | `FsDiskViewTests` |
 | **Focus / foreground I/O model** | `HardwareFocusTests` |
 | **Position-independent addressing** | `PositionIndependenceTests` |
 | **Paging** (demand fault-in, frames, swap, COW) | `PagingTests` |

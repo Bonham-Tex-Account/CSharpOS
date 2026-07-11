@@ -160,7 +160,7 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 `DataBase = 24576` (raised from 20480 in Shell §2.5 JC-A once IvtReap pushed the OS code past 20.7 KB). **Addresses below are given as `DataBase + N` (DataBase-relative) so a future DataBase bump doesn't invalidate this table** — the earlier drift taught us not to hardcode absolutes. To get an absolute address, add DataBase. Offsets shift only if an *earlier* field's size changes.
 
-> ⚠️ **Post-process-table `+N` offsets below are stale by +64** since Shell §2.5 grew `ProcessEntrySize` 192→200 (process table 1536→1600). The **Header** rows (through ProcessTableOffset +48) are correct; every row in **After Process Table** and below is now +64 larger. **Use the `os-facts` skill for exact values** (`dotnet run --project .claude/skills/os-facts/dump -- layout`) rather than trusting these until they're re-synced. Confirmed anchors (post JC-E): `ProcessEntrySize=208`, `DataBase=24576`, `TotalSize=37860` (abs), `SignalSaveBase=37060`, `CodeBase=92`, `IvtSlotCount=23`. JC-B/D region `JobCtlBase` (KillSig @0, KillSaveIndex @4, KillNoDeliver @8) then the JC-E `SignalSaveBase` (MaxProcesses × `SignalSaveStride`=100) sit just below TotalSize.
+> ✅ **Re-synced to `os-facts` on 2026-07-10** (ProcessEntrySize=208 era). The `os-facts` skill (`dotnet run --project .claude/skills/os-facts/dump -- layout`) remains the authority — if a row here ever disagrees, os-facts wins. Confirmed anchors: `ProcessEntrySize=208`, `DataBase=24576`, `TotalSize=37860` (abs) / `+13284` (DataBase-relative), `SignalSaveBase=+12484`, `CodeBase=92`, `IvtSlotCount=23`. JC-B/D region `JobCtlBase` (KillSig @0, KillSaveIndex @4, KillNoDeliver @8) then the JC-E `SignalSaveBase` (MaxProcesses × `SignalSaveStride`=100) sit just below TotalSize.
 
 ### Header
 
@@ -181,29 +181,31 @@ Slots 5+6 both point to the same `EmitBlock` routine; slot 5 is also used for Ke
 
 | Region | Offset from DataBase | Size |
 |--------|------|------|
-| BuddyBitmapOffset | +1584 | 32 bytes (BuddyBitmapWords=8 × 4) |
-| PrivilegedStackOffset | +1616 | 64 bytes |
-| PrivilegedStackTop / PageTableBase | +1680 | PageTableRegionSize=4096 (8 procs × **128** pages × 4 bytes) — doubled in Phase 2 |
-| FrameTableBase | +5776 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
-| FramePoolBase | +5904 | FramePoolSize=1024 (4 frames × PageSize=256) |
-| ZeroPageBase | +6928 | 256 bytes (always-zero DWRITE source) |
-| SwapScratchBase | +7184 | 256 bytes (fork slot-copy transfer buffer) |
-| CowPartnerBase | +7440 | 32 bytes (8 procs × 4 bytes each) |
-| CacheClockOffset / FlushTimer / Result | +7472 / +7476 / +7480 | 3 × 4 (cache header) |
-| CacheSlotTableBase | +7484 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
-| FsResultOffset | +11072 | 4 (IvtFsOp return slot) |
-| FsScratchBase | +11076 | 40 (FsScratchWords=10: Name/Hash/Type/First/Dir/EntryBlock/FreeBlock/ArgA/ArgB + spare) |
-| FsPathBase | +11116 | FsPathPos/Dir/Last (+0/+4/+8) then FsPathComponentBase (+12, NameMaxChars words) |
-| OftBase | +11176 | OftRegionSize=192 (MaxOpenFiles=8 × OftEntryBytes=24: inUse/firstBlock/offset/size/dirBlock/entryOffset) |
-| FsOpenBase | +11368 | 32 (fs_open_core spill scratch: absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset) |
-| FsRwBase | +11400 | 48 (FsRwWords=12: fs_read_core/fs_write_core spill: Fd/Buf/Count/Proc/Oft/CurBlock/Remaining/CharInBlock/BufPtr/Copied/Counter + spare) |
-| PageXlateBase | +11448 | 8 (PageXlateWords=2: user_word_addr spill: Offset/Page across ensure_user_page) — Phase 3 |
-| EnsureUserPageBase | +11456 | 8 (EnsureUserPageWords=2: C#↔ISA handoff for IvtEnsureUserPage: IsWrite/Result) — Phase 3 |
-| FsWrapBase | +11464 | 24 (FsWrapWords=6: fsy_read/fsy_write page-chunk loop: Fd/Ptr/Remaining/Copied/IsWrite/Chunk) — Phase 3 |
-| FsArgvBase | +11488 | 524 (FsArgvWords=131: exec argv staging — Shell §2. Cursor/Argc/StrOff/SrcPtr/I bookkeeping + FsArgvCmd (FsArgvCmdWords=63, captured command line) + FsArgvTokenBuf (63, one extracted token). `fsy_exec` captures the whole command line here via `user_word_addr` before teardown; `exec_next_token`/`exec_build_argv` tokenize it) |
-| InstallPathBase | +12012 | 80 (InstallPathWords=20: LoadProcess FS-install path staging "/bin/p<seq>") — Phase 4 |
-| InstallBufBase | +12092 | 252 (InstallBufWords=CharsPerBlock=63: one-block chunk buffer for the FS install write) — Phase 4 |
-| **TotalSize** | **+12408** (= 36984 abs, with DataBase 24576) | — |
+| BuddyBitmapOffset | +1712 | 32 bytes (BuddyBitmapWords=8 × 4) |
+| PrivilegedStackOffset | +1744 | 64 bytes |
+| PrivilegedStackTop / PageTableBase | +1808 | PageTableRegionSize=4096 (8 procs × **128** pages × 4 bytes) — doubled in Phase 2 |
+| FrameTableBase | +5904 | FrameTableSize=128 (FrameCount=4 × 32 bytes each) |
+| FramePoolBase | +6032 | FramePoolSize=1024 (4 frames × PageSize=256) |
+| ZeroPageBase | +7056 | 256 bytes (always-zero DWRITE source) |
+| SwapScratchBase | +7312 | 256 bytes (fork slot-copy transfer buffer) |
+| CowPartnerBase | +7568 | 32 bytes (8 procs × 4 bytes each) |
+| CacheClockOffset / FlushTimer / Result | +7600 / +7604 / +7608 | 3 × 4 (cache header) |
+| CacheSlotTableBase | +7612 | CacheRegionSize=3588 (CacheSlotCount=13 × CacheSlotSize=276) |
+| FsResultOffset | +11200 | 4 (IvtFsOp return slot) |
+| FsScratchBase | +11204 | 40 (FsScratchWords=10: Name/Hash/Type/First/Dir/EntryBlock/FreeBlock/ArgA/ArgB + spare) |
+| FsPathBase | +11244 | FsPathPos/Dir/Last (+0/+4/+8) then FsPathComponentBase (+12, NameMaxChars words) |
+| OftBase | +11304 | OftRegionSize=192 (MaxOpenFiles=8 × OftEntryBytes=24: inUse/firstBlock/offset/size/dirBlock/entryOffset) |
+| FsOpenBase | +11496 | 32 (fs_open_core spill scratch: absPath/flags/proc/entryAddr/first/size/dirBlock/entryOffset) |
+| FsRwBase | +11528 | 48 (FsRwWords=12: fs_read_core/fs_write_core spill: Fd/Buf/Count/Proc/Oft/CurBlock/Remaining/CharInBlock/BufPtr/Copied/Counter + spare) |
+| PageXlateBase | +11576 | 8 (PageXlateWords=2: user_word_addr spill: Offset/Page across ensure_user_page) — Phase 3 |
+| EnsureUserPageBase | +11584 | 8 (EnsureUserPageWords=2: C#↔ISA handoff for IvtEnsureUserPage: IsWrite/Result) — Phase 3 |
+| FsWrapBase | +11592 | 24 (FsWrapWords=6: fsy_read/fsy_write page-chunk loop: Fd/Ptr/Remaining/Copied/IsWrite/Chunk) — Phase 3 |
+| FsArgvBase | +11616 | 524 (FsArgvWords=131: exec argv staging — Shell §2. Cursor/Argc/StrOff/SrcPtr/I bookkeeping + FsArgvCmd (FsArgvCmdWords=63, captured command line) + FsArgvTokenBuf (63, one extracted token). `fsy_exec` captures the whole command line here via `user_word_addr` before teardown; `exec_next_token`/`exec_build_argv` tokenize it) |
+| InstallPathBase | +12140 | 80 (InstallPathWords=20: LoadProcess FS-install path staging "/bin/p<seq>") — Phase 4 |
+| InstallBufBase | +12220 | 252 (InstallBufWords=CharsPerBlock=63: one-block chunk buffer for the FS install write) — Phase 4 |
+| JobCtlBase | +12472 | 12 (JobCtlWords=3: KillSig @+0, KillSaveIndex @+4, KillNoDeliver @+8) — JC-B/D |
+| SignalSaveBase | +12484 | 800 (SignalSaveSize = MaxProcesses=8 × SignalSaveStride=100; per-proc regfile+Level snapshot) — JC-E |
+| **TotalSize** | **+13284** (= 37860 abs, with DataBase 24576) | — |
 
 **Shell §2 argv (exec-by-path with arguments):** `FSYS` syscall 4 (`FsysExec`) now takes `EBX` = a whole command-line pointer (word-per-char, null-terminated). `fs_exec_core` tokenizes it (split on space, via `exec_next_token`): token0 is the program path (resolved as before); the remaining tokens become `argv`. On exec the program region is grown by `ArgvReserveBytes=512` (RAM-home reservation appended after the loaded image, virtual base = `newLen`); `exec_build_argv` writes the `argv[]` pointer array + the arg strings there, and the new program starts with **`EAX = argc`, `EBX = argv base (virtual)`**. `argv[k]` is a virtual pointer to a null-terminated word-per-char string; `argv[0]` = the command as typed. Programs that ignore args ignore EBX. (Also: `fsy_readdir` now writes its out buffer page-correctly via `user_word_addr` — a flat write went stale once the buffer's page was resident, breaking `/bin/ls`.)
 
@@ -522,6 +524,7 @@ Inline work token counts are estimates; fork/agent counts come from the task not
 | 2026-07-09 | §4.2a `/bin/as` debug cycle → GREEN (was written-but-never-run) | ~8K (inline) | Ran `FsAssemblerTests` (6, not the "7" memory claimed): all failed with one build-time assert `as: mnemonic table (2448 B) overruns its slot`. Cause: embedded mnemonic-table slot in `Programs.As()` = `RegTbl-MnemTbl` = 2432 B but the image is 51 records × 48 = 2448. Fix = `RegTbl` 6528→6592 (mnem slot 2496 = 1-record headroom; reg slot stays ≥800; range [6544,6624] so `Src`/image size unchanged → no downstream shift, no paging change). None of the feared ISA-clobber/paging-thrash bugs appeared (suite 764 ms). 714 tests green. Still TODO: wire /bin/as into RunShell (§4.4). |
 | 2026-07-09 | §4.2b `/bin/as` full non-branch opcode coverage | ~6K (inline) | Only gap was the **RegRegReg** shape (DREAD/DWRITE) — everything else (None/Reg/RegReg/Mov + imm8/imm16 + R8–R15) was already covered by §4.2a (there are no standalone RegImm8/16 mnemonics; MOV reaches immediates; high registers resolve via the table scan). Added an `as_regregreg` block (3× NeedToken/NeedReg → B1C/B2C/B3C; emit already packs b3<<24) + a dispatch branch. New golden-compare test (also exercises two-digit reg R15). 715 tests. Only Addr16 (JMP/JZ/JNZ/CALL/JS/JNS) remains → §4.2c labels/branches (the two-pass increment). |
 | 2026-07-09 | §4.2c `/bin/as` labels + branches (two-pass) — **`/bin/as` COMPLETE** | ~20K (inline) | The plan's "most complex ISA yet" — passed first run, no debug tax. Added a two-pass assembler: **pass 1** scans `Src` building a label→byte-offset table (`LabelTbl`, fixed-width 52-B records inside the image so it's RAM-home + zero-terminated), **pass 2** = the existing emit loop, now skipping labels and resolving Addr16 operands via a new `as_addr` handler. New subs `il` (detects a trailing `:`, strips it → the null-term name; makes own-line **and** inline `label:` work identically since both passes classify lines with the same `il`+`nt`) and `ll` (label lookup, reuses `se`, zero-name terminator like `ml`/`rl`). Golden packing confirmed vs C# `Assembler.Build`: `b1=(off>>8)&255, b2=off&255, b3=0`. New memory-map cells `LabelCount/Pc/LabelTbl` (`ImageEnd` now computed). 5 new tests (backward+forward branch golden compare, assemble-and-run loop→[1,2,3], CALL/RET sub→[6], undefined-label→no output). 720 tests. **Why it was clean:** reused `se`, kept all state in memory across CALLs, symmetric pass-1/pass-2 line classification. Next = §4.4 (wire /bin/as into RunShell + demo + docs). |
+| 2026-07-10 | Full docs-consistency pass + auto-shell scripted-input demos (visualizer) | ~55K (inline) | **Docs:** fixed opcode count 49→52 (README ×2, ISA.md — table was complete, header undercounted), test count 616/52→721/64 + 12 missing test-file rows (OSTests/CLAUDE.md), **re-synced the root CLAUDE.md OsLayout table** (was +128 stale from the ProcessEntrySize 192→208 growth; now matches os-facts + OS-Architecture.md, added JobCtlBase/SignalSaveBase rows), BasicOSPlugin/CLAUDE.md IVT 20→23 slots/80→92 + CodeBase 80→92 + OsMemorySize 32300→37860, README/Visualizer-Guide toolchain + demo-count updates. OS-Architecture.md was already current. **Feature:** `SpectreDashboard.SetAutoInputScript`/`DriveAutoScript`/`RunScriptedHeadless` — scripted shell input injected only when a process is Blocked on `WaitReason.StringInput` (the INS prompt), frame-gap paced (not instruction-based — shell runs no instrs while blocked); Program.cs modes 14 (auto tour) + 15 (auto job-control/process-tree), `RunShell(…, autoScript)`. 1 headless test (`ShellTests.AutoShell_ScriptedInput`). 721 tests. Branch merged to master (GitHub rebase → 31d5c81). |
 | 2026-07-09 | §4.4 wire `/bin/as` into the shell + docs — **§4 write→compile→run COMPLETE** | ~15K (inline) | `RunShell` now installs `/bin/as` + `/bin/edit` + a bundled `/hello.s` sample source; shell hints advertise the toolchain. **No new end-to-end test** (assemble+run is already covered by `FsAssemblerTests` through a live scheduler, and the shell's fork/exec path is separately tested — `/bin/as` is just another program to the shell; a shell-driven test would be redundant + slow + flaky, since `ResolveFirstBlock` runs an OS routine synchronously and is **unsafe to poll mid-run**). Instead extended `ShellTests.Shell_InVisualizerSetup` to install `/bin/as`+`/bin/edit` and assert both appear in the reconstructed disk tree (the memory-pressure regression that test exists for). Docs: new `docs/Toolchain.md` (asm text format + /bin/edit + /bin/as + coverage/errors/limits + worked example), README docs-table link, Visualizer-Guide §4.8 walkthrough + setup/argv updates, console `CLAUDE.md` As jump-table row + RunShell notes. 720 tests. |
 
 **Red flag:** any single planning/implementation task exceeding ~50K tokens — investigate what was being re-scanned and add it to CLAUDE.md or markers.
