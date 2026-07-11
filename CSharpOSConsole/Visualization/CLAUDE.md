@@ -48,7 +48,9 @@ Key data the bridge maintains and renderers read:
 
 Section markers name their own methods — **Grep `// ===== <text>` to jump** (drift-proof); the `:N`
 line numbers below are a convenience, last synced 2026-07-05. `BuildScreen` gained **canvas mode** (§3):
-if the latest OUTS string contains `\n`, it shows that frame alone (2D block) instead of the joined log.
+if the latest OUTS string contains `\n`, it shows that frame alone (2D block); otherwise it shows the
+last `ScreenLines` output entries **one per line** (terminal scrollback — each shell command echo + each
+OUT/OUTS on its own row), not joined onto a single row.
 
 | Section | Line |
 |---------|------|
@@ -84,8 +86,16 @@ SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delay
 ```
 
 ### Focus Model
-- `EnsureFocus()` — auto-focuses first live process; advances on terminate
-- Tab → `CycleFocus()` → next live process
+- The Screen panel follows the **OS-designated foreground** process. The shell hands the terminal to a foreground child (e.g. `/bin/snake`) via `SETFOCUS`, which sets the hardware's active process; `EnsureFocus()` detects that (hw active process diverging from what the dashboard last set) and adopts it — so a foreground job's output shows **without a keypress**. (Before this, focus only advanced on terminate, so a foreground child never appeared while the shell parent stayed live in `WAIT`.)
+- Tab → `CycleFocus()` → next live process, and installs a **manual override** (`manualFocus`) so the panel stays on the inspected process while a foreground job keeps running. The override lapses when its process dies, when the user Tabs back to the foreground, or when the OS moves the foreground (next `SETFOCUS`).
+- `SetFocus(index)` points both `model.FocusedProcess` (Screen) and `hw.SetActiveProcess` (keyboard routing) at the same process, and records `lastSeenActive` so a dashboard-initiated change isn't misread as OS-driven.
+- **Input echo:** `SubmitInput`/`SubmitStringInput` call `EchoInput(text)` → `model.RecordOutput(hw.GetActiveProcess(), text)` so a typed command/number stays in the scrollback above the fresh prompt after Enter (IN/INS deliver input to the process without echoing it, unlike a real tty). Echoes to the process the input is routed to (= the focused one). Covers both the live keyboard and the auto-script paths.
+
+### Run pacing (frame-pace for full-screen programs)
+Auto-run normally advances `renderStride` **user instructions** per tick (paced by `InteractionController.DelayMs`). A full-screen program (e.g. `/bin/snake`) redraws the whole screen with ~1–2k instructions per frame, so per-instruction pacing makes one frame take *minutes*. `SpectreDashboard.ShouldFramePace(focusedProcess, focusedReady, focusedOutput)` (pure, public test seam) detects this — the focused process is **Ready** (gating on Ready, not "some process running", stops a just-terminated process from spinning the burst) and its latest output is a multi-line "canvas" frame, or it is Ready with no output yet (prime the first frame) — and the loop switches to `RunFocusedFrame()`: run the emulator flat out until the focused process emits its **next output (frame)** / blocks / hits `FramePaceInstrCap`, then a fixed `FramePaceExtraMs`(55) pause, so **one tick = one frame** (paced by `DelayMs`+extra → ~6.5fps at 100ms, steerable; the fixed extra also steadies the rate against per-frame paging variance). Speed keys `+`/`-` still apply. Verified: snake advances exactly one frame per tick and steers.
+
+### Process names
+Panels label a process via `PlainTextRenderer.ProcessLabel(row, disk)`: OS-registered name (`row.Path` = `NameForBase`, e.g. the boot shell's `Process.DisplayName` "shell") → else the program file resolved from `row.FirstBlock` (`ProcessEntryFirstBlock`, set on spawn/exec) via `FsDiskView.NameByFirstBlock(model.DiskView)` (e.g. exec'd `/bin/snake` → "snake") → else `pN`. This is why forked/exec'd processes show a real program name instead of "(none)". `BuddyHeapView.ProcessRow` carries `FirstBlock`; pass the frame's `DiskView` into the static tree/queue renderers.
 - Dashboard drives `hw.RaiseOutputComplete(e.Device)` on each ProgramOutput event (replaces retired ProcessIoRouter)
 
 ### Key Bindings (InteractionController)
@@ -93,6 +103,7 @@ SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delay
 |-----|--------|
 | `a` | Auto-run mode |
 | `s` | Single step |
+| `+` / `-` | Faster / slower auto-run (speed ladder 0/turbo…800ms; `InteractionController.DelayMs`) |
 | `→` (Right) | Step forward (live edge) or advance in history |
 | `←` (Left) | Scrub back in history (replay, not reverse execution) |
 | `Tab` | Cycle focus to next live process |

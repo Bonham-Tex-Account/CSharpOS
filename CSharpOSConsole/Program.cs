@@ -331,6 +331,7 @@ void RunShell(VisualizerMode mode, DetailLevel detail, IReadOnlyList<string>? au
         Console.WriteLine("  Shell: focus it (Tab), type an absolute command + Enter (it forks/execs, then re-prompts):");
         Console.WriteLine("    /bin/help   /bin/ls /   /bin/echo hi there   /bin/cat /note   /bin/counter   /bin/snake");
         Console.WriteLine("    (snake: arrow keys steer, 'q' quits; Ctrl-C kills the foreground job, /bin/snake & backgrounds)");
+        Console.WriteLine("    (run speed: '+' faster / '-' slower — a full-screen program like snake auto-paces one frame per tick)");
         Console.WriteLine("  Write -> compile -> run, all inside the OS:");
         Console.WriteLine("    /bin/as /hello.s /bin/hi   then   /bin/hi          (assemble the bundled sample, then run it)");
         Console.WriteLine("    /bin/edit /prog.s   (type asm lines, end with a lone \".\")   /bin/as /prog.s /bin/prog   /bin/prog");
@@ -355,7 +356,9 @@ void RunShell(VisualizerMode mode, DetailLevel detail, IReadOnlyList<string>? au
     // The shell needs enough memory for the largest program it execs into: exec preserves the
     // process's RequiredMemory, so /bin/snake (grid + render buffer in DATA at ~2–3.4 KB) inherits
     // this. 4096 gives it room; the shell's own DATA (LineBuf/jobs table) fits easily.
-    os.LoadProcess(new Process(shellSlot, 4096, RequiredStackSize));
+    Process shellProcess = new Process(shellSlot, 4096, RequiredStackSize);
+    shellProcess.DisplayName = "shell";   // so the process panels label P0 as "shell", not "slot N"
+    os.LoadProcess(shellProcess);
     dashboard.Run();
 
     Console.WriteLine();

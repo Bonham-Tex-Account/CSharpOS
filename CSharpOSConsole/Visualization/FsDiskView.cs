@@ -119,6 +119,33 @@ public static class FsDiskView
         };
     }
 
+    /// <summary>
+    /// Maps each file's first block to its name, so a process (which records its program file's
+    /// first block in <see cref="Hardware.ProcessEntryFirstBlock"/> on spawn/exec) can be labelled
+    /// with the program it is actually running — e.g. an exec'd "/bin/snake" → "snake".
+    /// </summary>
+    public static Dictionary<int, string> NameByFirstBlock(Snapshot? snapshot)
+    {
+        Dictionary<int, string> map = new Dictionary<int, string>();
+        if (snapshot != null)
+        {
+            CollectNames(snapshot.Root, map);
+        }
+        return map;
+    }
+
+    private static void CollectNames(DiskNode node, Dictionary<int, string> map)
+    {
+        if (!node.IsDir && node.FirstBlock >= 0 && !map.ContainsKey(node.FirstBlock))
+        {
+            map[node.FirstBlock] = node.Name;
+        }
+        foreach (DiskNode child in node.Children)
+        {
+            CollectNames(child, map);
+        }
+    }
+
     /// <summary>Depth-first flatten of the tree for indented rendering (root first).</summary>
     public static List<TreeRow> FlattenTree(Snapshot? snapshot)
     {

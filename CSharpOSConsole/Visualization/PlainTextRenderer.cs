@@ -132,7 +132,7 @@ public sealed class PlainTextRenderer : IVisualizerRenderer
             $"      +- process table ({count} slot{plural}, current={model.CurrentIndex}) -");
         foreach (BuddyHeapView.ProcessRow row in model.ProcessTable)
         {
-            string name = FriendlyName(row.Path);
+            string name = ProcessLabel(row, model.DiskView);
             string marker = " ";
             if (row.Index == model.CurrentIndex)
             {
@@ -179,6 +179,30 @@ public sealed class PlainTextRenderer : IVisualizerRenderer
             return "(none)";
         }
         return Path.GetFileNameWithoutExtension(path);
+    }
+
+    /// <summary>
+    /// The display name for a process row. Prefers the OS-registered name (boot programs, e.g.
+    /// "shell"); for a forked/exec'd process — which has no registered name — resolves the program
+    /// it is running from its FS first block via the disk snapshot (e.g. an exec'd "/bin/snake" →
+    /// "snake"); falls back to a "pN" slot label. This is what turns the process panels from bare
+    /// numbers into program names.
+    /// </summary>
+    public static string ProcessLabel(BuddyHeapView.ProcessRow row, FsDiskView.Snapshot? disk)
+    {
+        if (!string.IsNullOrEmpty(row.Path))
+        {
+            return FriendlyName(row.Path);
+        }
+        if (disk != null && row.FirstBlock >= 0)
+        {
+            Dictionary<int, string> names = FsDiskView.NameByFirstBlock(disk);
+            if (names.TryGetValue(row.FirstBlock, out string? name))
+            {
+                return name;
+            }
+        }
+        return "p" + row.Index;
     }
 
     private void SetColor(ConsoleColor color)

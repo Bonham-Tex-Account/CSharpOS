@@ -52,6 +52,18 @@ public sealed class SpectreDashboard
     // Public so the headless render seam can exercise the disk panel without a keyboard.
     public bool ShowDisk { get; set; }
 
+    // The Screen panel follows the OS-designated foreground process. The shell hands the
+    // terminal to a foreground child (e.g. /bin/snake) via SETFOCUS, which sets the hardware's
+    // active process; the dashboard adopts that automatically so the child's output shows.
+    // `lastSeenActive` lets EnsureFocus spot an OS-driven foreground change (the hardware active
+    // process diverging from the value the dashboard itself last set). `osForeground` tracks the
+    // current effective foreground so Tab can tell when the user has cycled back to it. Tab
+    // installs `manualFocus`, a manual-inspection override that sticks until the inspected
+    // process dies, the user Tabs back to the foreground, or the OS moves the foreground.
+    private int lastSeenActive = -1;
+    private int osForeground = -1;
+    private bool manualFocus;
+
     public SpectreDashboard(Hardware hw, OperatingSystem os, VisualizerMode mode, int delayMs,
         DetailLevel detail = DetailLevel.High, bool showProgramIo = false)
     {
@@ -111,13 +123,29 @@ public sealed class SpectreDashboard
     // path, which RaiseInputInterrupt routes to the focused process's device).
     private void SubmitInput(int value)
     {
+        EchoInput(value.ToString());
         hw.RaiseInputInterrupt(value);
     }
 
     // Submits a typed string to the focused process's stdin string buffer.
     private void SubmitStringInput(string value)
     {
+        EchoInput(value);
         hw.RaiseStringInputInterrupt(value);
+    }
+
+    // Echoes submitted input into the receiving process's screen buffer, so a typed command or
+    // number stays visible in the scrollback above the fresh prompt after Enter — a real terminal
+    // echoes what you type, but IN/INS deliver the input to the process without echoing it. Targets
+    // the hardware's active process (where RaiseInput/StringInputInterrupt routes the input), which
+    // is also what the Screen panel focuses, so the echo lands in the buffer the panel shows.
+    private void EchoInput(string text)
+    {
+        int target = hw.GetActiveProcess();
+        if (target >= 0)
+        {
+            model.RecordOutput(target, text);
+        }
     }
 
     /// <summary>
@@ -218,40 +246,79 @@ public sealed class SpectreDashboard
         hw.RaiseKeyInterrupt(keyCode);
     }
 
-    // Tab: move focus to the next live process (wrapping).
+    // Tab: move focus to the next live process (wrapping). Cycling to a process other than the
+    // foreground installs a manual override, so the panel stays on the inspected process while a
+    // foreground job keeps running; cycling back to the foreground clears it.
     private void CycleFocus()
     {
         List<int> live = LiveProcessIndices();
         if (live.Count == 0)
         {
+            manualFocus = false;
             SetFocus(-1);
             return;
         }
         int position = live.IndexOf(model.FocusedProcess);
         int next = (position + 1) % live.Count;
         SetFocus(live[next]);
+        manualFocus = (live[next] != osForeground);
     }
 
-    // Keeps focus on a live process: if nothing is focused, or the focused process has
-    // terminated, focus the lowest-index live process (or none when all are gone).
+    // Keeps the Screen panel on the foreground process. Normally that is the OS-designated
+    // foreground (the shell's SETFOCUS to a foreground child sets the hardware's active process,
+    // which we adopt) — so launching /bin/snake shows its grid without a keypress. A manual Tab
+    // override wins until its process dies, the user cycles back, or the OS moves the foreground.
     private void EnsureFocus()
     {
         List<int> live = LiveProcessIndices();
         if (live.Count == 0)
         {
+            manualFocus = false;
+            osForeground = -1;
             SetFocus(-1);
             return;
         }
-        if (!live.Contains(model.FocusedProcess))
+
+        // An OS-driven foreground change shows up as the hardware's active process diverging from
+        // the value the dashboard last set (SetFocus keeps lastSeenActive in sync, so only the OS
+        // can cause a divergence). Adopt it and drop any manual override so the new foreground —
+        // e.g. a just-launched foreground job — becomes visible automatically.
+        int active = hw.GetActiveProcess();
+        if (active != lastSeenActive)
         {
-            SetFocus(live[0]);
+            lastSeenActive = active;
+            osForeground = active;
+            manualFocus = false;
+        }
+
+        // A manual (Tab) override lapses once its process is gone.
+        if (manualFocus && !live.Contains(model.FocusedProcess))
+        {
+            manualFocus = false;
+        }
+        if (manualFocus)
+        {
+            return;
+        }
+
+        // Follow the foreground if it is live, else fall back to the lowest-index live process.
+        int target = (osForeground >= 0 && live.Contains(osForeground)) ? osForeground : live[0];
+        osForeground = target;
+        if (model.FocusedProcess != target)
+        {
+            SetFocus(target);
         }
     }
 
+    // Low-level focus setter: points both the Screen panel (model.FocusedProcess) and the
+    // hardware's active process (keyboard routing) at the same process, and records it as
+    // lastSeenActive so EnsureFocus does not mistake this dashboard-initiated change for an
+    // OS-driven one.
     private void SetFocus(int index)
     {
         model.FocusedProcess = index;
         hw.SetActiveProcess(index);
+        lastSeenActive = index;
     }
 
     private List<int> LiveProcessIndices()
@@ -329,27 +396,41 @@ public sealed class SpectreDashboard
                     {
                         if (os.HasProcesses)
                         {
-                            // Only user/kernel instructions count toward the stride; OS
-                            // (Privileged-mode) instructions run at full speed in the inner loop.
-                            // Without this, a 70-instruction context-switch routine would charge
-                            // the 100ms NextAction delay 70 times = ~7-second freeze per switch.
-                            // osGuard caps the spin when all processes are blocked on I/O.
-                            int stepsToRun = interaction.Paused ? 1 : renderStride;
-                            int userSteps = 0;
-                            int osGuard = 0;
-                            while (userSteps < stepsToRun && os.HasProcesses && osGuard < 10000)
+                            if (!interaction.Paused && ShouldFramePace())
                             {
-                                int before = model.InstructionCount;
-                                hw.Run();
-                                if (model.InstructionCount > before)
+                                // Full-screen program (e.g. snake): run flat out to its next frame,
+                                // so one auto-run tick = one frame, paced by the delay — not one
+                                // instruction per tick (which makes a ~1-2k-instruction frame crawl).
+                                RunFocusedFrame();
+                                // A small extra, fixed pause per frame: makes a game run a touch
+                                // slower than the raw step delay (comfortable default) and, because it
+                                // dominates the variable per-frame compute/paging time, steadier.
+                                Thread.Sleep(FramePaceExtraMs);
+                            }
+                            else
+                            {
+                                // Only user/kernel instructions count toward the stride; OS
+                                // (Privileged-mode) instructions run at full speed in the inner loop.
+                                // Without this, a 70-instruction context-switch routine would charge
+                                // the 100ms NextAction delay 70 times = ~7-second freeze per switch.
+                                // osGuard caps the spin when all processes are blocked on I/O.
+                                int stepsToRun = interaction.Paused ? 1 : renderStride;
+                                int userSteps = 0;
+                                int osGuard = 0;
+                                while (userSteps < stepsToRun && os.HasProcesses && osGuard < 10000)
                                 {
-                                    frames.Capture(model);
-                                    userSteps++;
-                                    osGuard = 0;
-                                }
-                                else
-                                {
-                                    osGuard++;
+                                    int before = model.InstructionCount;
+                                    hw.Run();
+                                    if (model.InstructionCount > before)
+                                    {
+                                        frames.Capture(model);
+                                        userSteps++;
+                                        osGuard = 0;
+                                    }
+                                    else
+                                    {
+                                        osGuard++;
+                                    }
                                 }
                             }
                             // Yield at the render boundary (not per OS step) when idle.
@@ -389,6 +470,97 @@ public sealed class SpectreDashboard
         {
         }
         RenderSummary(AnsiConsole.Console);
+    }
+
+    // Safety cap on user instructions run while chasing one frame, so a program that never emits
+    // an output (or thrashes) can't spin the frame-pace burst forever.
+    private const int FramePaceInstrCap = 40000;
+
+    // Extra fixed pause (ms) added per frame in frame-paced mode, on top of the auto-run step delay:
+    // makes a game a touch slower than the raw delay and steadier (it dominates the variable per-frame
+    // compute/paging time). Still scaled by '+'/'-' via the underlying step delay.
+    private const int FramePaceExtraMs = 55;
+
+    /// <summary>
+    /// True when the focused process should be paced by FRAME rather than per instruction: it is a
+    /// full-screen program that redraws the whole screen each frame (its latest output is a multi-line
+    /// "canvas" frame), or a freshly-focused running process that has not output yet (so its first
+    /// frame is reached at full speed instead of one-instruction-per-tick). Only consulted in auto-run.
+    /// </summary>
+    private bool ShouldFramePace()
+    {
+        return ShouldFramePace(model.FocusedProcess, FocusedIsReady(), model.FocusedOutput());
+    }
+
+    /// <summary>
+    /// Pure pacing predicate (exposed for headless tests). Frame-pace the focused process when it is
+    /// Ready (schedulable — so a just-terminated or blocked process is NOT frame-paced, which would
+    /// spin the burst) and either its latest output is a multi-line "canvas" frame (a full-screen
+    /// redraw) or it has not output yet (prime its first frame at full speed). Everything else keeps
+    /// per-instruction auto-run pacing.
+    /// </summary>
+    public static bool ShouldFramePace(int focusedProcess, bool focusedReady, IReadOnlyList<string> focusedOutput)
+    {
+        if (focusedProcess < 0 || !focusedReady)
+        {
+            return false;
+        }
+        if (focusedOutput.Count > 0)
+        {
+            return focusedOutput[focusedOutput.Count - 1].Contains('\n');
+        }
+        return true;
+    }
+
+    private bool FocusedIsReady()
+    {
+        foreach (BuddyHeapView.ProcessRow row in model.ProcessTable)
+        {
+            if (row.Index == model.FocusedProcess)
+            {
+                return row.State == ProcessState.Ready;
+            }
+        }
+        return false;
+    }
+
+    // Runs the emulator flat out until the focused process emits its next output (its next frame), or
+    // it stops running (blocks/terminates), or the safety cap — so a full-screen program advances one
+    // frame per auto-run tick (and thus per delay), keeping the game watchable and steerable.
+    private void RunFocusedFrame()
+    {
+        int focused = model.FocusedProcess;
+        int outputsBefore = FocusedOutputCount(focused);
+        int userSteps = 0;
+        int osGuard = 0;
+        while (os.HasProcesses && userSteps < FramePaceInstrCap && osGuard < 10000)
+        {
+            int before = model.InstructionCount;
+            hw.Run();
+            if (model.InstructionCount > before)
+            {
+                frames.Capture(model);
+                userSteps++;
+                osGuard = 0;
+            }
+            else
+            {
+                osGuard++;
+            }
+            if (FocusedOutputCount(focused) > outputsBefore || !os.HasRunningProcess)
+            {
+                break;
+            }
+        }
+    }
+
+    private int FocusedOutputCount(int proc)
+    {
+        if (proc >= 0 && model.OutputBuffers.TryGetValue(proc, out List<string>? buffer))
+        {
+            return buffer.Count;
+        }
+        return 0;
     }
 
     private void InjectPendingLoads()
@@ -658,7 +830,7 @@ public sealed class SpectreDashboard
             {
                 marker = "[aqua]▶[/]";
             }
-            string name = Markup.Escape(PlainTextRenderer.FriendlyName(row.Path));
+            string name = Markup.Escape(PlainTextRenderer.ProcessLabel(row, frame.DiskView));
             string state = StateMarkup(row);
             table.AddRow(
                 new Markup($"{marker}{row.Index}"),
@@ -704,7 +876,7 @@ public sealed class SpectreDashboard
             {
                 if (row.State == ProcessState.Ready && row.Priority == level)
                 {
-                    names.Add(PlainTextRenderer.FriendlyName(row.Path));
+                    names.Add(PlainTextRenderer.ProcessLabel(row, frame.DiskView));
                 }
             }
             string joined = "·";
@@ -889,7 +1061,7 @@ public sealed class SpectreDashboard
         {
             if (row.ParentPid == -1 || !byPid.ContainsKey(row.ParentPid))
             {
-                RenderTreeNode(row, frame.ProcessTable, "", true, lines);
+                RenderTreeNode(row, frame.ProcessTable, frame.DiskView, "", true, lines);
             }
         }
         return new Rows(lines);
@@ -898,11 +1070,12 @@ public sealed class SpectreDashboard
     private static void RenderTreeNode(
         BuddyHeapView.ProcessRow row,
         IReadOnlyList<BuddyHeapView.ProcessRow> allRows,
+        FsDiskView.Snapshot? disk,
         string prefix,
         bool isRoot,
         List<IRenderable> lines)
     {
-        string name = Markup.Escape(PlainTextRenderer.FriendlyName(row.Path));
+        string name = Markup.Escape(PlainTextRenderer.ProcessLabel(row, disk));
         string nodePrefix = isRoot ? "[aqua]◉[/] " : $"{prefix}[grey]└─[/] ";
         lines.Add(new Markup($"{nodePrefix}[white]{name}[/][grey]({row.Pid})[/] {StateMarkup(row)}"));
 
@@ -911,7 +1084,7 @@ public sealed class SpectreDashboard
         {
             if (child.ParentPid == row.Pid)
             {
-                RenderTreeNode(child, allRows, childPrefix, false, lines);
+                RenderTreeNode(child, allRows, disk, childPrefix, false, lines);
             }
         }
     }
@@ -1041,13 +1214,14 @@ public sealed class SpectreDashboard
         }
         else
         {
+            // One entry per line, like a terminal scrollback: each command (echoed on submit) and each
+            // OUT/OUTS the process emits gets its own line, rather than being joined onto one row. Shows
+            // the last ScreenLines entries so the newest stay visible above the input line.
             int skip = Math.Max(0, outputs.Count - ScreenLines);
-            List<string> shown = new List<string>();
             for (int i = skip; i < outputs.Count; i++)
             {
-                shown.Add(outputs[i]);
+                lines.Add(new Markup("[grey85]" + Markup.Escape(outputs[i]) + "[/]"));
             }
-            lines.Add(new Markup("[grey85]" + Markup.Escape(string.Join("  ", shown)) + "[/]"));
         }
 
         lines.Add(new Markup($"[grey]>[/] {Markup.Escape(interaction.InputLine)}"));
@@ -1060,7 +1234,7 @@ public sealed class SpectreDashboard
         {
             if (row.Index == model.FocusedProcess)
             {
-                return PlainTextRenderer.FriendlyName(row.Path);
+                return PlainTextRenderer.ProcessLabel(row, model.DiskView);
             }
         }
         return "?";
@@ -1086,8 +1260,9 @@ public sealed class SpectreDashboard
         }
         string keys = interaction.KeyPassthrough
             ? "[yellow]F1[/] [yellow bold]KEY PASSTHROUGH[/]  all keys → process  [grey](F1 to exit)[/]"
-            : "[grey]a[/] auto  [grey]s[/] step  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]d[/] disk  [grey]q[/] quit  [grey]F1[/] passthrough";
-        return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]perf[/] {detail}   {keys}"))
+            : "[grey]a[/] auto  [grey]s[/] step  [grey]+/-[/] speed  [grey]←/→[/] hist  [grey]Tab[/] focus  [grey]0-9/⏎[/] input  [grey]o[/] I/O  [grey]d[/] disk  [grey]q[/] quit  [grey]F1[/] passthrough";
+        string speed = interaction.DelayMs == 0 ? "turbo" : $"{interaction.DelayMs}ms";
+        return new Panel(new Markup($"{position}   {state}   process [aqua]{Markup.Escape(frame.CurrentProcess)}[/]   [grey]speed[/] {speed}   [grey]perf[/] {detail}   {keys}"))
         {
             Border = BoxBorder.None,
             Expand = true

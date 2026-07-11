@@ -15,6 +15,12 @@ public class Process
     public int InstructionPointer;
     /// <summary>Path of the program image file, or empty for a slot-based process.</summary>
     public string ProgramFilePath;
+    /// <summary>
+    /// Optional friendly name for displays (visualizer process panels). When set it is used
+    /// as the process's name instead of the disk-slot / file-path label — e.g. a slot-based
+    /// program loaded at boot can still show a meaningful name like "shell".
+    /// </summary>
+    public string? DisplayName;
     /// <summary>Base address of the loaded program image in RAM.</summary>
     public int ProgramAddress;
     /// <summary>Length of the program image in bytes.</summary>

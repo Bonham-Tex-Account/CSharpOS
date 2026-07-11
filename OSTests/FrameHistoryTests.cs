@@ -129,6 +129,40 @@ public class FrameHistoryTests
     }
 
     [Fact]
+    public void PlusAndMinus_AdjustAutoRunSpeed_AndClampAtTheLadderEnds()
+    {
+        FrameHistory frames = new FrameHistory();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 100,
+            () => { }, () => { }, value => { });
+
+        Assert.Equal(100, controller.DelayMs);
+        controller.HandleKey(Char('+'));   // faster: one rung toward turbo
+        Assert.Equal(50, controller.DelayMs);
+        controller.HandleKey(Char('-'));   // slower: back a rung
+        Assert.Equal(100, controller.DelayMs);
+
+        // '+' bottoms out at turbo (0) and clamps.
+        for (int i = 0; i < 12; i++) { controller.HandleKey(Char('+')); }
+        Assert.Equal(0, controller.DelayMs);
+
+        // '-' tops out at the slowest rung and clamps.
+        for (int i = 0; i < 20; i++) { controller.HandleKey(Char('-')); }
+        Assert.Equal(800, controller.DelayMs);
+    }
+
+    [Fact]
+    public void SpeedKeys_DoNotFireWhileTypingAnInputLine()
+    {
+        FrameHistory frames = new FrameHistory();
+        InteractionController controller = new InteractionController(frames, interactive: true, delayMs: 100,
+            () => { }, () => { }, value => { });
+
+        controller.HandleKey(Char('7'));   // start an input line
+        controller.HandleKey(Char('-'));   // '-' now extends the input, not a speed change
+        Assert.Equal(100, controller.DelayMs);
+    }
+
+    [Fact]
     public void CtrlC_And_CtrlZ_SendForegroundJobControlSignals()
     {
         // Ctrl-C → SigInt (catchable; JC-E), Ctrl-Z → SigStop, delivered to the foreground process

@@ -287,10 +287,14 @@ public abstract class OperatingSystem : IOperatingSystem
         namesByBase[programAddress] = ProcessName(process, diskSlot);
     }
 
-    // A display name for a process: its program file path, or a disk-slot label when
-    // it was created slot-based (no file path).
+    // A display name for a process: an explicit DisplayName if given, else its program file
+    // path, or a disk-slot label when it was created slot-based (no file path).
     private static string ProcessName(Process process, int diskSlot)
     {
+        if (!string.IsNullOrEmpty(process.DisplayName))
+        {
+            return process.DisplayName;
+        }
         if (string.IsNullOrEmpty(process.ProgramFilePath))
         {
             return $"slot {diskSlot}";

@@ -83,6 +83,47 @@ public class SnakeTests
         Assert.True(sawVertical, "snake should have turned vertical after a Down keypress");
     }
 
+    // Regression: eating food must increment the score, relocate the food, and NOT hang. Before the
+    // place_food fix, StR(RNG, EAX) clobbered EAX with the address before storing, so rng was pinned
+    // to a constant — the food never moved (always the same cell) and eating it looped place_food
+    // forever (it kept retrying the now-occupied fixed cell). Deterministic: seed 12345 places the
+    // first food at (6,0); the snake starts at (4,4) moving right, so turning up column 6 eats it.
+    [Fact]
+    public void Snake_EatingFood_IncrementsScore_MovesTheFood_AndDoesNotHang()
+    {
+        (List<string> frames, Hardware hw, BasicOS os) = LoadSnake();
+
+        HashSet<string> foodPositions = new HashSet<string>();
+        bool ateFood = false;
+        int lastFrameCount = 0;
+        int steps = 0;
+        // Whole game runs in ~300k steps; a place_food hang would never terminate, so the budget
+        // being exhausted with the process still alive is the regression signal.
+        while (os.HasProcesses && steps < 5_000_000)
+        {
+            hw.Run();
+            steps++;
+            if (frames.Count == lastFrameCount)
+            {
+                continue;
+            }
+            lastFrameCount = frames.Count;
+            string f = frames[frames.Count - 1];
+            if (f.Contains("S:001")) { ateFood = true; }
+            string[] rows = f.Split('\n');
+            for (int r = 0; r < rows.Length; r++)
+            {
+                int c = rows[r].IndexOf('*');
+                if (c >= 0) { foodPositions.Add($"{c},{r}"); }
+            }
+            if (frames.Count == 3) { hw.RaiseKeyInterrupt(Hardware.KeyUp); } // turn up column 6 onto the food
+        }
+
+        Assert.False(os.HasProcesses, "snake did not terminate within the step budget (place_food hang?)");
+        Assert.True(ateFood, "the snake should have eaten the food (score reached 1) without hanging");
+        Assert.True(foodPositions.Count >= 2, "the food must move after being eaten (it was pinned before the fix)");
+    }
+
     // Regression: a program that writes a multi-page DATA buffer and OUTS it in a loop generates many
     // context switches. After CacheFlushInterval of them the periodic cache_flush runs; it clobbers
     // ECX, which resume_mlfq uses as its round-robin index. Before the fix this scheduled a garbage

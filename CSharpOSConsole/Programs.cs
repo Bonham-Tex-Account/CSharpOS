@@ -1609,9 +1609,14 @@ public static class Programs
         Ld(RNG, RegisterName.EAX);
         asm.MovImm16(RegisterName.EBX, 25173); asm.Mul(RegisterName.EAX, RegisterName.EBX);
         asm.MovImm16(RegisterName.EBX, 13849); asm.Add(RegisterName.EAX, RegisterName.EBX);
-        StR(RNG, RegisterName.EAX);
-        asm.Mov(RegisterName.EBX, RegisterName.EAX); asm.MovImm(RegisterName.ECX, W - 1); asm.And(RegisterName.EBX, RegisterName.ECX);  // fx = rng & (W-1)
-        asm.Mov(RegisterName.ECX, RegisterName.EAX); asm.MovImm(RegisterName.EDX, 4); asm.Shr(RegisterName.ECX, RegisterName.EDX);
+        // Hold the new rng in R11 across the store: StR clobbers EAX with the address, so both the
+        // saved rng AND the fx/fy derived from it must come from a register StR does not touch —
+        // otherwise rng is pinned to the address constant, the food never moves, and eating it hangs
+        // place_food forever (it keeps retrying the now-occupied fixed cell).
+        asm.Mov(RegisterName.R11, RegisterName.EAX);
+        StR(RNG, RegisterName.R11);
+        asm.Mov(RegisterName.EBX, RegisterName.R11); asm.MovImm(RegisterName.ECX, W - 1); asm.And(RegisterName.EBX, RegisterName.ECX);  // fx = rng & (W-1)
+        asm.Mov(RegisterName.ECX, RegisterName.R11); asm.MovImm(RegisterName.EDX, 4); asm.Shr(RegisterName.ECX, RegisterName.EDX);
         asm.MovImm(RegisterName.EDX, H - 1); asm.And(RegisterName.ECX, RegisterName.EDX);   // fy = (rng>>4) & (H-1)
         asm.Mov(RegisterName.R10, RegisterName.ECX); asm.MovImm(RegisterName.R12, WShift); asm.Shl(RegisterName.R10, RegisterName.R12);
         asm.Add(RegisterName.R10, RegisterName.EBX);

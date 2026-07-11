@@ -32,6 +32,9 @@ public static class BuddyHeapView
         public int ParentPid { get; init; }
         public int ProgramAddress { get; init; }
         public string? Path { get; init; }
+        /// <summary>FS first block of the process's program image (-1 when slot-backed). Lets the
+        /// visualizer resolve a forked/exec'd process to its program file's name via the FS tree.</summary>
+        public int FirstBlock { get; init; }
         public ProcessState State { get; init; }
         public WaitReason Wait { get; init; }
         public int Priority { get; init; }
@@ -132,6 +135,7 @@ public static class BuddyHeapView
                 ParentPid = ReadWord(hw, entry + Hardware.ProcessEntryParentPid),
                 ProgramAddress = programAddress,
                 Path = nameForBase(programAddress),
+                FirstBlock = ReadWord(hw, entry + Hardware.ProcessEntryFirstBlock),
                 State = (ProcessState)ReadWord(hw, entry + Hardware.ProcessEntryState),
                 Wait = (WaitReason)ReadWord(hw, entry + Hardware.ProcessEntryWaitReason),
                 Priority = ReadWord(hw, entry + Hardware.ProcessEntryPriority),

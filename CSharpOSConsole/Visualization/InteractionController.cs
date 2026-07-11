@@ -28,7 +28,11 @@ public sealed class InteractionController
 {
     private readonly FrameHistory frames;
     private readonly bool interactive;
-    private readonly int delayMs;
+    // Auto-run pacing: the per-step delay, adjustable at runtime with '+'/'-'. A ladder of
+    // discrete speeds (ms) from turbo (0) to slow, so the user can speed up to watch a game
+    // (snake) run and slow down to study the instruction stream.
+    private static readonly int[] SpeedLadder = { 0, 2, 5, 10, 25, 50, 100, 200, 400, 800 };
+    private int speedIndex;
     private readonly Action toggleIo;
     private readonly Action cycleFocus;
     private readonly Action<int> submitInput;
@@ -47,7 +51,7 @@ public sealed class InteractionController
     {
         this.frames = frames;
         this.interactive = interactive;
-        this.delayMs = delayMs;
+        this.speedIndex = NearestSpeedIndex(delayMs);
         this.toggleIo = toggleIo;
         this.cycleFocus = cycleFocus;
         this.submitInput = submitInput;
@@ -65,6 +69,46 @@ public sealed class InteractionController
     public bool KeyPassthrough
     {
         get { return keyPassthrough; }
+    }
+
+    /// <summary>The current auto-run per-step delay in milliseconds (0 = turbo).</summary>
+    public int DelayMs
+    {
+        get { return SpeedLadder[speedIndex]; }
+    }
+
+    // Speeds up (less delay) — moves down the ladder toward turbo.
+    private void Faster()
+    {
+        if (speedIndex > 0)
+        {
+            speedIndex--;
+        }
+    }
+
+    // Slows down (more delay) — moves up the ladder.
+    private void Slower()
+    {
+        if (speedIndex < SpeedLadder.Length - 1)
+        {
+            speedIndex++;
+        }
+    }
+
+    private static int NearestSpeedIndex(int delayMs)
+    {
+        int best = 0;
+        int bestDistance = int.MaxValue;
+        for (int i = 0; i < SpeedLadder.Length; i++)
+        {
+            int distance = Math.Abs(SpeedLadder[i] - delayMs);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = i;
+            }
+        }
+        return best;
     }
 
     /// <summary>The digits typed but not yet submitted, shown as the screen's input line.</summary>
@@ -215,6 +259,17 @@ public sealed class InteractionController
                     toggleDisk?.Invoke();
                     return StepAction.Redraw;
                 }
+                // Run-speed control: '+'/'=' faster (toward turbo), '-'/'_' slower.
+                if (key.KeyChar == '+' || key.KeyChar == '=')
+                {
+                    Faster();
+                    return StepAction.Redraw;
+                }
+                if (key.KeyChar == '-' || key.KeyChar == '_')
+                {
+                    Slower();
+                    return StepAction.Redraw;
+                }
                 if (lower == 'q')
                 {
                     return StepAction.Quit;
@@ -245,9 +300,9 @@ public sealed class InteractionController
             return HandleKey(key);
         }
 
-        if (delayMs > 0)
+        if (DelayMs > 0)
         {
-            Thread.Sleep(delayMs);
+            Thread.Sleep(DelayMs);
         }
         if (!Console.IsInputRedirected && Console.KeyAvailable)
         {
