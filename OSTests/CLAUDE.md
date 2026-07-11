@@ -1,6 +1,6 @@
 # OSTests Quick Reference
 
-xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **721 tests across 64 files.**
+xUnit suite for CSharpOS + BasicOSPlugin (references both directly). **737 tests across 65 files.**
 Goal of this file: pick the right test file *without* grepping the whole suite. Find the subsystem
 below, open that file, then grep the `[Fact]`/`[Theory]` method name inside it (names are full
 sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
@@ -65,8 +65,9 @@ sentences, e.g. `Write_ThenReopenAndRead_RoundTripsTheData`).
 | **Trap providers** (IRET only) + CollectTraps reflection | `TrapProviderTests` |
 | **MMU protection faults** (out-of-bounds user access kills the process; size guard) | `MemoryProtectionTests` |
 | **Kernel-mediated user-memory access via paging** (OUTS/INS + FSYS r/w on DATA-region/COW pages; `Hardware.UserToPhysical`, `ensure_user_page`) | `KernelUserMemoryTests` |
-| **Console visualizer / dashboard** | `ConsoleVisualizerTests`, `SpectreDashboardTests` |
-| **Visualizer internals** (history, frames, buddy view, model) | `FrameHistoryTests`, `VisualizerModelTests`, `BuddyHeapViewTests` |
+| **Console visualizer / dashboard** (incl. foreground-follow focus, input echo, one-output-per-line) | `ConsoleVisualizerTests`, `SpectreDashboardTests` |
+| **Process display names in the panels** (DisplayName → FS file by FirstBlock → `pN`) | `ProcessNamingTests` |
+| **Visualizer internals** (history, frames, buddy view, model; frame-pacing predicate + speed ladder live in `FrameHistoryTests`) | `FrameHistoryTests`, `VisualizerModelTests`, `BuddyHeapViewTests` |
 | **Risky edge cases / uninitialised state** | `EdgeCaseTests`, `EdgeCaseScenarioTests` |
 
 ---

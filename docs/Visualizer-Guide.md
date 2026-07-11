@@ -98,15 +98,23 @@ one at a time, only once the shell is back at its prompt — no keyboard needed.
   process table: which blocks are split, free, or owned (labeled by owner). Press **`d`** to
   swap this panel for the **Disk view** (see §6).
 - **Screen** — the focused (foreground) process's output, plus the input line you are typing.
-  Only **one** process is "focused" at a time; **Tab** cycles focus. In **canvas mode** (when
-  the latest output string contains newlines, e.g. snake) this panel shows that single frame
-  in place instead of a scrolling log.
+  Only **one** process is "focused" at a time. Each output entry renders on its **own line**
+  (terminal scrollback), and input you submit is **echoed** into that scrollback, so a typed
+  shell command stays visible above the next prompt. (`IN`/`INS` hand input straight to the
+  process without echoing it, unlike a real tty — the dashboard echoes on the process's behalf.)
+  In **canvas mode** (when the latest output string contains newlines, e.g. snake) this panel
+  shows that single frame in place instead of a scrolling log.
 - **Registers** — EAX, EBX, ECX, EDX, ESI, EDI and the flags. Values that changed since the
   previous step are highlighted. (Only these 6 GP registers are shown.)
 - **Memory-map bar** — a proportional bar of the whole machine memory, colored per owner, so
   you can see fragmentation and reclaim at a glance.
 - **Run stats / status** — instruction count, branch-predictor stats, observational cycles,
-  and the current mode/pacing.
+  and the current mode/pacing (including the current auto-run speed).
+
+Across every panel, processes are labeled by **name**, not just number: the OS-registered name if it
+has one (the boot shell shows as `shell`), otherwise the program file the process is running —
+resolved from its `ProcessEntryFirstBlock` through the filesystem — so a forked-and-exec'd child
+shows as `snake` or `ls` rather than a bare index. `pN` is the last-resort fallback.
 
 ### Key bindings
 
@@ -114,6 +122,7 @@ one at a time, only once the shell is back at its prompt — no keyboard needed.
 |-----|--------|
 | `a` | **Auto-run** — free-run at the pacing delay |
 | `s` | **Single-step** — advance one step per press |
+| `+` / `-` | **Faster / slower** auto-run — a speed ladder from `0` ms (turbo) up to `800` ms per step |
 | `→` | Step forward (at the live edge) / move forward through history |
 | `←` | **Scrub back** through history (replay of past snapshots — *not* reverse execution) |
 | `Tab` | Cycle **focus** to the next live process |
@@ -127,9 +136,21 @@ one at a time, only once the shell is back at its prompt — no keyboard needed.
 | `Ctrl-Z` | tty-style: send **SigStop** to the foreground process (job control) |
 | `q` | Quit the run (back to the menu) |
 
-**Focus model:** the dashboard auto-focuses the first live process and advances focus when
-the focused one terminates. Keyboard input only reaches the *focused* process — this is what
-makes a shell in the foreground receive your keystrokes, and a backgrounded job not.
+**Focus model:** the Screen panel follows the process the **OS** designates as the foreground one.
+When the shell launches a foreground job it hands the terminal over with `SETFOCUS`, and the
+dashboard adopts that — so a foreground `/bin/snake` appears on screen immediately, without you
+pressing anything, even though the shell parent is still alive (blocked in `WAIT`). **Tab** cycles
+focus manually and installs an override, so you can inspect another process while a foreground job
+keeps running; the override lapses when that process dies, when you Tab back, or when the OS next
+moves the foreground. Keyboard input only reaches the focused process — this is what makes a
+foreground shell receive your keystrokes and a backgrounded job not.
+
+**Run pacing:** auto-run normally advances a fixed number of *user instructions* per tick. That is
+the wrong unit for a program that redraws a whole screen every frame (snake spends ~1–2k
+instructions per frame, which at one instruction per tick would take minutes per frame). When the
+focused process is running and emitting canvas frames, the dashboard switches to **frame-pacing**:
+it runs the emulator flat out until that process emits its next frame, then pauses. **One tick =
+one frame** (~6.5 fps at the default speed), and `+`/`-` steer it.
 
 **History scrubbing** replays immutable per-step snapshots (`FrameHistory`); it does not undo
 execution. `←`/`→` move the *view*; the emulator only advances at the live edge.
@@ -320,9 +341,11 @@ Launch from the shell: `/bin/snake` (foreground) or `/bin/snake &` then `fg 1`.
 - **Ctrl-C** kills it, **Ctrl-Z** suspends it — it's a normal foreground job.
 
 The grid is small (8×8) **on purpose**: the grid + render buffer is a 5-page working set and
-the frame pool only has 4 frames, so a larger board thrashes (page eviction on every tick). At
-8×8 it stays responsive-but-slow. Each tick the whole grid is emitted as one newline-containing
-OUTS string, which the Screen panel's **canvas mode** renders in place as a 2D board.
+the frame pool only has 4 frames, so a larger board thrashes (page eviction on every tick). Each
+tick the whole grid is emitted as one newline-containing OUTS string, which the Screen panel's
+**canvas mode** renders in place as a 2D board, and the run loop **frame-paces** it (one dashboard
+tick = one snake frame) so it animates at a playable rate instead of crawling one instruction at a
+time. Use `+`/`-` to speed it up or slow it down.
 
 ---
 
@@ -394,16 +417,26 @@ them honest (they show what the OS actually did):
   `FrameHistory`. To add a command key, extend the controller + wire a callback.
 - **Focus** is a *hardware* concept (`activeProcess`, set by `SETFOCUS` / `Hardware.SetFocus`),
   not an OS-memory field — "which process the keyboard/screen belongs to" is a device concern.
-  The dashboard cycles it (Tab) and auto-advances it on termination.
+  `SpectreDashboard.EnsureFocus()` adopts the hardware's active process whenever it diverges from
+  the value the dashboard itself last set (which means the *OS* moved the foreground), advances on
+  termination, and honors a `manualFocus` override installed by Tab.
 - **`FrameHistory`** is a capped ring of immutable per-step snapshots enabling `←`/`→` replay.
   Safe because the bridge replaces referenced objects rather than mutating them.
 
 ### 7.4 Canvas mode (snake / any 2D output)
 
 `SpectreDashboard.BuildScreen` checks whether the latest OUTS string contains `\n`; if so it
-renders **that single frame** as a 2D block in place, instead of the joined output log. This is
+renders **that single frame** as a 2D block in place, instead of the output log. This is
 what turns snake's whole-grid-per-tick OUTS into an animated board with no special "graphics"
 API — it's just a string with newlines.
+
+The same signal drives pacing. `SpectreDashboard.ShouldFramePace(...)` (a pure predicate, exposed
+as a test seam) is true when the focused process is `Ready` and its latest output is a multi-line
+canvas frame — or it is Ready with no output yet, priming the first frame. The run loop then calls
+`RunFocusedFrame()`, which runs until that process emits its next output, blocks, or hits
+`FramePaceInstrCap`, followed by a fixed `FramePaceExtraMs` pause that steadies the frame rate
+against per-frame paging variance. Gating on `Ready` (rather than "some process is running") is
+what stops a just-terminated program from spinning the burst loop.
 
 ### 7.5 Testing seam (no TTY)
 

@@ -57,10 +57,17 @@ There is one shared Screen panel showing the focused process's I/O; `Tab` switch
 |---|---|
 | `a` | Toggle auto-run (runs continuously) |
 | `s` | Single-step one instruction |
+| `+` / `-` | Speed auto-run up / down (0 ms turbo … 800 ms per step) |
 | `←` / `→` | Scrub backward / forward through recorded history |
 | `o` | Toggle program I/O panel |
-| `Tab` | Switch the focused (foreground) process |
+| `d` | Toggle the middle panel between the buddy tree and the disk (filesystem) view |
+| `Tab` | Switch the focused process (the Screen otherwise follows the OS foreground) |
+| `Ctrl-C` / `Ctrl-Z` | Send SigTerm / SigStop to the foreground process (job control) |
 | `q` | Quit the current run |
+
+Full-screen programs (e.g. `/bin/snake`) are **frame-paced**: when the focused process is redrawing a
+whole screen each frame, the run loop advances one *frame* per tick rather than one instruction, so the
+game animates at a playable rate.
 
 ### Custom OS plugin
 
@@ -166,7 +173,7 @@ The OS occupies a dedicated region below all process memory. At boot, `BasicOSPl
 The data section contains:
 - Process count, current index, MLFQ boost timer
 - Quantum thresholds (4 levels × 4 bytes)
-- Process table (up to 8 entries × 192 bytes each, including an 8-entry file-descriptor table per process)
+- Process table (up to 8 entries × 208 bytes each, including an 8-entry file-descriptor table per process)
 - Buddy allocator bitmap (256-bit compact bitset)
 - Per-process page tables, a shared physical frame pool, and paging/swap/COW bookkeeping (see `docs/OS-Architecture.md`, "Virtual memory and demand paging")
 - A write-back buffer cache, filesystem scratch space, and the open-file table backing the ISA filesystem (see the Filesystem section below)
